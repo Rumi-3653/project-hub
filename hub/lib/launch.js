@@ -8,7 +8,6 @@ const path = require('path');
 const AIS = ['claude', 'codex', 'agy', 'grok'];
 const AI_KEY = { claude: 'claude-code', codex: 'codex', agy: 'agy', grok: 'grok' };
 const AI_LABEL = { claude: 'Claude Code', codex: 'Codex', agy: 'Agy CLI', grok: 'Grok' };
-const AGY_MODEL = Object.freeze({ id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' });
 const API_ENV = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_GENAI_USE_VERTEXAI', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY'];
 const GROK_API_ENV = ['XAI_API_KEY', 'GROK_CODE_XAI_API_KEY'];
 const GROK_AUTH_ENV = ['GROK_AUTH_PATH', 'GROK_AUTH_PROVIDER_COMMAND', 'GROK_AUTH_PROVIDER_LABEL', 'GROK_OIDC_ISSUER', 'GROK_OIDC_CLIENT_ID', 'GROK_DEPLOYMENT_KEY', 'GROK_CLI_CHAT_PROXY_BASE_URL'];
@@ -85,18 +84,25 @@ const MODEL_FLAG = {
   claude: { 'Opus 5.5': 'claude-opus-5-5', 'Fable 5.1': 'claude-fable-5-1' },
   // Codex の /model の一覧（v0.157）に合わせた名前。GPT-6 に Terra は無いので 6terra は GPT-5.6-Terra
   codex: { 'GPT-6.1-Sol': 'gpt-6.1-sol', Astra: 'gpt-6-astra', '6sol': 'gpt-6-sol', '6luna': 'gpt-6-luna', '6terra': 'gpt-5.6-terra' },
-  agy: { [AGY_MODEL.label]: AGY_MODEL.id, [AGY_MODEL.id]: AGY_MODEL.id },
+  agy: {},
 };
 // 設定画面で直した名前（_hub/cli-models.json）。空の文字＝モデルを指定しない（CLI の既定を使う）
 let overrides = { claude: {}, codex: {} };
-let discovered = { claude: {}, codex: {}, grok: {} };
+let discovered = { claude: {}, codex: {}, agy: {}, grok: {} };
+let agyCurrent = [];
 function setOverrides(o) { overrides = { claude: { ...((o && o.claude) || {}) }, codex: { ...((o && o.codex) || {}) } }; }
 function getOverrides() { return overrides; }
 function setDiscoveredModels(catalog) {
-  discovered = { claude: {}, codex: {}, grok: {} };
-  for (const ai of ['claude', 'codex', 'grok']) {
+  discovered = { claude: {}, codex: {}, agy: {}, grok: {} };
+  agyCurrent = catalog.agy?.models || [];
+  for (const ai of AIS) {
     for (const row of catalog[ai]?.known || catalog[ai]?.models || []) discovered[ai][row.label] = row.id;
   }
+}
+function agyModelId(model) {
+  const id = flagFor('agy', model);
+  if (!model || !id || !agyCurrent.some(row => row.id === id)) throw Error(lt('Agy の利用可能なモデルを一覧から選んでください'));
+  return id;
 }
 // 登録済みの呼び名と正式 ID の両方を受け付ける。上書きされた ID は使わない。
 function modelNames(ai) {
@@ -110,13 +116,17 @@ function modelLabel(ai, model) {
 // 画面の呼び名・正式 ID → CLI に渡す名前（無ければ ''）
 function flagFor(ai, model) {
   if (!model) return '';
+  if (ai === 'agy') {
+    const current = agyCurrent.find(row => row.id === model) || agyCurrent.find(row => row.label === model);
+    if (current) return current.id;
+  }
   const names = modelNames(ai), label = modelLabel(ai, model);
   return Object.prototype.hasOwnProperty.call(names, label) ? String(names[label] || '') : '';
 }
 // CLIへ渡す起動設定。実際に応答したモデルの証明とは区別する。
 function startupInfo(ai, model, modelFlag = flagFor(ai, model), fast = false) {
   const oneLine = s => String(s || '').replace(/[\r\n]+/g, ' ');
-  const label = ai === 'agy' && modelFlag === AGY_MODEL.id ? AGY_MODEL.label : modelLabel(ai, model);
+  const label = modelLabel(ai, model);
   const setting = (modelFlag ? `${oneLine(label)}（CLI 引数 ${ai === 'grok' ? '-m' : '--model'} ${oneLine(modelFlag)}）` : lt('モデル指定なし（CLI の既定）')) + (ai === 'codex' && fast === true ? lt('・加速ON（Fast）') : '');
   return lt`【この番の起動】Hub がこの番の起動に指定した設定は ${AI_LABEL[ai] || oneLine(ai)}・${setting}。これは起動設定で、実際に応答したモデルの証明ではない。あなた自身にはモデルを確かめる方法がない。起動設定が依頼の指定と一致している場合は、自分で証明できないことだけを理由に停止しない。モデル名を聞かれたら「起動設定：${setting}。自分では確かめられない」と答える。`;
 }
@@ -124,7 +134,7 @@ const EFFORT_FLAG = {
   claude: { '中': 'medium', '高': 'high', '極高': 'xhigh', 'MAX': 'max', 'Ultra': 'ultra' },
   codex: { '中': 'medium', '高': 'high', '極高': 'xhigh', 'MAX': 'max', 'Ultra': 'ultra' },
   grok: { '中': 'medium', '高': 'high', '極高': 'xhigh', 'MAX': 'max' },
-  agy: {}, // High はモデル ID に含まれる。別の思考指定で変えない。
+  agy: {}, // 思考のCLI引数は付けず、選んだモデルIDをそのまま使う。
 };
 
 // 動いている AI に途中で切り替えを伝える時のコマンド（画面の中で打つのと同じ）
@@ -163,8 +173,8 @@ function buildCommand({ ai, dir, prompt, cmd, model, effort, account = 'default'
 // 画面の中の作業画面用：実行ファイルと引数に分ける（シェルを通さない）
 function buildArgv({ ai, prompt, cmd, model, effort, account = 'default', fast = false }) {
   if (ai === 'agy') {
-    if (model && !flagFor(ai, model)) throw new Error(lt('Agy で承認されているモデルは Gemini 3.1 Pro (High) だけです'));
-    return { command: 'agy', args: ['--dangerously-skip-permissions', '--model', AGY_MODEL.id, ...(prompt ? [`--prompt-interactive=${prompt}`] : [])] };
+    const id = agyModelId(model);
+    return { command: 'agy', args: ['--dangerously-skip-permissions', '--model', id, ...(prompt ? [`--prompt-interactive=${prompt}`] : [])] };
   }
   if (ai === 'grok') {
     const m = flagFor(ai, model), e = EFFORT_FLAG.grok[effort];
@@ -201,9 +211,30 @@ function openTerminal(command, dry) {
   ], dry);
 }
 
+async function focusAuthTerminal(pid, dry) {
+  if (!Number.isInteger(pid) || pid < 1) throw Error(lt('認証用Terminalの記録を確認できません'));
+  if (dry) return { dry: true, existingTerminal: true };
+  const tty = await new Promise((resolve, reject) => execFile('/bin/ps', ['-p', String(pid), '-o', 'tty='], (error, stdout) => error ? reject(error) : resolve(stdout.trim())));
+  if (!/^ttys[0-9]+$/.test(tty)) throw Error(lt('認証用Terminalの画面を見つけられませんでした'));
+  await run('osascript', ['-e', `tell application "Terminal"
+repeat with w in windows
+repeat with t in tabs of w
+if tty of t is "/dev/${tty}" then
+set selected tab of w to t
+set index of w to 1
+activate
+return
+end if
+end repeat
+end repeat
+error "Authentication Terminal not found"
+end tell`], false);
+  return { ok: true, existingTerminal: true };
+}
+
 function openFolder(p, dry) { return run('open', [p], dry); }
 // ファイルは Finder でその場所を開いて選ぶ。URL は Mac の既定のブラウザで開く
 function revealFile(p, dry) { return run('open', ['-R', p], dry); }
 function openUrl(u, dry) { return run('open', [u], dry); }
 
-module.exports = { GROK_API_ENV, GROK_AUTH_ENV, grokCommand, accelerationArgs, setAccounts, accountEnv, accountArgs, accountShell, AIS, AI_KEY, AI_LABEL, AGY_MODEL, agyAccountError, agyAccountShell, childEnv, buildCommand, buildArgv, openTerminal, openFolder, revealFile, openUrl, sq, DEFAULT_CMD, CODEX_CONTEXT_ARGS, CONTEXT_RULE, MODEL_FLAG, EFFORT_FLAG, SWITCH_CMD, switchCommand, flagFor, modelLabel, startupInfo, setOverrides, getOverrides, setDiscoveredModels };
+module.exports = { GROK_API_ENV, GROK_AUTH_ENV, grokCommand, accelerationArgs, setAccounts, accountEnv, accountArgs, accountShell, AIS, AI_KEY, AI_LABEL, agyModelId, agyAccountError, agyAccountShell, childEnv, buildCommand, buildArgv, openTerminal, openFolder, revealFile, openUrl, sq, DEFAULT_CMD, CODEX_CONTEXT_ARGS, CONTEXT_RULE, MODEL_FLAG, EFFORT_FLAG, SWITCH_CMD, switchCommand, focusAuthTerminal, flagFor, modelLabel, startupInfo, setOverrides, getOverrides, setDiscoveredModels };

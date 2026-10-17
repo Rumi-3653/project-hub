@@ -2,6 +2,7 @@
 var UI = globalThis.HubI18n || {text: x=>x, html:x=>x, label:x=>x, message:x=>x, valueAttribute:()=>'', dateLocale:'ja-JP', template:(strings,...values)=>strings.reduce((s,x,i)=>s+x+(i<values.length?values[i]:''),'')};
 // 設定と非公開リポジトリ作成。送信は確認画面の明示選択のみ。
 let githubDraft = null, githubPending = false, githubEpoch = 0, githubSettingsEpoch = 0;
+let githubListEpoch = 0;
 const githubOptions = (list, selected) => list.map(v => UI.template`<option value="${esc(v)}" ${v === selected ? 'selected' : ''}>${esc(v)}</option>`).join('');
 async function loadGithub(fresh = false) {
   const box = $('#github-box'); if (!box) return;
@@ -65,6 +66,86 @@ document.addEventListener('change', e => {
   if (e.target.id === 'github-create-account' || e.target.id === 'github-account') {
     const target = e.target.id === 'github-account' ? '#github-owner' : '#github-create-owner';
     $(target).innerHTML = githubOptions([e.target.value], e.target.value);
+  }
+});
+
+function githubConnectValidate() {
+  const d = githubDraft;
+  if (d?.mode !== 'existing') return;
+  const selected = d.repositories.find(r => r.name === $('#github-repository').value);
+  $('#github-connect').disabled = githubPending || d.blockers.length > 0 || !selected || !selected.private || !selected.writable || selected.archived;
+  $('#github-selection').textContent = selected ? `${d.folder} → ${selected.name}（${selected.private ? UI.text('非公開') : UI.text('公開')}）` : UI.text('リポジトリを選んでください');
+}
+function drawGithubRepositories() {
+  const d = githubDraft; if (d?.mode !== 'existing') return;
+  const selected = $('#github-repository').value, query = $('#github-search').value.trim().toLowerCase();
+  const list = d.repositories.filter(r => r.name.toLowerCase().includes(query));
+  $('#github-repository').innerHTML = UI.template`<option value="">リポジトリを選んでください</option>${list.map(r => UI.template`<option value="${esc(r.name)}" ${r.name === selected ? 'selected' : ''} ${r.private && r.writable && !r.archived ? '' : 'disabled'}>${esc(r.name)}（${r.private ? UI.text('非公開') : UI.text('公開')}${r.writable ? '' : UI.text('・書き込み権限なし')}${r.archived ? UI.text('・保管済み') : ''}）</option>`).join('')}`;
+  $('#github-list-status').textContent = UI.text('表示件数') + '：' + list.length;
+  githubConnectValidate();
+}
+async function loadGithubRepositories() {
+  const d = githubDraft; if (d?.mode !== 'existing') return;
+  const epoch = githubEpoch, listEpoch = ++githubListEpoch, account = $('#github-connect-account').value;
+  d.repositories = []; $('#github-repository').innerHTML = ''; githubConnectValidate();
+  $('#github-list-status').textContent = UI.text('読み込んでいます…');
+  try {
+    const r = await api('/api/github/repositories', { account });
+    if (epoch !== githubEpoch || listEpoch !== githubListEpoch || githubDraft !== d) return;
+    d.repositories = r.repositories; drawGithubRepositories();
+  } catch (e) { if (epoch === githubEpoch && listEpoch === githubListEpoch) $('#github-list-status').textContent = e.message; }
+}
+async function openGithubConnect(projectId, target = '.') {
+  if (githubPending) return;
+  const epoch = ++githubEpoch; githubDraft = null;
+  if (!$('#github-sheet')) document.body.insertAdjacentHTML('beforeend', '<div id="github-sheet" class="remove-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="github-title"></div>');
+  const sheet = $('#github-sheet'); sheet.hidden = false;
+  sheet.innerHTML = UI.html('<div class="remove-box"><h2 id="github-title">既存のGitHubに接続</h2><p>確認しています…</p><button class="btn plain" data-github-action="close" type="button">閉じる</button></div>');
+  try {
+    const d = await api('/api/github/connect-preview', { project: projectId, target });
+    if (epoch !== githubEpoch) return;
+    githubDraft = { ...d, mode: 'existing', repositories: [] };
+    sheet.innerHTML = UI.template`<div class="remove-box github-box"><h2 id="github-title">既存のGitHubに接続</h2>
+      <label>接続するGitフォルダ<select id="github-target">${githubOptions(d.targets, d.target)}</select></label><p class="path">${esc(d.folder)}</p>
+      ${d.blockers.map(b => UI.template`<p class="danger">${esc(b)}</p>`).join('')}${d.origin ? UI.template`<p>登録済みの送り先：${esc(d.origin)}（別の送り先は上書きできません）</p>` : ''}
+      <label>アカウント<select id="github-connect-account">${githubOptions(d.accounts.map(a => a.login), d.defaultAccount)}</select></label>
+      <label>リポジトリを検索<input id="github-search" maxlength="100" autocomplete="off"></label>
+      <label>既存のリポジトリ<select id="github-repository"></select></label><p id="github-list-status" role="status"></p>
+      <p class="small">非公開で、書き込み権限のあるリポジトリを選べます。接続は送り先の登録だけです。内容と履歴の同期は行いません。</p>
+      <p id="github-selection"></p><p id="github-result" role="status"></p>
+      <div class="acts"><button class="btn plain" data-github-action="close" type="button">やめる</button><button class="btn" id="github-connect" data-github-existing="connect" type="button" disabled>接続する</button></div></div>`;
+    await loadGithubRepositories();
+  } catch (e) { if (epoch === githubEpoch) sheet.innerHTML = UI.template`<div class="remove-box"><h2 id="github-title">GitHub の確認</h2><p class="danger">${esc(e.message)}</p><button class="btn plain" data-github-action="close" type="button">閉じる</button></div>`; }
+}
+document.addEventListener('input', e => { if (e.target.id === 'github-search') drawGithubRepositories(); });
+document.addEventListener('change', async e => {
+  if (githubPending || githubDraft?.mode !== 'existing') return;
+  if (e.target.id === 'github-target') return openGithubConnect(githubDraft.project, e.target.value);
+  if (e.target.id === 'github-connect-account') return loadGithubRepositories();
+  if (e.target.id === 'github-repository') githubConnectValidate();
+});
+document.addEventListener('click', async e => {
+  const open = e.target.closest?.('[data-github-connect]');
+  if (open && !open.disabled) return openGithubConnect(open.dataset.githubConnect, open.dataset.githubTarget || '.');
+  const button = e.target.closest?.('[data-github-existing]');
+  if (!button || button.disabled || githubPending || githubDraft?.mode !== 'existing') return;
+  const d = githubDraft;
+  const input = { project: d.project, target: d.target, expectedFolder: d.folder, expectedHead: d.head, account: $('#github-connect-account').value, repository: $('#github-repository').value, confirm: true };
+  githubPending = true;
+  const controls = [...$('#github-sheet').querySelectorAll('input,select,button')], wasDisabled = controls.map(c => c.disabled);
+  controls.forEach(c => { c.disabled = true; }); button.disabled = true; button.textContent = UI.text('接続中…');
+  try {
+    const r = await api('/api/github/connect', input);
+    if (r.ok || r.partial) {
+      $('#github-result').innerHTML = UI.template`<p>${esc(r.message)}</p><button class="btn plain" data-url="${esc(r.url)}" type="button">GitHub で開く</button><button class="btn plain" data-github-action="close" type="button">閉じる</button>`;
+      button.textContent = r.ok ? UI.text('接続済み') : UI.text('送り先は登録済み');
+      githubDraft = null; await load();
+    } else $('#github-result').textContent = r.message;
+  } catch (err) { $('#github-result').textContent = err.message; }
+  finally {
+    githubPending = false;
+    if (githubDraft) { controls.forEach((c, i) => { c.disabled = wasDisabled[i]; }); button.textContent = UI.text('接続する'); githubConnectValidate(); }
+    else $('#github-sheet').querySelectorAll('[data-github-action="close"]').forEach(c => { c.disabled = false; });
   }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') githubSheetClose(); });

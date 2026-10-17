@@ -757,3 +757,17 @@ test('external selection keeps per-volume trash and signed shared-path refusal a
  f.project('Observer','folders: {}\n');const restored=f.r.restore(moved.record,true);assert.equal(restored.ok,true);
  assert.equal(fs.readFileSync(path.join(outside,'file.txt'),'utf8'),'external bytes');
 });
+
+test('長い引用前本文を線形に読み、参照本文を再利用して変更・リンクは再確認する',t=>{
+ const f=fixture(t),p=f.store.readProject('Child'),task=p.tasks.find(x=>x.id===f.task),candidate=path.join(f.dir,'.ai/work',f.task);
+ const memo=f.write(path.join(f.dir,'.ai/memory/performance.md'),'x'.repeat(120000)+'\n「.ai/work/'+f.task+'/file.txt」');
+ const read=fs.readFileSync;let reads=0;
+ fs.readFileSync=function(file,...args){if(file===memo)reads++;return read.call(this,file,...args);};
+ try {
+  assert.equal(f.r.referenced(candidate,p,task,f.store.listProjects()),true);
+  assert.equal(f.r.referenced(candidate,p,task,f.store.listProjects()),true);assert.equal(reads,1);
+  fs.writeFileSync(memo,'参照なし');assert.equal(f.r.referenced(candidate,p,task,f.store.listProjects()),false);assert.equal(reads,2);
+  fs.writeFileSync(memo,'「.ai/work/'+f.task+'/file.txt」');assert.equal(f.r.referenced(candidate,p,task,f.store.listProjects()),true);assert.equal(reads,3);
+  fs.unlinkSync(memo);fs.symlinkSync(f.chat,memo);assert.throws(()=>f.r.referenced(candidate,p,task,f.store.listProjects()),/リンク/);
+ } finally {fs.readFileSync=read;}
+});

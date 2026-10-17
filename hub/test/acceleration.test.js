@@ -1,4 +1,5 @@
 'use strict';
+const AGY_FIXTURE = { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' };
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 const test = require('node:test');
@@ -81,6 +82,9 @@ test('Codex新規・再開・ターミナル・外部Terminalの次回起動に�
   }
 });
 test('加速ONでもClaudeとAgyの新規・再開・ターミナル引数と起動情報を変えない', t => {
+  // Agy launches require a current catalog even when only comparing arguments.
+  launch.setDiscoveredModels({ agy: { models: [AGY_FIXTURE], known: [AGY_FIXTURE] } });
+  t.after(() => launch.setDiscoveredModels({}));
   for (const [ai, model] of [['claude', 'Opus 5.5'], ['agy', 'Gemini 3.1 Pro (High)']]) {
     const opts = { ai, model, prompt: 'hello', effort: '高' };
     const argv = launch.buildArgv(opts), info = launch.startupInfo(ai, model);

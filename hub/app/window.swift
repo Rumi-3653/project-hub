@@ -7,9 +7,134 @@ import Cocoa
 import WebKit
 import UniformTypeIdentifiers
 
-let hubLanguage = ProcessInfo.processInfo.environment["HUB_LANG"]
-    ?? (Bundle.main.object(forInfoDictionaryKey: "HubLanguage") as? String) ?? "ja"
-func tr(_ ja: String, _ zh: String) -> String { hubLanguage == "zh-TW" ? zh : ja }
+
+// BEGIN PACKAGED RECOVERY
+// Foundation-only: the same path checks/rename recovery are exercised by fixtures.
+struct PackagedRecovery {
+    let root: String
+    let app: String
+    let version: String
+    var statePath: String { root + "/_hub/updates/packaged/state.json" }
+    enum Failure: Error { case unsafe }
+    func checked(_ file: String, base: String) throws {
+        // NSString.standardizingPath can rewrite an existing /private/var alias.
+        // Check lexical components without changing the journal's exact path.
+        guard file == base || file.hasPrefix(base + "/"), file.hasPrefix("/"),
+              !file.split(separator: "/", omittingEmptySubsequences: false).dropFirst().contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { throw Failure.unsafe }
+        var current = ""
+        for part in file.split(separator: "/") {
+            current += "/" + part
+            var info = stat()
+            if lstat(current, &info) == 0 {
+                guard info.st_mode & S_IFMT != S_IFLNK else { throw Failure.unsafe }
+                if current == base || current.hasPrefix(base + "/") {
+                    guard info.st_uid == getuid(), info.st_mode & 0o022 == 0 else { throw Failure.unsafe }
+                }
+            } else if errno != ENOENT { throw Failure.unsafe }
+        }
+    }
+    func read() throws -> [String: Any] {
+        try checked(statePath, base: root)
+        guard let bytes = FileManager.default.contents(atPath: statePath), bytes.count <= 262144,
+              let data = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.unsafe }
+        return data
+    }
+    func validate(_ pending: [String: Any]) throws -> String {
+        guard app.hasSuffix("/Project Hub.app"), pending["target"] as? String == app,
+              let sibling = pending["sibling"] as? String,
+              (sibling as NSString).deletingLastPathComponent == (app as NSString).deletingLastPathComponent,
+              (sibling as NSString).lastPathComponent.range(of: #"^\.ProjectHub-update-[A-Za-z0-9]+$"#, options: .regularExpression) != nil,
+              pending["old"] as? String == sibling + "/old.app", pending["fresh"] as? String == sibling + "/new.app",
+              let token = pending["token"] as? String, UUID(uuidString: token) != nil else { throw Failure.unsafe }
+        try checked(app, base: app); try checked(sibling, base: sibling)
+        return sibling
+    }
+    func pending() throws -> [String: Any]? {
+        let data = try read()
+        guard let p = data["pendingConfirm"] as? [String: Any] else { return nil }
+        _ = try validate(p)
+        return p
+    }
+    func token() -> String? {
+        guard let p = try? pending(), p["version"] as? String == version else { return nil }
+        return p["token"] as? String
+    }
+    func matches(_ ping: [String: Any], pending: [String: Any]) -> Bool {
+        return ping["version"] as? String == pending["version"] as? String
+            && ping["runtimePath"] as? String == app + "/Contents/Resources/runtime/hub"
+            && ping["updateConfirm"] as? String == pending["token"] as? String
+            && ping["restored"] as? Bool == true
+            && !(ping["instance"] as? String ?? "").isEmpty
+    }
+    func save(_ data: [String: Any]) throws {
+        try checked(statePath, base: root)
+        let bytes = try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys])
+        let tmp = statePath + "." + UUID().uuidString + ".tmp"
+        guard FileManager.default.createFile(atPath: tmp, contents: bytes, attributes: [.posixPermissions: 0o600]) else { throw Failure.unsafe }
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: tmp))
+        try handle.synchronize(); try handle.close()
+        try checked(statePath, base: root)
+        if Darwin.rename(tmp, statePath) != 0 { throw Failure.unsafe }
+    }
+    // Recover an interrupted swap before starting Node from a partially replaced
+    // bundle. This also works from a still-running launcher after Node exits.
+    func interruptedInstall() throws -> Bool {
+        var data = try read()
+        guard var j = data["install"] as? [String: Any] else { return false }
+        j["token"] = "00000000-0000-4000-8000-000000000000"
+        let sibling = try validate(j), old = sibling + "/old.app", interrupted = sibling + "/interrupted-new.app"
+        try checked(old, base: sibling); try checked(interrupted, base: sibling)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: old) {
+            if fm.fileExists(atPath: app) {
+                guard !fm.fileExists(atPath: interrupted) else { throw Failure.unsafe }
+                try fm.moveItem(atPath: app, toPath: interrupted)
+            }
+            try fm.moveItem(atPath: old, toPath: app)
+        }
+        data.removeValue(forKey: "install"); data.removeValue(forKey: "prepared")
+        data["phase"] = "failed"; data["error"] = "前の更新は途中で止まったため、前のアプリへ戻しました"
+        try save(data); return true
+    }
+    // First failure asks the native launcher to retry once. Second keeps failed.app
+    // and restores old.app. A rollback journal makes a crash between renames resumable.
+    func failed() throws -> Bool {
+        var data = try read()
+        guard var p = data["pendingConfirm"] as? [String: Any] else { return false }
+        let sibling = try validate(p)
+        let resuming = data["rollback"] as? Bool == true
+        let attempts = resuming ? 2 : (p["attempts"] as? Int ?? 0) + 1
+        p["attempts"] = attempts; data["pendingConfirm"] = p; try save(data)
+        if attempts < 2 { return false }
+        let fm = FileManager.default, old = sibling + "/old.app", failed = sibling + "/failed.app"
+        try checked(old, base: sibling); try checked(failed, base: sibling)
+        data["rollback"] = true; try save(data)
+        if fm.fileExists(atPath: old) {
+            if fm.fileExists(atPath: app) {
+                guard !fm.fileExists(atPath: failed) else { throw Failure.unsafe }
+                try fm.moveItem(atPath: app, toPath: failed)
+            }
+            do { try fm.moveItem(atPath: old, toPath: app) }
+            catch {
+                if !fm.fileExists(atPath: app), fm.fileExists(atPath: failed) { try? fm.moveItem(atPath: failed, toPath: app) }
+                throw error
+            }
+        } else {
+            // The old App was already restored, but saving the result was interrupted.
+            let plist = NSDictionary(contentsOfFile: app + "/Contents/Info.plist")
+            guard resuming, fm.fileExists(atPath: failed), plist?["CFBundleShortVersionString"] as? String == p["from"] as? String else { throw Failure.unsafe }
+        }
+        data["phase"] = "rolled-back"; data["reason"] = "新しい版が2回起動しなかったため前の版へ戻しました"
+        if let m = data["manifest"] as? [String: Any], let a = m["asset"] as? [String: Any] {
+            data["rejected"] = ["seq": m["seq"] ?? 0, "sha256": a["sha256"] ?? "", "reason": "startup"]
+        }
+        data.removeValue(forKey: "rollback"); data.removeValue(forKey: "pendingConfirm")
+        try save(data); return true
+    }
+}
+// END PACKAGED RECOVERY
+
 
 let home = FileManager.default.homeDirectoryForCurrentUser.path
 let logPath = home + "/Library/Logs/ProjectHub.log"
@@ -41,6 +166,139 @@ let hubLocation = (Bundle.main.object(forInfoDictionaryKey: "HubDir") as? String
 let hubDir = hubLocation.hasPrefix("@bundle/")
     ? Bundle.main.resourceURL!.appendingPathComponent(String(hubLocation.dropFirst("@bundle/".count))).path
     : hubLocation
+// Optional native strings live beside the same data pack used by Node.
+let configuredPackDir = ProcessInfo.processInfo.environment["HUB_LANGPACK_DIR"]
+    ?? (Bundle.main.object(forInfoDictionaryKey: "HubLangpackDir") as? String) ?? ""
+let defaultPackDir = configuredPackDir.hasPrefix("@bundle/")
+    ? Bundle.main.resourceURL!.appendingPathComponent(String(configuredPackDir.dropFirst("@bundle/".count))).path
+    : configuredPackDir
+var hubPackDir = defaultPackDir
+var requestedLanguage = ProcessInfo.processInfo.environment["HUB_LANG"]
+    ?? (Bundle.main.object(forInfoDictionaryKey: "HubLanguage") as? String) ?? "ja"
+var nativeMessages: [String: String] = [:]
+let hubWorkspace = ProcessInfo.processInfo.environment["HUB_ROOT"] ?? (configuredHubRoot.isEmpty ? home + "/Documents/AI-Workspace" : configuredHubRoot)
+func validPackId(_ id: String) -> Bool {
+    id != "ja" && id.range(of: #"^[a-z]{2,3}(-[A-Z][A-Za-z]{1,3})?$"#, options: .regularExpression) != nil
+}
+func validDateLocale(_ value: String) -> Bool {
+    // Unicode locale identifiers: language, script, region, variants and extensions.
+    let syntax = #"^[A-Za-z]{2,3}(-[A-Za-z]{4})?(-([A-Za-z]{2}|[0-9]{3}))?(-([A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*(-[0-9A-WY-Za-wy-z](-[A-Za-z0-9]{2,8})+)*(-x(-[A-Za-z0-9]{1,8})+)?$"#
+    // Foundation's locale data omits aliases which Intl accepts. Resolve their
+    // language component before checking availability (native does not format dates).
+    let aliases = ["mo": "ro", "sh": "sr", "adp": "dz", "ars": "ar", "bih": "bho", "cls": "sa",
+                   "cnr": "sr", "drh": "mn", "drw": "fa", "gom": "kok", "mao": "mi", "mol": "ro",
+                   "npi": "ne", "ory": "or", "prp": "gu", "prs": "fa", "quz": "qu", "swc": "sw", "tnf": "fa"]
+    let base = value.split(separator: "-").first.map { String($0).lowercased() } ?? ""
+    guard value.range(of: syntax, options: .regularExpression) != nil,
+          let language = Locale(identifier: aliases[base] ?? value).languageCode,
+          Locale.availableIdentifiers.contains(where: { Locale(identifier: $0).languageCode == language }) else { return false }
+    var variants = Set<String>(), extensions = Set<String>(), inExtension = false
+    for part in value.lowercased().split(separator: "-").dropFirst() {
+        if part == "x" { break }
+        if part.count == 1 {
+            guard extensions.insert(String(part)).inserted else { return false }
+            inExtension = true
+        } else if !inExtension && (part.count >= 5 || (part.count == 4 && part.first!.isNumber)) {
+            guard variants.insert(String(part)).inserted else { return false }
+        }
+    }
+    return true
+}
+func validPackMetadata(_ manifest: [String: Any], _ backend: [String: Any]) -> Bool {
+    guard let id = manifest["id"] as? String, validPackId(id) else { return false }
+    let date = manifest["dateLocale"] is NSNull ? id : manifest["dateLocale"] ?? id
+    guard let date = date as? String, validDateLocale(date) else { return false }
+    if let raw = backend["headings"] {
+        guard let headings = raw as? [String: String] else { return false }
+        let names = ["手順": ["手順", "步驟"], "やったこと": ["やったこと", "已完成的工作", "已完成的事"],
+                     "次にやること": ["次にやること", "下一步", "接下來要做的事"],
+                     "注意": ["注意", "注意事項"], "メモ": ["メモ", "備註"]]
+        let reserved = names.flatMap { key, values in values.map { (key, $0) } }
+            + ["成果", "確認結果", "残件申告", "最新の再開要約"].map { ($0, $0) }
+        func overlaps(_ left: String, _ right: String) -> Bool {
+            (left as NSString).range(of: right, options: .literal).location != NSNotFound
+                || (right as NSString).range(of: left, options: .literal).location != NSNotFound
+        }
+        guard headings.allSatisfy({ key, value in names[key] != nil && !value.isEmpty
+            && value.trimmingCharacters(in: .whitespacesAndNewlines) == value
+            && value.rangeOfCharacter(from: CharacterSet(charactersIn: "#\r\n\u{2028}\u{2029}")) == nil
+            && !(reserved + headings.map { ($0.key, $0.value) }).contains(where: { other, name in key != other && overlaps(value, name) })
+        }) else { return false }
+    }
+    return true
+}
+func validPackMessages(_ messages: [String: String]) -> Bool {
+    // Match langpack.js dataMessages: translated text cannot add markup/attributes.
+    let html = try! NSRegularExpression(pattern: #"</?[a-zA-Z!]"#)
+    let tagPattern = try! NSRegularExpression(pattern: #"<[^>]*>"#)
+    let nonASCII = try! NSRegularExpression(pattern: #"[^\x00-\x7f]"#)
+    // JavaScript whitespace and word boundaries, rather than ICU's broader ones.
+    let space = #"\t-\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"#
+    let literalSyntax = try! NSRegularExpression(pattern: "[" + space + "='\"/]")
+    let presentation = try! NSRegularExpression(pattern: #"(?<![A-Za-z0-9_])(title|aria-label|aria-valuetext|placeholder)["# + space + #"]*=["# + space + #"]*(["'])[\s\S]*?\2"#)
+    func range(_ text: String) -> NSRange { NSRange(text.startIndex..., in: text) }
+    func tags(_ text: String) -> [[UInt16]] {
+        tagPattern.matches(in: text, range: range(text)).map { match in
+            let tag = (text as NSString).substring(with: match.range)
+            if nonASCII.firstMatch(in: tag, range: range(tag)) != nil && literalSyntax.firstMatch(in: tag, range: range(tag)) == nil { return Array("<literal>".utf16) }
+            // JS compares code units; Swift String equality normalizes Unicode.
+            return Array(presentation.stringByReplacingMatches(in: tag, range: range(tag), withTemplate: "$1=\"\"").utf16)
+        }
+    }
+    for (source, value) in messages where html.firstMatch(in: value, range: range(value)) != nil {
+        if tags(source) != tags(value) { return false }
+        let remaining = tagPattern.stringByReplacingMatches(in: value, range: range(value), withTemplate: "")
+        if html.firstMatch(in: remaining, range: range(remaining)) != nil { return false }
+    }
+    return true
+}
+func loadNativeMessages() {
+    // Called only after storageReady succeeds. No workspace reads in globals.
+    nativeMessages = [:]
+    let selection = hubWorkspace + "/_hub/language.json"
+    if FileManager.default.fileExists(atPath: selection) {
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: selection),
+           let size = attributes[.size] as? NSNumber, size.intValue <= 10000,
+           let data = try? Data(contentsOf: URL(fileURLWithPath: selection)), data.count <= 10000,
+           let saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let language = saved["language"] as? String {
+            requestedLanguage = language
+        } else { requestedLanguage = "ja" }
+    }
+    guard validPackId(requestedLanguage) else { requestedLanguage = "ja"; return }
+    let bundled = URL(fileURLWithPath: hubDir).deletingLastPathComponent().appendingPathComponent("langpacks/" + requestedLanguage).path
+    let directories = [hubWorkspace + "/_hub/langpacks/" + requestedLanguage, defaultPackDir, bundled].filter { !$0.isEmpty }
+    var seen = Set<String>()
+    for directory in directories where seen.insert(directory).inserted {
+        if !FileManager.default.fileExists(atPath: directory + "/pack.json") { continue }
+        guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: directory + "/pack.json")),
+              let manifest = (try? JSONSerialization.jsonObject(with: manifestData)) as? [String: Any], manifest["id"] as? String == requestedLanguage,
+              let uiData = try? Data(contentsOf: URL(fileURLWithPath: directory + "/ui.json")),
+              let ui = (try? JSONSerialization.jsonObject(with: uiData)) as? [String: String], validPackMessages(ui),
+              let backendData = try? Data(contentsOf: URL(fileURLWithPath: directory + "/backend.json")),
+              let backend = (try? JSONSerialization.jsonObject(with: backendData)) as? [String: Any],
+              let messages = backend["messages"] as? [String: String], let labels = backend["labels"] as? [String: String],
+              validPackMessages(messages), validPackMessages(labels), validPackMetadata(manifest, backend) else { continue }
+        // Node may use a Web-only pack; native menus then keep their Japanese text.
+        hubPackDir = directory
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: directory + "/native.json")),
+           let messages = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] { nativeMessages = messages }
+        return
+    }
+    requestedLanguage = "ja"
+}
+var hubLanguage: String { requestedLanguage }
+func tr(_ ja: String, _ values: String...) -> String {
+    let text = nativeMessages[ja] ?? ja
+    let matches = try! NSRegularExpression(pattern: #"\$\{(\d+)\}"#)
+    var translated = text
+    for match in matches.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+        if let index = Int((text as NSString).substring(with: match.range(at: 1))),
+           index < values.count, let range = Range(match.range, in: translated) { translated.replaceSubrange(range, with: values[index]) }
+    }
+    return translated
+}
+
 let port = (Bundle.main.object(forInfoDictionaryKey: "HubPort") as? String) ?? "4545"
 let baseURL = URL(string: "http://127.0.0.1:\(port)")!
 
@@ -73,6 +331,29 @@ func findNode(path: String) -> String? {
 
 // 本体が動いているか。軽い /api/ping に聞き、何か答えが返れば動いているとみなす
 // （前は一覧 /api/state に1.5秒で聞いていたため、台帳が大きいと「動いていない」と間違え、2つ目を起動して失敗していた）
+let packagedRecovery = PackagedRecovery(root: hubWorkspace, app: Bundle.main.bundleURL.path,
+    version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
+func localJSON(_ route: String) -> [String: Any]? {
+    var request = URLRequest(url: baseURL.appendingPathComponent(route)); request.timeoutInterval = 3
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: [String: Any]?
+    URLSession.shared.dataTask(with: request) { data, response, _ in
+        if (response as? HTTPURLResponse)?.statusCode == 200, let data = data {
+            result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        semaphore.signal()
+    }.resume()
+    _ = semaphore.wait(timeout: .now() + 4); return result
+}
+func updateServerReady() -> Bool {
+    guard let pending = try? packagedRecovery.pending(), pending["version"] as? String == packagedRecovery.version else { return serverAlive() }
+    guard let ping = localJSON("api/ping"), packagedRecovery.matches(ping, pending: pending), localJSON("api/state") != nil else { return false }
+    // /api/state finishes before the backend commits the confirmation journal.
+    guard let state = try? packagedRecovery.read(), state["pendingConfirm"] == nil,
+          let installed = state["lastInstalled"] as? [String: Any] else { return false }
+    return installed["version"] as? String == pending["version"] as? String && installed["instance"] as? String == ping["instance"] as? String
+}
+
 func serverAlive() -> Bool {
     let sem = DispatchSemaphore(value: 0)
     var ok = false
@@ -94,9 +375,9 @@ func logTail(_ n: Int) -> String {
 
 // Mac の「ファイルとフォルダ」の許可（書類・デスクトップ・ダウンロード）
 let privacyFolders: [(name: String, path: String, service: String)] = [
-    (tr("書類", "文件"), home + "/Documents", "SystemPolicyDocumentsFolder"),
-    (tr("デスクトップ", "桌面"), home + "/Desktop", "SystemPolicyDesktopFolder"),
-    (tr("ダウンロード", "下載"), home + "/Downloads", "SystemPolicyDownloadsFolder"),
+    (tr("書類"), home + "/Documents", "SystemPolicyDocumentsFolder"),
+    (tr("デスクトップ"), home + "/Desktop", "SystemPolicyDesktopFolder"),
+    (tr("ダウンロード"), home + "/Downloads", "SystemPolicyDownloadsFolder"),
 ]
 // 中を読んでみる。まだ決めていなければ、ここで Mac が「アクセスを求めています」と確認を出す
 func canRead(_ dir: String) -> Bool {
@@ -172,80 +453,13 @@ class DropWebView: WKWebView {
     }
 }
 
-// 横に開く ChatGPT（ブラウザ版）。ログインは Mac に残る（次からはそのまま使える）
-// Hub は ChatGPT の画面を操作しない。人が［コピー］を押した時だけ、その文を Hub に知らせる
-class GptPanel: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
-    let web: WKWebView
-    private var popupWindows: [ObjectIdentifier: NSWindow] = [:]
-    private weak var copyPopupWindow: NSWindow?
-    var onPopupCopyBoundary: (() -> Void)?
-    override init() {
-        let conf = WKWebViewConfiguration()
-        conf.websiteDataStore = .default()
-        web = WKWebView(frame: .zero, configuration: conf)
-        super.init()
-        web.navigationDelegate = self
-        web.uiDelegate = self
-        web.allowsBackForwardNavigationGestures = true
-        // 普通の Safari として開く（アプリの中の画面だと、ログインを断られることがあるため）
-        web.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
-        web.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
-    }
-    // 渡された設定を使い、元の画面への window.opener / postMessage を保つ
-    func webView(_ w: WKWebView, createWebViewWith c: WKWebViewConfiguration, for a: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {
-        let child = WKWebView(frame: .zero, configuration: c)
-        child.customUserAgent = w.customUserAgent ?? web.customUserAgent
-        child.navigationDelegate = self
-        child.uiDelegate = self
-        let popup = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
-                             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        popup.title = "ChatGPT ログイン"
-        popup.isReleasedWhenClosed = false
-        popup.delegate = self
-        popup.contentView = child
-        popupWindows[ObjectIdentifier(child)] = popup
-        copyPopupWindow = popup
-        popup.center()
-        popup.makeKeyAndOrderFront(nil)
-        return child
-    }
-    func webViewDidClose(_ w: WKWebView) {
-        popupWindows[ObjectIdentifier(w)]?.close()
-    }
-    func ownsPopupWindow(_ window: NSWindow) -> Bool {
-        popupWindows.values.contains { $0 === window }
-    }
-    func windowDidBecomeKey(_ notification: Notification) {
-        guard let popup = notification.object as? NSWindow, ownsPopupWindow(popup) else { return }
-        copyPopupWindow = popup
-    }
-    func windowDidResignKey(_ notification: Notification) {
-        guard let popup = notification.object as? NSWindow, copyPopupWindow === popup else { return }
-        // 採取前に操作先を戻しても、小窓でのコピーを返事として拾わない
-        onPopupCopyBoundary?()
-        copyPopupWindow = nil
-    }
-    func windowWillClose(_ notification: Notification) {
-        guard let popup = notification.object as? NSWindow, let child = popup.contentView as? WKWebView else { return }
-        if copyPopupWindow === popup {
-            onPopupCopyBoundary?()
-            copyPopupWindow = nil
-        }
-        popupWindows.removeValue(forKey: ObjectIdentifier(child))
-    }
-}
-
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver {
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var updateTimer: Timer?
     var updateRequestInFlight = false
     var updateRelaunching = false
     var server: Process?
-    var split: NSSplitView!
-    var gpt: GptPanel?
-    var clipTimer: Timer?
-    var clipCount = NSPasteboard.general.changeCount
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
                  defaultText: String?, initiatedByFrame frame: WKFrameInfo,
@@ -253,7 +467,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let alert = NSAlert(); alert.messageText = prompt
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         input.stringValue = defaultText ?? ""; alert.accessoryView = input
-        alert.addButton(withTitle: tr("保存", "儲存")); alert.addButton(withTitle: tr("キャンセル", "取消"))
+        alert.addButton(withTitle: tr("保存")); alert.addButton(withTitle: tr("キャンセル"))
         alert.window.initialFirstResponder = input
         alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn ? input.stringValue : nil) }
     }
@@ -262,7 +476,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         let alert = NSAlert(); alert.messageText = message
-        alert.addButton(withTitle: tr("確認して進む", "確認並繼續")); alert.addButton(withTitle: tr("キャンセル", "取消"))
+        alert.addButton(withTitle: tr("確認して進む")); alert.addButton(withTitle: tr("キャンセル"))
         alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
     }
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
@@ -274,27 +488,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func applicationDidFinishLaunching(_ n: Notification) {
         guard storageReady() else {
             let alert = NSAlert()
-            alert.messageText = tr("データ用ディスクを使えません", "無法使用資料磁碟")
-            alert.informativeText = tr("ストレージの確認に通りませんでした。データ用ディスクを接続してから、もう一度開いてください。", "磁碟檢查未通過。請確認資料磁碟已連接且空間足夠，再重新開啟。")
+            alert.messageText = "データ用ディスクを使えません"
+            alert.informativeText = "ストレージの確認に通りませんでした。データ用ディスクを接続してから、もう一度開いてください。"
             alert.runModal(); NSApp.terminate(nil); return
+        }
+        let languageBeforeLoad = requestedLanguage
+        loadNativeMessages()
+        if requestedLanguage == "ja" && languageBeforeLoad != "ja" {
+            log("選んだ言語パックが読めない場合は、日本語で動作します。")
         }
         log("アプリを開きました（本体の場所: \(hubDir)）")
         let conf = WKWebViewConfiguration()
-        conf.applicationNameForUserAgent = "ProjectHubApp/1"   // 画面側で「アプリの中」と分かるように
+        let shellHash = Bundle.main.object(forInfoDictionaryKey: "HubShellHash") as? String ?? "unknown"
+        conf.applicationNameForUserAgent = "ProjectHubApp/\(shellHash.prefix(12))"   // 画面側で「アプリの中」と分かるように
         web = DropWebView(frame: .zero, configuration: conf)
         web.navigationDelegate = self
         web.uiDelegate = self
-        WKWebsiteDataStore.default().httpCookieStore.add(self)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Project Hub"
         window.minSize = NSSize(width: 720, height: 480)
-        split = NSSplitView()
-        split.isVertical = true
-        split.dividerStyle = .thin
-        split.addArrangedSubview(web)
-        window.contentView = split
+        window.contentView = web
         window.center()
         window.setFrameAutosaveName("ProjectHubMain")
         window.makeKeyAndOrderFront(nil)
@@ -302,18 +517,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         NSApp.activate(ignoringOtherApps: true)
         buildMenu()
         updateTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.pollAppUpdate() }
-        web.loadHTMLString(page(tr("起動しています…", "正在啟動…"), tr("<p>数秒お待ちください。</p>", "<p>請稍候。</p>")), baseURL: nil)
+        web.loadHTMLString(page(tr("起動しています…"), tr("<p>数秒お待ちください。</p>")), baseURL: nil)
         DispatchQueue.global().async { self.startAndLoad() }
     }
 
     func startAndLoad() {
         guard storageReady() else {
-            showError(tr("データ用ディスクを使えません", "無法使用資料磁碟"), tr("<p>ディスクの確認に失敗したため、起動を止めました。</p>", "<p>磁碟確認失敗，已停止啟動。</p>"))
+            showError("データ用ディスクを使えません", "<p>ディスクの確認に失敗したため、起動を止めました。</p>")
             return
+        }
+        if (try? packagedRecovery.read()["rollback"] as? Bool) == true { handleUpdateFailure(); return }
+        if let state = try? packagedRecovery.read(), let journal = state["install"] as? [String: Any] {
+            do {
+                if serverAlive() {
+                    guard let ping = localJSON("/api/ping"),
+                          ping["runtimePath"] as? String == Bundle.main.bundlePath + "/Contents/Resources/runtime/hub",
+                          let servedVersion = ping["version"] as? String,
+                          servedVersion == journal["from"] as? String || servedVersion == journal["to"] as? String,
+                          quitServer(reason: "update") else { throw PackagedRecovery.Failure.unsafe }
+                }
+                if try packagedRecovery.interruptedInstall() {
+                    DispatchQueue.main.async {
+                        let config = NSWorkspace.OpenConfiguration(); config.createsNewApplicationInstance = true
+                        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, error in
+                            DispatchQueue.main.async {
+                                if error == nil { NSApp.terminate(nil) }
+                                else { self.showError(tr("前の版を開き直してください"), tr("<p>Finderで Project Hub.app を開き直してください。</p>")) }
+                            }
+                        }
+                    }
+                    return
+                }
+            } catch { showError(tr("前の版へ自動で戻せませんでした"), tr("<p>アプリの更新が途中で止まっています。前の版を保存したまま起動を止めました。</p>")); return }
         }
         // 本体が台帳を読めている時は、その画面を先に開く。
         // 書類フォルダの確認がOS側で待たされても、稼働中の本体を表示できる。
-        if serverAlive() && serverCanRead() {
+        let confirmingUpdate = packagedRecovery.token() != nil
+        if !confirmingUpdate && serverAlive() && serverCanRead() {
             log("台帳を読める本体が動いています")
             DispatchQueue.main.async { self.web.load(URLRequest(url: baseURL)) }
             return
@@ -323,11 +563,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let appCanRead = canRead(workspace)
         if !appCanRead { log("書類フォルダを読めません（許可が無い可能性）") }
         // 本体が前の起動のまま動いていて、許可が効いていない時は、止めてこのアプリから起動し直す
-        if appCanRead && serverAlive() && !serverCanRead() {
+        if !confirmingUpdate && appCanRead && serverAlive() && !serverCanRead() {
             log("本体が書類フォルダを読めません。起動し直します")
             if !quitServer() { log("本体を止められませんでした（AI が作業中の可能性）。そのまま開きます") }
         }
-        if serverAlive() {
+        if !confirmingUpdate && serverAlive() {
             log("本体はすでに動いています")
             DispatchQueue.main.async { self.web.load(URLRequest(url: baseURL)) }
             return
@@ -335,16 +575,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let path = loginShellPath()
         log("PATH: \(path.isEmpty ? "（取れず）" : path)")
         guard let node = findNode(path: path) else {
+            if confirmingUpdate { handleUpdateFailure(); return }
             log("node が見つかりません")
-            showError(tr("Node.js が見つかりません", "找不到 Node.js"), tr("<p><a href=\"https://nodejs.org\">https://nodejs.org</a> から入れてから、もう一度開いてください。</p>", "<p>請從 <a href=\"https://nodejs.org\">https://nodejs.org</a> 安裝後重新開啟。</p>"))
+            showError(tr("Node.js が見つかりません"), tr("<p><a href=\"https://nodejs.org\">https://nodejs.org</a> から入れてから、もう一度開いてください。</p>"))
             return
         }
         let serverJS = hubDir + "/server.js"
         // 実際に読んでみる（ここで Mac が「書類フォルダへのアクセス」の確認を出す）
         if FileManager.default.contents(atPath: serverJS) == nil {
+            if confirmingUpdate { handleUpdateFailure(); return }
             log("本体を読めません: \(serverJS)（書類フォルダの許可が必要な可能性）")
-            showError(tr("本体のファイルを読めません", "無法讀取程式檔案"),
-                      tr("<p>「システム設定 → プライバシーとセキュリティ → ファイルとフォルダ」で、<b>Project Hub</b> の「書類フォルダ」をオンにしてから、もう一度開いてください。</p><p>場所：<code>\(serverJS)</code></p>", "<p>請到「系統設定 → 隱私權與安全性 → 檔案與檔案夾」，開啟 <b>Project Hub</b> 的「文件檔案夾」權限後重新開啟。</p><p>位置：<code>\(serverJS)</code></p>"))
+            showError(tr("本体のファイルを読めません"),
+                      tr("<p>「システム設定 → プライバシーとセキュリティ → ファイルとフォルダ」で、<b>Project Hub</b> の「書類フォルダ」をオンにしてから、もう一度開いてください。</p><p>場所：<code>${0}</code></p>", String(serverJS)))
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")!)
             }
@@ -356,6 +598,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         p.currentDirectoryURL = URL(fileURLWithPath: hubDir)
         var env = ProcessInfo.processInfo.environment
         env["HUB_LANG"] = hubLanguage
+        env["HUB_LANGPACK_DIR"] = hubPackDir
         let extra = [(node as NSString).deletingLastPathComponent, "/opt/homebrew/bin", "/usr/local/bin", home + "/.local/bin", home + "/.claude/local"]
         env["PATH"] = ([path] + extra + [env["PATH"] ?? "/usr/bin:/bin"]).filter { !$0.isEmpty }.joined(separator: ":")
         env["HUB_PORT"] = port
@@ -364,6 +607,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let source = (hubDir as NSString).deletingLastPathComponent
         if FileManager.default.fileExists(atPath: source + "/.git") { env["HUB_UPDATE_SOURCE"] = source }
         env["HUB_UPDATE_APP"] = Bundle.main.bundleURL.path
+        if let token = packagedRecovery.token() { env["HUB_UPDATE_CONFIRM"] = token }
+        else { env.removeValue(forKey: "HUB_UPDATE_CONFIRM") }
         p.environment = env
         if let h = FileHandle(forWritingAtPath: logPath) { h.seekToEndOfFile(); p.standardOutput = h; p.standardError = h }
         do {
@@ -371,12 +616,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             server = p
             log("本体を起動しました（node: \(node)）")
         } catch {
+            if confirmingUpdate { handleUpdateFailure(); return }
             log("本体を起動できません: \(error)")
-            showError(tr("本体を起動できません", "無法啟動伺服器"), tr("<p>記録：<code>\(logPath)</code></p>", "<p>紀錄：<code>\(logPath)</code></p>"))
+            showError(tr("本体を起動できません"), tr("<p>記録：<code>${0}</code></p>", String(logPath)))
             return
         }
         for _ in 0..<50 {
-            if serverAlive() {
+            if updateServerReady() {
                 log("本体の準備ができました")
                 DispatchQueue.main.async { self.web.load(URLRequest(url: baseURL)) }
                 return
@@ -384,9 +630,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             if !p.isRunning { break }
             Thread.sleep(forTimeInterval: 0.3)
         }
+        if confirmingUpdate {
+            if p.isRunning { p.terminate(); p.waitUntilExit() }
+            handleUpdateFailure(); return
+        }
         log("本体が応答しません（本体は\(p.isRunning ? "動いています" : "止まりました（終了コード \(p.terminationStatus)）")）")
         let busyPort = logTail(8).contains("は使われています")
-        showError(tr("本体が応答しません", "伺服器沒有回應"), (busyPort ? "<p><b>前の本体が止まったまま残っています。</b>ターミナルで <code>pkill -f ProjectHub/hub/server.js</code> を実行してから、［再読み込み］（⌘R）を押してください。</p>" : "") + tr("<p>メニューの［再読み込み］（⌘R）で、もう一度試せます。直らない時は、下の記録を Claude に見せてください：<code>\(logPath)</code></p><pre style=\"white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto\">\(logTail(25))</pre>", "<p>請從選單按［重新載入］（⌘R）再試一次。若仍失敗，請提供以下紀錄：<code>\(logPath)</code></p><pre style=\"white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto\">\(logTail(25))</pre>"))
+        showError(tr("本体が応答しません"), (busyPort ? "<p><b>前の本体が止まったまま残っています。</b>ターミナルで <code>pkill -f ProjectHub/hub/server.js</code> を実行してから、［再読み込み］（⌘R）を押してください。</p>" : "") + tr("<p>メニューの［再読み込み］（⌘R）で、もう一度試せます。直らない時は、下の記録を Claude に見せてください：<code>${0}</code></p><pre style=\"white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto\">${1}</pre>", String(logPath), String(logTail(25))))
+    }
+
+    func handleUpdateFailure() {
+        do {
+            let rolledBack = try packagedRecovery.failed()
+            log(rolledBack ? "更新に失敗したため前のアプリへ戻しました" : "新版の起動を一度だけやり直します")
+            DispatchQueue.main.async {
+                let config = NSWorkspace.OpenConfiguration(); config.createsNewApplicationInstance = true
+                NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, error in
+                    DispatchQueue.main.async {
+                        if error == nil { NSApp.terminate(nil) }
+                        else if !rolledBack { DispatchQueue.global().async { self.handleUpdateFailure() } }
+                        else { self.showError(tr("前の版を開き直してください"), tr("<p>Finderで Project Hub.app を開き直してください。</p>")) }
+                    }
+                }
+            }
+        } catch {
+            let old = (try? packagedRecovery.pending())?["old"] as? String ?? "更新前のアプリの保存場所"
+            showError(tr("前の版へ自動で戻せませんでした"), tr("<p>前の版は ${0} に残っています。Finderで［アプリケーション］へ戻してください。</p>", old))
+        }
     }
 
     // This polls local status only. The server owns the persisted 24-hour GitHub limit.
@@ -402,8 +672,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
                 guard (res as? HTTPURLResponse)?.statusCode == 200, let data = data,
                       let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       state["phase"] as? String == "installed", state["restartNeeded"] as? Bool == true else { return }
-                self.updateRelaunching = true
-                DispatchQueue.global().async {
+                self.web.evaluateJavaScript("typeof appUpdateMayRestart === 'function' && appUpdateMayRestart()") { value, error in
+                    guard error == nil, value as? Bool == true else { return }
+                    self.updateRelaunching = true
+                    DispatchQueue.global().async {
                     // The server rejects this request if AI or queued work is active.
                     guard quitServer(reason: "update") else {
                         DispatchQueue.main.async { self.updateRelaunching = false }
@@ -417,11 +689,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
                                 if let error = error {
                                     self.updateRelaunching = false
                                     log("更新したアプリを開けません: \(error)")
-                                    DispatchQueue.global().async { self.startAndLoad() }
+                                    DispatchQueue.global().async {
+                                        if (try? packagedRecovery.pending()) != nil { self.handleUpdateFailure() }
+                                        else { self.startAndLoad() }
+                                    }
                                 } else { NSApp.terminate(nil) }
                             }
                         }
                     }
+                }
                 }
             }
         }.resume()
@@ -435,26 +711,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu()
-        let reloadItem = appMenu.addItem(withTitle: tr("再読み込み", "重新載入"), action: #selector(reload), keyEquivalent: "r")
+        let reloadItem = appMenu.addItem(withTitle: tr("再読み込み"), action: #selector(reload), keyEquivalent: "r")
         reloadItem.target = self
-        appMenu.addItem(withTitle: tr("記録を開く", "開啟紀錄"), action: #selector(openLog), keyEquivalent: "l")
-        let gptItem = appMenu.addItem(withTitle: tr("横の ChatGPT を開く・閉じる", "開啟／關閉旁邊的 ChatGPT"), action: #selector(toggleGpt), keyEquivalent: "g")
-        gptItem.keyEquivalentModifierMask = [.command, .shift]
-        gptItem.target = self
-        appMenu.addItem(withTitle: tr("ファイルの許可を確かめる…", "檢查檔案權限…"), action: #selector(checkAccess), keyEquivalent: "")
-        appMenu.addItem(withTitle: tr("ファイルの許可をやり直す（確認をもう一度出す）…", "重新確認檔案權限…"), action: #selector(redoAccess), keyEquivalent: "")
+        appMenu.addItem(withTitle: tr("記録を開く"), action: #selector(openLog), keyEquivalent: "l")
+        appMenu.addItem(withTitle: tr("ファイルの許可を確かめる…"), action: #selector(checkAccess), keyEquivalent: "")
+        appMenu.addItem(withTitle: tr("ファイルの許可をやり直す（確認をもう一度出す）…"), action: #selector(redoAccess), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: tr("Project Hub を終了", "結束 Project Hub"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: tr("Project Hub を終了"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         // 編集メニュー（コピー・貼り付けを効かせる）
         let editItem = NSMenuItem(); main.addItem(editItem)
-        let edit = NSMenu(title: tr("編集", "編輯"))
-        edit.addItem(withTitle: tr("取り消す", "復原"), action: Selector(("undo:")), keyEquivalent: "z")
-        edit.addItem(withTitle: tr("カット", "剪下"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: tr("コピー", "複製"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        let pasteItem = edit.addItem(withTitle: tr("ペースト", "貼上"), action: #selector(pasteFromMenu), keyEquivalent: "v")
+        let edit = NSMenu(title: tr("編集"))
+        edit.addItem(withTitle: tr("取り消す"), action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: tr("カット"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: tr("コピー"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let pasteItem = edit.addItem(withTitle: tr("ペースト"), action: #selector(pasteFromMenu), keyEquivalent: "v")
         pasteItem.target = self
-        edit.addItem(withTitle: tr("すべてを選択", "全選"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(withTitle: tr("すべてを選択"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         NSApp.mainMenu = main
     }
@@ -463,9 +736,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
         let panel = NSOpenPanel()
-        panel.message = tr("参照する画像を選んでください（最大10枚）", "請選擇參考圖片（最多 10 張）")
-        panel.title = tr("画像を選ぶ", "選擇圖片")
-        panel.prompt = tr("追加する", "新增")
+        panel.message = tr("参照する画像を選んでください（最大10枚）")
+        panel.title = tr("画像を選ぶ")
+        panel.prompt = tr("追加する")
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
@@ -475,21 +748,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     // スクショ・プレビューからの画像コピーをPNGにして渡す。文字の貼り付けはWebKitへ。
     @objc func pasteFromMenu() {
-        // ログインの小窓では、その窓の入力欄へ通常どおり貼る
-        if let keyWindow = NSApp.keyWindow, gpt?.ownsPopupWindow(keyWindow) == true {
-            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
-            return
-        }
         // prompt の入力欄は WebKit ではなく、シートのフィールドエディタ。
         // ⌘V・編集メニューとも、名前を編集中ならその入力欄へ貼る。
         if let sheet = window.attachedSheet,
            let editor = sheet.firstResponder as? NSTextView, editor.isFieldEditor {
             editor.paste(self)
-            return
-        }
-        // 横の ChatGPT を操作している時は、そちらにそのまま貼る（画像も ChatGPT 側が受け取る）
-        if let g = gpt, let r = window.firstResponder as? NSView, r.isDescendant(of: g.web) {
-            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
             return
         }
         let pasteboard = NSPasteboard.general
@@ -509,58 +772,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         web.perform(#selector(NSText.paste(_:)), with: nil)
     }
 
-    @objc func toggleGpt() { showGpt(gpt == nil || gpt!.web.superview == nil) }
-    // 横の ChatGPT を開く・閉じる。開いている間だけ、ChatGPT の中でコピーした文を Hub に知らせる
-    func showGpt(_ open: Bool) {
-        if open {
-            if gpt == nil {
-                gpt = GptPanel()
-                // 除外期間の更新回数だけを消費。コピーの中身は読まない
-                gpt?.onPopupCopyBoundary = { [weak self] in self?.clipCount = NSPasteboard.general.changeCount }
-            }
-            guard let g = gpt, g.web.superview == nil else { return }
-            split.addArrangedSubview(g.web)
-            split.adjustSubviews()
-            split.setPosition(split.bounds.width * 0.55, ofDividerAt: 0)
-            clipCount = NSPasteboard.general.changeCount
-            clipTimer?.invalidate()
-            clipTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in self?.checkClip() }
-            log("横の ChatGPT を開きました")
-        } else {
-            gpt?.web.removeFromSuperview()
-            clipTimer?.invalidate(); clipTimer = nil
-            log("横の ChatGPT を閉じました")
-        }
-    }
-    func checkClip() {
-        let pb = NSPasteboard.general
-        if pb.changeCount == clipCount { return }
-        clipCount = pb.changeCount
-        // 新しいログイン小窓でコピーした内容は、Hub へ戻す対象に含めない
-        if let keyWindow = NSApp.keyWindow, gpt?.ownsPopupWindow(keyWindow) == true { return }
-        // ChatGPT の欄で操作していた時のコピーだけ（他のアプリや Hub の画面でのコピーは知らせない）
-        guard let g = gpt, let r = window.firstResponder as? NSView, r.isDescendant(of: g.web),
-              let text = pb.string(forType: .string), !text.isEmpty else { return }
-        web.callAsyncJavaScript("window.hubGptClip && window.hubGptClip(text)", arguments: ["text": text], in: nil, in: .page, completionHandler: nil)
-    }
-
-    // Cookie の値は渡さず、ChatGPT のログイン済みの印の有無だけを知らせる
-    func reportGptLogin() {
-        let store = gpt?.web.configuration.websiteDataStore ?? WKWebsiteDataStore.default()
-        store.httpCookieStore.getAllCookies { [weak self] cookies in
-            let loggedIn = cookies.contains {
-                let domain = $0.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-                return domain == "chatgpt.com" && $0.name.contains("session-token")
-                    && ($0.expiresDate == nil || $0.expiresDate! > Date())
-            }
-            self?.web.callAsyncJavaScript("window.hubGptLogin && window.hubGptLogin(loggedIn)",
-                                         arguments: ["loggedIn": loggedIn], in: nil, in: .page, completionHandler: nil)
-        }
-    }
-    func cookiesDidChange(in cookieStore: WKHTTPCookieStore) { reportGptLogin() }
-
     @objc func reload() {
-        if serverAlive() { web.load(URLRequest(url: baseURL)) } else { DispatchQueue.global().async { self.startAndLoad() } }
+        if packagedRecovery.token() == nil && serverAlive() { web.load(URLRequest(url: baseURL)) } else { DispatchQueue.global().async { self.startAndLoad() } }
     }
     @objc func openLog() { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) }
 
@@ -616,14 +829,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     func showAccess(_ result: [(name: String, ok: Bool)]) {
         let a = NSAlert()
-        a.messageText = tr("Mac のファイルの許可", "Mac 檔案權限")
-        let lines = result.map { "\($0.ok ? "✓" : "✕") \($0.name)フォルダ：\($0.ok ? tr("許可あり", "已允許") : tr("許可なし", "未允許"))" }.joined(separator: "\n")
+        a.messageText = tr("Mac のファイルの許可")
+        let lines = result.map { "\($0.ok ? "✓" : "✕") \($0.name)フォルダ：\($0.ok ? tr("許可あり") : tr("許可なし"))" }.joined(separator: "\n")
         let allOK = result.allSatisfy { $0.ok }
-        a.informativeText = lines + (allOK ? tr("\n\nすべて使えます。", "\n\n全部都能使用。") : tr("\n\n［確認をもう一度出す］で Mac の確認が出たら「許可」を選んでください。出ない時は［フルディスクアクセスを開く］で、表示された Project Hub をリストに入れてオンにしてください。", "\n\n請按［重新確認權限］，在 Mac 提示時選「允許」。若未出現提示，請按［開啟完整磁碟存取權］，把 Project Hub 加入清單並開啟。"))
+        a.informativeText = lines + (allOK ? tr("\n\nすべて使えます。") : tr("\n\n［確認をもう一度出す］で Mac の確認が出たら「許可」を選んでください。出ない時は［フルディスクアクセスを開く］で、表示された Project Hub をリストに入れてオンにしてください。"))
         if allOK { a.addButton(withTitle: "OK"); a.runModal(); return }
-        a.addButton(withTitle: tr("確認をもう一度出す", "重新確認權限"))
-        a.addButton(withTitle: tr("フルディスクアクセスを開く", "開啟完整磁碟存取權"))
-        a.addButton(withTitle: tr("閉じる", "關閉"))
+        a.addButton(withTitle: tr("確認をもう一度出す"))
+        a.addButton(withTitle: tr("フルディスクアクセスを開く"))
+        a.addButton(withTitle: tr("閉じる"))
         let r = a.runModal()
         if r == .alertFirstButtonReturn { askAccess(reset: true) }
         else if r == .alertSecondButtonReturn {
@@ -641,11 +854,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         if let u = a.request.url, u.scheme == "hubapp" {
             if u.host == "access" { askAccess(reset: (u.query ?? "").contains("reset=1")) }
             if u.host == "reveal" { revealFromPage(u) }
-            if u.host == "gpt" {
-                let q = URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems ?? []
-                if q.contains(where: { $0.name == "status" && $0.value == "1" }) { reportGptLogin() }
-                else { showGpt(!q.contains(where: { $0.name == "open" && $0.value == "0" })) }
-            }
             decisionHandler(.cancel); return
         }
         if let u = a.request.url, let host = u.host, host != "127.0.0.1", host != "localhost",

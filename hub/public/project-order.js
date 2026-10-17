@@ -29,7 +29,7 @@ var UI = globalThis.HubI18n || {text: x=>x, html:x=>x, label:x=>x, message:x=>x,
     };
     return p.tasks.map(t => ({ ...t, parent: parent(t), sourceParent: t.parent }));
   }
-  function finished(t) { return Boolean(t && !t.freetalk && (t.state === '完了' || t.completionPending || t.steps?.length && t.steps.every(s => s.done))); }
+  function finished(t) { return Boolean(t && !t.freetalk && (t.state === '完了' || t.completionPending || (t.stepSummary ? t.stepSummary.total>0&&t.stepSummary.done===t.stepSummary.total : t.steps?.length && t.steps.every(s => s.done)))); }
   function approved(t) { return Boolean(t && t.state === '完了' && !t.completionPending); }
   function ancestorsOf(p, t, projects = [p]) {
     const result = [], seen = new Set([p.id + '\0' + t.id]);
@@ -53,14 +53,15 @@ var UI = globalThis.HubI18n || {text: x=>x, html:x=>x, label:x=>x, message:x=>x,
   function canIntegrate(a, p, t, projects = [p]) {
     return integrators(p, t, projects).some(x => x.project.id === a.project.id && x.task.id === a.task.id);
   }
-  function integrateBlock(a, p, t, projects = [p]) {
+  function integrateBlock(a, p, t, projects = [p], disposition = 'cleanup') {
+    const retaining = disposition === 'continue' || disposition === 'partial' || disposition?.partial || disposition?.disposition === 'continue';
     const all = t ? ancestorsOf(p, t, projects) : [];
     const index = all.findIndex(x => x.project.id === a?.project?.id && x.task.id === a?.task?.id);
     if (index < 0) return UI.text('この作業は子作業の祖先ではありません。現在の親作業で確認してください');
     const middle = all.slice(0, index).find(x => !approved(x.task));
     if (middle) return UI.template`未完の中間親「${middle.task.title || middle.task.id}」を越えて統合できません。中間親の［統合…］で確認してください`;
     if (!canIntegrate(a, p, t, projects)) return UI.text('この親は完了済みです。親を再開するか、子の［本体に取り込む］で確認してください');
-    if (!finished(t) || t.question) return UI.text('子作業の手順・質問が残っています。済ませてから統合してください');
+    if (!retaining && (!finished(t) || t.question)) return UI.text('子作業の手順・質問が残っています。済ませてから統合してください');
     return null;
   }
   function displayParent(item, all) {

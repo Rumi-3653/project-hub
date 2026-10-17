@@ -13,6 +13,127 @@ const NOW = Date.parse('2026-10-03T00:00:00Z');
 const codex = { rateLimits:{ limitId:'codex',primary:{usedPercent:0,windowDurationMins:10080,resetsAt:1791046922},secondary:null,credits:{balance:'SECRET'}} };
 const claude = { subscription_type:'max',rate_limits_available:true,rate_limits:{five_hour:{utilization:20,resets_at:'2026-10-03T05:00:00Z'},seven_day:null,model_scoped:[{display_name:'Fable',utilization:33,resets_at:'2026-10-07T13:00:00Z'}]},behaviors:{private:'SECRET'} };
 
+test('Priority proof requires fresh numeric prepaid credits and is lost on failure, invalidation and slow reads', async () => {
+  let now = NOW;
+  for (const credits of [{ hasCredits: true, unlimited: true }, { hasCredits: true, unlimited: true, balance: '20' },
+    { hasCredits: true, unlimited: false, balance: '20' }, { hasCredits: false, balance: '20' }, { hasCredits: true, balance: '0' }]) {
+    const u = new Usage({ now: () => now, find: ai => ai, read: async () => ({ ...codex, rateLimits: { ...codex.rateLimits, credits } }) });
+    assert.notEqual(u.creditState('codex').prepaid, true);
+    const proof = await u.checkCredits('codex');
+    assert.equal(proof.prepaid === true, credits.hasCredits === true && credits.unlimited !== true && credits.balance === '20');
+    assert.notEqual(u.creditState('codex', 'other').prepaid, true);
+    u.invalidate('codex'); assert.equal(u.creditState('codex').availability, 'unknown');
+  }
+  const slow = new Usage({ now: () => now, find: ai => ai, read: async () => {
+    now += 30000; return { ...codex, rateLimits: { ...codex.rateLimits, credits: { hasCredits: true, balance: '20' } } };
+  } });
+  assert.equal((await slow.checkCredits('codex')).availability, 'unknown');
+});
+
+test('Priority setting is strict boolean, survives old-client writes and keeps roles, switch and permissions', () => {
+  const roles = require('../lib/roles'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-prefer-settings-')), file = path.join(dir, 'roles.yaml');
+  const text = '# fixture\nroles: {}\nswitch:\n  auto: true\npermissions:\n  publish: false\n'; fs.writeFileSync(file, text);
+  assert.equal(roles.read(file).data.preferCredits, false);
+  const initialized = fs.readFileSync(file, 'utf8');
+  for (const value of [null, 'true', 1, {}, []]) {
+    assert.equal(roles.write(file, [], { codex: true }, false, value).ok, false); assert.equal(fs.readFileSync(file, 'utf8'), initialized);
+  }
+  assert.equal(roles.write(file, [], { codex: true }, false, true).data.preferCredits, true);
+  const saved = fs.readFileSync(file, 'utf8'); assert.ok(saved.startsWith(text));
+  assert.equal(roles.write(file, []).data.preferCredits, true); assert.equal(fs.readFileSync(file, 'utf8'), saved);
+  assert.equal(roles.write(file, [], undefined, false, false).data.preferCredits, false);
+  fs.writeFileSync(file, 'preferCredits: "true"\n'); assert.equal(roles.read(file).data.preferCredits, false);
+});
+
+test('Credit checks read only the requested provider and account, share requests and preserve ordinary display', async () => {
+  const calls = [], auth = [], rows = ['claude', 'codex'].flatMap(ai => ['default', 'work'].map(id => ({ ai, id })));
+  let now = NOW;
+  const u = new Usage({ now: () => now, find: ai => ai,
+    accounts: { list: () => rows, status: async (ai, id) => { auth.push(ai + ':' + id); return { status: 'logged-in' }; } },
+    read: async (ai, file, options) => {
+      calls.push({ ai, ...options });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return ai === 'codex' ? { ...codex, rateLimits: { ...codex.rateLimits, credits: { hasCredits: true, balance: '12', unlimited: false } } } : claude;
+    } });
+  const results = await Promise.all([u.checkCredits('codex', 'work'), u.checkCredits('codex', 'work')]);
+  assert.deepEqual(results.map(r => r.availability), ['available', 'available']);
+  assert.deepEqual(calls, [{ ai: 'codex', account: 'work' }]);
+  assert.deepEqual(auth, ['codex:work']);
+  assert.equal(u.snapshot({ codex: 'work' }).providers.codex.credits.balance, '12');
+  await u.checkCredits('codex', 'work'); assert.equal(calls.length, 1);
+  now += 31000; await u.checkCredits('claude', 'default');
+  assert.equal(calls.at(-1).ai, 'claude'); assert.equal(calls.at(-1).account, 'default');
+  assert.ok(calls.every(c => Object.keys(c).sort().join(',') === 'account,ai'));
+});
+
+test('Claude extra usage remains unknown when only monthly allowance is supplied', async () => {
+  for (const extra of [undefined, { is_enabled: true, monthly_limit: 100, used_credits: 1, utilization: 1, currency: 'USD', private: 'SECRET' },
+    { is_enabled: true, utilization: 100 }, { is_enabled: false }, { is_enabled: 'true', utilization: '0' }]) {
+    const u = new Usage({ now: () => NOW, find: ai => ai, read: async () => ({ ...claude, rate_limits: { ...claude.rate_limits, extra_usage: extra } }) });
+    const result = await u.checkCredits('claude');
+    assert.equal(result.availability, 'unknown');
+    assert.equal(result.balance, undefined);
+    assert.doesNotMatch(JSON.stringify(result), /SECRET|monthly_limit|used_credits|currency/);
+  }
+  const u = new Usage({ now: () => NOW, find: ai => ai, read: async () => ({ ...claude, extra_usage: { disabled_reason: 'out_of_credits' } }) });
+  assert.equal((await u.checkCredits('claude')).availability, 'empty');
+});
+
+test('Credit failures, stale/future timestamps and malformed balances remain unknown, and account invalidation rejects late reads', async () => {
+  let now = NOW, fail = false, calls = 0;
+  const u = new Usage({ now: () => now, find: ai => ai, read: async () => {
+    calls++; if (fail) throw Error('SECRET');
+    return { ...codex, rateLimits: { ...codex.rateLimits, credits: { hasCredits: true, balance: '7' } } };
+  } });
+  assert.equal((await u.checkCredits('codex')).availability, 'available');
+  now -= 1; assert.equal((await u.checkCredits('codex')).availability, 'unknown');
+  now = NOW + 31000; fail = true;
+  assert.equal((await u.checkCredits('codex')).availability, 'unknown');
+  assert.equal(calls, 2); assert.equal(u.snapshot().providers.codex.credits, undefined);
+  for (const balance of ['0', '0.00', '9007199254740993123456789.50', '1e5', ' 3', null]) {
+    const v = new Usage({ now: () => NOW, find: ai => ai, read: async () => ({ ...codex, rateLimits: { ...codex.rateLimits, credits: { hasCredits: true, balance } } }) });
+    assert.equal((await v.checkCredits('codex')).availability, balance === '0' || balance === '0.00' ? 'empty' : balance === '9007199254740993123456789.50' ? 'available' : 'unknown');
+  }
+  let release;
+  const v = new Usage({ now: () => NOW, find: ai => ai, read: () => new Promise(resolve => { release = resolve; }) });
+  const pending = v.checkCredits('codex', 'work');
+  await new Promise(resolve => setImmediate(resolve));
+  v.invalidate('codex', 'work'); release(codex);
+  assert.equal((await pending).availability, 'unknown'); assert.equal(v.cache['codex:work'], undefined);
+});
+
+test('Ordinary usage does not parse new credit check fields, and recent ordinary reads do not invent a balance check', async () => {
+  let reads = 0;
+  const u = new Usage({ now: () => NOW, find: ai => ai, read: async ai => { reads++; return ai === 'codex' ? codex : { ...claude, extra_usage: { is_enabled: true } }; } });
+  const status = await u.status();
+  assert.equal(status.providers.claude.creditCheck, undefined); assert.equal(status.providers.codex.creditCheck, undefined);
+  assert.equal((await u.checkCredits('claude')).availability, 'unknown'); assert.equal(reads, 2);
+});
+
+test('Credit settings default OFF, reject non-booleans without saving, and preserve omitted provider settings and unrelated lines', () => {
+  const roles = require('../lib/roles');
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-credit-settings-')), file = path.join(d, 'roles.yaml');
+  const text = '# fixture\nmodels: {}\nroles: {} # keep role comment\nswitch:\n  auto: true # keep auto\npermissions:\n  publish: false # keep permissions\n';
+  fs.writeFileSync(file, text);
+  assert.deepEqual(roles.read(file).data.checkCredits, { claude: false, codex: false });
+  const initialized = fs.readFileSync(file, 'utf8');
+  for (const value of [null, [], 'true', { claude: 'true' }, { codex: 1 }, { claude: null }, { other: true }]) {
+    assert.equal(roles.write(file, [], value).ok, false); assert.equal(fs.readFileSync(file, 'utf8'), initialized);
+  }
+  assert.deepEqual(roles.write(file, [], { claude: true }).data.checkCredits, { claude: true, codex: false });
+  assert.deepEqual(roles.write(file, [], { codex: true }).data.checkCredits, { claude: true, codex: true });
+  fs.appendFileSync(file, '# final comment\n');
+  const saved = fs.readFileSync(file, 'utf8');
+  assert.ok(saved.startsWith(text));
+  assert.deepEqual(roles.write(file, []).data.checkCredits, { claude: true, codex: true });
+  assert.equal(fs.readFileSync(file, 'utf8'), saved);
+  assert.deepEqual(roles.write(file, [], { claude: false }).data.checkCredits, { claude: false, codex: true });
+  assert.deepEqual(roles.read(file).data.switch, { auto: true });
+  assert.deepEqual(roles.read(file).data.permissions, { publish: false });
+  fs.writeFileSync(file, 'checkCreditsClaude: "true"\ncheckCreditsCodex: 1\n');
+  assert.deepEqual(roles.read(file).data.checkCredits, { claude: false, codex: false });
+});
+
 test('Codex uses actual window duration including weekly-only primary and allows zero usage', () => {
   const rows = codexWindows(codex);
   assert.equal(rows[0].label,'週間枠'); assert.equal(rows[0].usedPercent,0);
@@ -80,8 +201,9 @@ test('Credits require hasCredits and an exact bounded numeric string, or explici
   const read = async credits => (await new Usage({now:()=>NOW,find:ai=>ai,read:async ai=>ai==='codex'?{...codex,rateLimits:{...codex.rateLimits,credits}}:claude}).status()).providers.codex.credits;
   for(const balance of ['0','62500','9007199254740993123456789.50']) assert.deepEqual(await read({hasCredits:true,balance}),{balance,unlimited:false});
   for(const balance of [62500,null,'SECRET','1e5','-1','1,000',' 5','5\n','Infinity','9'.repeat(81)]) assert.equal(await read({hasCredits:true,balance}),undefined);
-  for(const credits of [undefined,{balance:'10'},{hasCredits:false,balance:'10',unlimited:true},{hasCredits:'true',balance:'10'}]) assert.equal(await read(credits),undefined);
+  for(const credits of [undefined,{balance:'10'},{hasCredits:'true',balance:'10'}]) assert.equal(await read(credits),undefined);
   assert.deepEqual(await read({hasCredits:true,unlimited:true,balance:null}),{unlimited:true});
+  assert.deepEqual(await read({hasCredits:false,balance:'10',unlimited:true}),{hasCredits:false});
   assert.deepEqual(await read({hasCredits:true,unlimited:true,balance:'0'}),{balance:'0',unlimited:true});
 });
 test('Missing, non-finite and malformed fields remain unknown rather than zero or an invented reset', () => {
@@ -201,6 +323,7 @@ test('Every visible Claude account still updates only its own recorded Fable lim
 
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'hub-usage-'));
 const fake=path.join(dir,'cli.cjs');
+const ticketData = { ...codex, accountId:'remote-account', rateLimitResetCredits:{ availableCount:1, credits:[{ id:'PRIVATE-CREDIT', resetType:'codexRateLimits', status:'available', title:'Full reset', expiresAt:1794438000 }] } };
 fs.writeFileSync(fake,`
 const fs=require('node:fs'),rl=require('node:readline').createInterface({input:process.stdin});
 const [ai,log,mode]=process.argv.slice(2);
@@ -211,7 +334,14 @@ rl.on('line',line=>{const m=JSON.parse(line);fs.appendFileSync(log,line+'\\n');
   if(ai==='codex'){
     if(m.id===0)send({id:0,result:{}});
     if(m.id===1)send({id:1,result:{account:{type:mode==='api'?'apiKey':'chatgpt',planType:'pro',email:'SECRET'}}});
-    if(m.id===2)send({id:2,result:${JSON.stringify(codex)}});
+    if(m.id===2){const data=mode.startsWith('reset-')?${JSON.stringify(ticketData)}:${JSON.stringify(codex)};
+      if(mode==='reset-account-change')data.accountId='different';
+      if(mode==='reset-expired')data.rateLimitResetCredits.credits[0].expiresAt=1;
+      if(mode==='reset-redeeming')data.rateLimitResetCredits.credits[0].status='redeeming';
+      if(mode==='reset-count-only')data.rateLimitResetCredits.credits=null;
+      send({id:2,result:data});}
+    if(m.id===3){if(mode==='reset-timeout')return;if(mode==='reset-exit')process.exit(0);
+      send({id:3,result:{outcome:mode==='reset-count-only'?'reset':mode.slice(6)}});}
   }else{
     const id=m.request_id;
     if(m.request.subtype==='initialize')send({type:'control_response',response:{request_id:id,subtype:'success',response:{account:{email:'SECRET'}}}});
@@ -275,5 +405,33 @@ test('Hanging or oversized CLI output is bounded and process is stopped', async 
     const f=fixture('codex',mode);
     await assert.rejects(readCli('codex','codex',{spawn:f.spawn,timeoutMs:mode==='timeout'?100:3000}),e=>e.usageCode===(mode==='timeout'?'timeout':'format'));
     assert.ok(f.children[0].signalCode || f.children[0].exitCode!==null);
+  }
+});
+test('Ticket consume protocol validates identity first, sends one UUID and exposes only the known outcome', async () => {
+  for (const outcome of ['reset','nothingToReset','noCredit','alreadyRedeemed']) {
+    const f=fixture('codex','reset-'+outcome);let saved=0;
+    const r=await readCli('codex','codex',{spawn:f.spawn,timeoutMs:3000,now:()=>NOW,consume:{accountId:'remote-account',creditId:'PRIVATE-CREDIT',idempotencyKey:'attempt-uuid',beforeSend:()=>saved++}});
+    assert.deepEqual(r,{outcome});assert.equal(saved,1);
+    const req=fs.readFileSync(f.log,'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(req.map(x=>x.method),['initialize','initialized','account/read','account/rateLimits/read','account/rateLimitResetCredit/consume']);
+    assert.deepEqual(req.at(-1).params,{idempotencyKey:'attempt-uuid',creditId:'PRIVATE-CREDIT'});
+  }
+});
+test('Account change, expiry, redeeming and journal failure all stop before consume', async () => {
+  for (const mode of ['reset-account-change','reset-expired','reset-redeeming','reset-reset']) {
+    const f=fixture('codex',mode);
+    await assert.rejects(readCli('codex','codex',{spawn:f.spawn,timeoutMs:3000,now:()=>NOW,consume:{accountId:'remote-account',creditId:'PRIVATE-CREDIT',idempotencyKey:'uuid',beforeSend:()=>{throw Error('SECRET');}}}),e=>e.consumeSent===false);
+    assert.doesNotMatch(fs.readFileSync(f.log,'utf8'),/Credit\/consume/);
+  }
+});
+test('Count-only ticket omits creditId; malformed outcomes, disconnects and timeout never resend', async () => {
+  const f=fixture('codex','reset-count-only');
+  await readCli('codex','codex',{spawn:f.spawn,timeoutMs:3000,now:()=>NOW,consume:{accountId:'remote-account',idempotencyKey:'uuid',beforeSend(){}}});
+  const requests=fs.readFileSync(f.log,'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(requests.at(-1).params,{idempotencyKey:'uuid'});
+  for (const mode of ['reset-timeout','reset-exit','reset-unknown']) {
+    const g=fixture('codex',mode);
+    await assert.rejects(readCli('codex','codex',{spawn:g.spawn,timeoutMs:mode==='reset-timeout'?200:3000,now:()=>NOW,consume:{accountId:'remote-account',creditId:'PRIVATE-CREDIT',idempotencyKey:'uuid',beforeSend(){}}}),e=>e.consumeSent===true);
+    assert.equal(fs.readFileSync(g.log,'utf8').split('account/rateLimitResetCredit/consume').length-1,1);
   }
 });

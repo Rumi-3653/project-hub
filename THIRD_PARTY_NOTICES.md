@@ -71,3 +71,9 @@ SOFTWARE.
 
 - teddashh/bat-agent-connector（MIT）：入力待ちの見張り、取り込み前の確認、操作の記録
 - arumwu/goose-acp-handoff：AI を交代する時の引き継ぎ資料
+
+## 取り入れた Pull Request
+
+- [walkpod1007 / PR #6](https://github.com/kieiken/project-hub/pull/6)（7191e559e796d487805d3843c1dff26b9d15626c）：中継接続の判定・接続元取得を現行版へ適応しました。
+- [arumwu / PR #2](https://github.com/kieiken/project-hub/pull/2)（af9c4d824d772a5be7a4f299d01a14ecdde6179b）：一覧の幅調整（sidebar-resize.js、対応する画面・試験）だけを現行版へ適応しました。
+- いずれも Project Hub の MIT ライセンスで提供された変更です。各投稿者の由来をここに残します。

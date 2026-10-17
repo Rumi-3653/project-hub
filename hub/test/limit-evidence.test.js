@@ -114,7 +114,7 @@ for (const fault of ['rename', 'tmp-write', 'directory']) {
 }
 
 for (const action of ['unqueue', 'interrupt', 'shutdown']) {
-  test(`キュー事前確認中の${action}で起動せず、取り消した先頭を復活させない`, async () => {
+  test(`キュー事前確認中の${action}で起動せず、取消だけ先頭を除き、停止時は待ち指示を保持する`, async () => {
     const { file } = fixture(), pdir = path.dirname(file); let release, starts = 0;
     const blocked = new Promise(r => { release = r; });
     const runner = new ChatRunner({ beforeQueued: () => blocked });
@@ -128,6 +128,45 @@ for (const action of ['unqueue', 'interrupt', 'shutdown']) {
     if (action === 'shutdown') runner.stopAll();
     release(); await rejected;
     assert.equal(starts, 0); assert.equal(runner.busy('test', 'case'), null);
-    assert.deepEqual(runner.queue('test', 'case').map(x => x.id), action === 'shutdown' ? ['first', 'follower'] : ['follower']);
+    assert.deepEqual(runner.queue('test', 'case').map(x => x.id), action === 'unqueue' ? ['follower'] : ['first', 'follower']);
   });
 }
+
+for (const [name,ai,mode,images,expected] of [
+  ['redo image','codex','redo',['B'],['B']],
+  ['redo empty','codex','redo',[],[]],
+  ['amend union','codex','amend',['A','B'],['A','B']],
+  ['normal unchanged','codex','redo',undefined,['A']],
+  ['Claude unchanged','claude','amend',undefined,['A']],
+]) {
+ test(ai==='chatgpt'?'廃止したChatGPT契約枠は添付確認前に拒否し保存キューと後続を保持':`確認中の添付置換：${name}は保存キューと実行optionsをそろえ後続を保持`,async()=>{
+  const {file}=fixture(),pdir=path.dirname(file);let release;
+  const runner=new ChatRunner({dirOf:()=>pdir,beforeQueued:()=>new Promise(resolve=>{release=resolve;})});
+  const o={project:'test',task:'case',pdir,ai,model:ai==='codex'?'GPT-6.1-Sol':'Opus 5.5',text:'original',request:'first',images:['A'],account:'default',effort:'高',role:'コーディング',perm:'fixture'};
+  runner.enqueue('test','case',{...o,id:'first'});const follower=runner.enqueue('test','case',{id:'follower',text:'later',images:['C']});
+  if(ai==='chatgpt') {
+   const before=JSON.parse(JSON.stringify(runner.queue('test','case')));
+   await assert.rejects(runner.sendQueued(o),/契約枠は廃止/);
+   assert.equal(release,undefined);assert.equal(runner.busy('test','case'),null);
+   assert.deepEqual(runner.queue('test','case'),before);
+   assert.deepEqual(new ChatRunner({dirOf:()=>pdir}).queue('test','case'),before);
+   return;
+  }
+  const pending=runner.sendQueued(o),rejected=assert.rejects(pending,/確認中に停止/);
+  await new Promise(resolve=>setImmediate(resolve));
+  const replacement=runner.replacePending('test','case','replacement',mode,images);
+  await replacement.finished;await rejected;release();await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(replacement.options.images,expected);assert.notEqual(replacement.options.request,'first');
+  const queue=runner.queue('test','case');assert.equal(queue[0].id,replacement.options.request);assert.deepEqual(queue[0].images,expected);assert.deepEqual(queue[1],follower);
+  const restarted=new ChatRunner({dirOf:()=>pdir});assert.deepEqual(restarted.queue('test','case'),JSON.parse(JSON.stringify(queue)));
+  for(const key of ['ai','model','account','effort','role','perm'])assert.equal(replacement.options[key],o[key]);
+  assert.equal(queue.some(x=>x.id==='first'),false);
+ });
+}
+
+test('retired ChatGPT queue refuses before preflight and preserves pending items',async()=>{
+ const {file}=fixture(),pdir=path.dirname(file);let checks=0;
+ const runner=new ChatRunner({dirOf:()=>pdir,beforeQueued:()=>{checks++;}}),o={project:'test',task:'retired',pdir,ai:'chatgpt',text:'old',request:'first',images:['A']};
+ runner.enqueue('test','retired',{...o,id:'first'});runner.enqueue('test','retired',{id:'follower',text:'later'});const before=JSON.stringify(runner.queue('test','retired'));
+ await assert.rejects(runner.sendQueued(o),/契約枠は廃止/);assert.equal(checks,0);assert.equal(JSON.stringify(runner.queue('test','retired')),before);assert.equal(runner.busy('test','retired'),null);
+});

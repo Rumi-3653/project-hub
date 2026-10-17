@@ -6,11 +6,17 @@ const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 
-const { AIS, AI_LABEL, AGY_MODEL, childEnv, agyAccountError } = require('./launch');
+const { AIS, AI_LABEL, childEnv, agyAccountError } = require('./launch');
 const { models: grokModels } = require('./grok');
+const { agyModels } = require('./agy-models');
 const { latestVersion, newer } = require('./update-check');
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/;
 const MAX_OUTPUT = 5 * 1024 * 1024;
+const EFFORT_LABEL = { medium: '中', high: '高', xhigh: '極高', max: 'MAX', ultra: 'Ultra' };
+function modelEfforts(value) {
+  if (!Array.isArray(value)) return undefined;
+  return [...new Set(value.map(r => EFFORT_LABEL[typeof r === 'string' ? r : r?.effort]).filter(Boolean))];
+}
 
 function toolError(status, stage, reason) {
   const e = new Error(reason);
@@ -22,7 +28,7 @@ function toolError(status, stage, reason) {
 
 function runFile(file, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: opts.timeout || 30000, maxBuffer: MAX_OUTPUT, env: childEnv(['agy', 'grok'].includes(path.basename(file)) ? path.basename(file) : '', process.env) }, (err, stdout, stderr) => {
+    execFile(file, args, { timeout: opts.timeout || 30000, maxBuffer: MAX_OUTPUT, env: childEnv(['agy', 'grok'].includes(path.basename(file)) ? path.basename(file) : '', opts.env || process.env) }, (err, stdout, stderr) => {
       if (err) return reject(err); // stdout/stderr には認証情報が入り得るので外へ出さない
       resolve(String(stdout || ''));
     });
@@ -65,7 +71,8 @@ function cleanModels(rows) {
   if (!Array.isArray(rows)) throw toolError(502, 'models', lt('モデル一覧の形式が正しくありません'));
   const seen = new Set();
   return rows.filter(row => row && typeof row.id === 'string' && ID.test(row.id))
-    .map(row => ({ id: row.id, label: typeof row.label === 'string' && row.label.length <= 80 ? row.label : row.id }))
+    .map(row => ({ id: row.id, label: typeof row.label === 'string' && row.label.length <= 80 ? row.label : row.id,
+      ...(Array.isArray(row.efforts) ? { efforts: row.efforts.filter(e => Object.values(EFFORT_LABEL).includes(e)) } : {}) }))
     .filter(row => !seen.has(row.id) && seen.add(row.id));
 }
 
@@ -91,27 +98,23 @@ function uniqueLabels(known, current) {
 function codexModels(json) {
   const rows = JSON.parse(json).models;
   if (!Array.isArray(rows)) throw toolError(502, 'models', lt('Codex のモデル一覧を読めませんでした'));
-  const models = cleanModels(rows.filter(row => row && row.visibility === 'list').map(row => ({ id: row.slug, label: row.display_name || row.slug })));
+  const models = cleanModels(rows.filter(row => row && row.visibility === 'list').map(row => ({ id: row.slug, label: row.display_name || row.slug,
+    efforts: modelEfforts(row.supported_reasoning_levels) })));
   if (!models.length) throw toolError(502, 'models', lt('Codex の表示対象モデルが見つかりませんでした'));
   return models;
-}
-
-function agyModels(text) {
-  const found = String(text).split(/\r?\n/).map(line => line.split('\t')).find(([id]) => id === AGY_MODEL.id);
-  if (!found) { const error = toolError(502, 'models', lt('Agy の一覧に承認された Gemini 3.1 Pro (High) がありません。別のモデルへは切り替えません')); error.unavailable = true; throw error; }
-  return [{ ...AGY_MODEL }];
 }
 
 function claudeModels(json) {
   const rows = JSON.parse(json)?.catalog?.config?.models;
   if (!Array.isArray(rows)) throw toolError(502, 'models', lt('Claude Code のモデル一覧を読めませんでした'));
-  const models = cleanModels(rows.filter(row => row && row.section === 'main').map(row => ({ id: row.id, label: row.name || row.id })));
+  const models = cleanModels(rows.filter(row => row && row.section === 'main').map(row => ({ id: row.id, label: row.name || row.id,
+    efforts: modelEfforts(row.supported_reasoning_levels || row.supportedEfforts) })));
   if (!models.length) throw toolError(502, 'models', lt('Claude Code の表示対象モデルが見つかりませんでした'));
   return models;
 }
 
-function latestClaudeCache(home) {
-  const dir = path.join(home, '.claude', 'cache', 'model-catalog');
+function latestClaudeCache(home, configDir = path.join(home, '.claude')) {
+  const dir = path.join(configDir, 'cache', 'model-catalog');
   try {
     return fs.readdirSync(dir).filter(name => name.endsWith('.json')).map(name => {
       const file = path.join(dir, name);
@@ -121,12 +124,12 @@ function latestClaudeCache(home) {
 }
 
 // Claude Code の制御 initialize だけを送り、推論やユーザー文は送らない。
-function claudeInitialize(file, timeoutMs = 12000) {
+function claudeInitialize(file, timeoutMs = 12000, env = process.env) {
   const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--safe-mode', '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--tools', '', '--model', 'claude-fable-5-1'];
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+    const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let done = false, success = false, timedOut = false, buf = '', bytes = 0, modelIds = [], pendingError = null;
     let killTimer;
     const stopChild = () => {
@@ -177,6 +180,7 @@ class AiTools {
     this.dry = Boolean(opts.dry);
     this.refreshClaude = opts.refreshClaude || claudeInitialize;
     this.operation = null;
+    this.maintenance = null;
     this.latest = opts.latest || latestVersion;
     this.updateChecks = {};
     this.checking = new Map();
@@ -185,9 +189,11 @@ class AiTools {
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       for (const ai of AIS) if (saved[ai]) {
-        const models = cleanModels(saved[ai].models).filter(x => ai !== 'agy' || x.id === AGY_MODEL.id);
-        this.catalogs[ai] = { models, known: mergeKnown(cleanModels(saved[ai].known || []).filter(x => ai !== 'agy' || x.id === AGY_MODEL.id), models),
-          refreshedAt: String(saved[ai].refreshedAt || ''), source: String(saved[ai].source || 'saved') };
+        const known = cleanModels(saved[ai].known || []);
+        const models = uniqueLabels(known, cleanModels(saved[ai].models));
+        this.catalogs[ai] = { models, known: mergeKnown(known, models),
+          refreshedAt: String(saved[ai].refreshedAt || ''), source: String(saved[ai].source || 'saved'),
+          ...(ai === 'agy' ? { state: saved[ai].state || (models.length ? 'ready' : 'unconfirmed'), error: String(saved[ai].error || '') } : {}) };
       }
     } catch (e) { /* 保存が無ければ CLI のローカルキャッシュを読む */ }
     this.syncCaches();
@@ -217,14 +223,14 @@ class AiTools {
 
   staleModel(ai, label) {
     const c = this.catalogs[ai];
-    const old = c?.known.find(row => row.label === label);
+    const old = c?.known.find(row => row.label === label || row.id === label);
     return Boolean(old && !c.models.some(row => row.id === old.id));
   }
 
-  async version(ai, file, strict = false) {
+  async version(ai, file, strict = false, opts = {}) {
     if (!file || this.dry) return '';
     try {
-      const value = (await this.run(file, ['--version'], { timeout: 10000 })).trim().split('\n')[0];
+      const value = (await this.run(file, ['--version'], { timeout: 10000, env: opts.env })).trim().split('\n')[0];
       const number = value.match(/\b\d+\.\d+\.\d+(?:[-+][\w.]+)?\b/);
       if (number) return number[0];
     } catch (e) { /* status は不明、更新後は検証失敗として返す */ }
@@ -245,10 +251,11 @@ class AiTools {
         modelRefreshAvailable: true,
       }];
     }));
-    return { tools: Object.fromEntries(entries), operation: this.operation, busyCount: this.busy() };
+    return { tools: Object.fromEntries(entries), operation: this.operation || this.maintenance?.operation || null, busyCount: this.busy() };
   }
 
-  async checkUpdate(ai) {
+  async checkUpdate(ai, opts = {}) {
+    this.assertOwner(opts);
     if (!AIS.includes(ai)) throw toolError(400, 'input', lt('AI の指定が正しくありません'));
     if (this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', lt('このAIの更新適用が終わってから確認してください'));
     if (this.checking.has(ai)) return this.checking.get(ai);
@@ -257,10 +264,10 @@ class AiTools {
     const pending = (async () => {
       const epoch = this.updateEpoch[ai] || 0;
       try {
-        const currentVersion = await this.version(ai, file);
+        const currentVersion = await this.version(ai, file, false, opts);
         if (!currentVersion && !this.dry) throw Error(lt('現在版が不明'));
         const method = this.methods[ai] || methodFor(ai, file);
-        const latest = this.dry ? { version: currentVersion || '0.0.0', source: 'dry-run' } : await this.latest(ai, method, this.home);
+        const latest = this.dry ? { version: currentVersion || '0.0.0', source: 'dry-run' } : await this.latest(ai, method, this.home, undefined, ai === 'claude' ? opts.cacheDir : undefined);
         if (epoch !== (this.updateEpoch[ai] || 0) || this.operation?.ai === ai && this.operation.kind === 'update') throw toolError(409, 'busy', lt('確認中に更新が適用されました。適用後に確認してください'));
         const result = { ok: true, ai, currentVersion, latestVersion: latest.version, source: latest.source,
           available: newer(latest.version, currentVersion), checkedAt: new Date().toISOString(), applicable: ['standalone', 'native', 'homebrew-cask'].includes(method) };
@@ -275,10 +282,11 @@ class AiTools {
     try { return await pending; } finally { this.checking.delete(ai); }
   }
 
-  check(ai) {
+  check(ai, opts = {}) {
+    this.assertOwner(opts);
     if (!AIS.includes(ai)) throw toolError(400, 'input', lt('AI の指定が正しくありません'));
     if (this.operation) throw toolError(409, 'busy', lt('別の更新・モデル再取得が進行中です'));
-    const n = this.busy();
+    const n = this.busy(ai);
     if (n) throw toolError(409, 'busy', lt`動いている AI が ${n} つあります。止めてから更新してください`);
     const file = this.find(ai);
     if (!file) throw toolError(400, 'detect', lt`${AI_LABEL[ai]} が見つかりません`);
@@ -289,10 +297,11 @@ class AiTools {
   saveCatalog(ai, found) {
     const previous = new Set(this.catalogs[ai].models.map(x => x.id));
     const clean = uniqueLabels(this.catalogs[ai].known, cleanModels(found.models));
-    if (!clean.length && !(ai === 'agy' && found.unavailable)) throw toolError(502, 'models', lt('取得したモデル一覧が空のため、以前の候補を残しました'));
+    if (!clean.length && !(ai === 'agy' && (found.empty || found.authRequired))) throw toolError(502, 'models', lt('取得したモデル一覧が空のため、以前の候補を残しました'));
     const known = mergeKnown(this.catalogs[ai].known, clean);
     const refreshedAt = new Date().toISOString();
-    const next = { ...this.catalogs, [ai]: { models: clean, known, refreshedAt, source: found.source } };
+    const next = { ...this.catalogs, [ai]: { models: clean, known, refreshedAt, source: found.source,
+      ...(ai === 'agy' ? { state: found.authRequired ? 'auth-required' : clean.length ? 'ready' : 'empty', error: '' } : {}) } };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
     try {
@@ -304,28 +313,39 @@ class AiTools {
     }
     this.catalogs = next;
     return { ok: true, models: clean, added: clean.filter(x => !previous.has(x.id)).length, refreshedAt, source: found.source,
-      ...(found.unavailable ? { unavailable: true, warning: lt('承認された Gemini 3.1 Pro (High) が一覧から外れたため、Agy を選べない状態にしました。別のモデルへは切り替えません') } : {}) };
+      ...(ai === 'agy' && !clean.length ? { empty: true, warning: lt('利用可能なモデルがありません。モデル一覧を再取得してください') } : {}) };
   }
 
-  async fetchModels(ai, file) {
+  modelFailure(ai, message) {
+    const current = this.catalogs[ai];
+    this.catalogs[ai] = { ...current, state: 'failed', error: message };
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ v: 1, ...this.catalogs }, null, 2)); fs.renameSync(tmp, this.file);
+    } catch (e) { this.catalogs[ai] = current; throw e; }
+  }
+
+  async fetchModels(ai, file, opts = {}) {
     if (ai === 'agy') {
-      const text = await this.run(file, ['models']);
-      try { return { models: agyModels(text), source: 'agy-cli' }; }
-      catch (e) { if (!e.unavailable) throw e; return { models: [], source: 'agy-cli', unavailable: true }; }
+      const text = await this.run(file, ['models'], { env: opts.env });
+      try { const models = agyModels(text); return { models, source: 'agy-cli', empty: !models.length }; }
+      catch { throw toolError(502, 'models', lt('Agy のモデル一覧の形式を確認できませんでした。前回の候補を保持しています')); }
     }
-    if (ai === 'grok') return { models: grokModels(await this.run(file, ['models'])), source: 'grok-cli' };
-    if (ai === 'codex') return { models: codexModels(await this.run(file, ['debug', 'models'], { timeout: 120000 })), source: 'codex-cli' };
-    const before = latestClaudeCache(this.home);
-    const liveIds = await this.refreshClaude(file); // 応答の main/overflow は混在するので、モデル名は cache の main から取る
-    const after = latestClaudeCache(this.home);
+    if (ai === 'grok') return { models: grokModels(await this.run(file, ['models'], { env: opts.env })), source: 'grok-cli' };
+    if (ai === 'codex') return { models: codexModels(await this.run(file, ['debug', 'models', ...(opts.fileAuth ? ['-c', 'cli_auth_credentials_store="file"'] : [])], { timeout: 120000, env: opts.env })), source: 'codex-cli' };
+    const before = latestClaudeCache(this.home, opts.cacheDir);
+    const liveIds = await this.refreshClaude(file, 12000, opts.env); // 応答の main/overflow は混在するので、モデル名は cache の main から取る
+    const after = latestClaudeCache(this.home, opts.cacheDir);
     const unchanged = !after || (before && after.file === before.file && after.mtime <= before.mtime);
-    if (unchanged) {
+    if (!after) {
       if (!this.catalogs.claude.models.length) throw toolError(502, 'models', lt('Claude Code の新しいモデル一覧を確認できませんでした'));
       return { models: this.catalogs.claude.models, source: this.catalogs.claude.source, unchanged: true };
     }
     try {
+      // cacheを再書込しないCLIでも、今回の制御応答とmainが一致すれば新しい観測として保存する。
       const models = claudeModels(fs.readFileSync(after.file, 'utf8'));
-      const matches = id => liveIds.includes(id) || ['opus', 'sonnet', 'haiku'].some(family => id.startsWith(`claude-${family}-`) && liveIds.includes(family));
+      const matches = id => liveIds.includes(id) || ['opus', 'sonnet', 'haiku', 'fable'].some(family => id.startsWith(`claude-${family}-`) && liveIds.includes(family));
       if (!Array.isArray(liveIds) || !models.every(row => matches(row.id))) {
         if (!this.catalogs.claude.models.length) throw toolError(502, 'models', lt('Claude Code の応答とモデル一覧が一致しません'));
         return { models: this.catalogs.claude.models, source: this.catalogs.claude.source, unchanged: true };
@@ -335,26 +355,35 @@ class AiTools {
         source: 'claude-cache',
       };
     }
-    catch (e) { throw e.status ? e : toolError(502, 'models', lt('Claude Code のモデル一覧を読めませんでした')); }
+    catch (e) {
+      if (unchanged && this.catalogs.claude.models.length) {
+        return { models: this.catalogs.claude.models, source: this.catalogs.claude.source, unchanged: true };
+      }
+      throw e.status ? e : toolError(502, 'models', lt('Claude Code のモデル一覧を読めませんでした'));
+    }
   }
 
-  async refresh(ai) {
-    const { file } = this.check(ai);
+  async refresh(ai, opts = {}) {
+    const { file } = this.check(ai, opts);
     if (this.dry) return { ok: true, dry: true, ai, models: this.catalogs[ai].models, added: 0, refreshedAt: this.catalogs[ai].refreshedAt };
     this.operation = { ai, kind: 'models', startedAt: new Date().toISOString() };
     try {
-      const found = await this.fetchModels(ai, file);
+      const found = await this.fetchModels(ai, file, opts);
       const result = found.unchanged
         ? { ok: true, models: this.catalogs[ai].models, added: 0, refreshedAt: this.catalogs[ai].refreshedAt,
           source: this.catalogs[ai].source, unchanged: true, warning: lt('Claude Code のローカル候補を新しく確認できず、前回の内容を残しました') }
         : this.saveCatalog(ai, found);
-      return { ai, ...result };
-    } catch (e) { throw e.status ? e : failure('models', e); }
+      return { ai, ...result, observedModels: found.unchanged ? undefined : found.models };
+    } catch (e) {
+      const error = e.status ? e : failure('models', e);
+      if (ai === 'agy') this.modelFailure(ai, error.message);
+      throw error;
+    }
     finally { this.operation = null; }
   }
 
-  async update(ai) {
-    const { file, method } = this.check(ai);
+  async update(ai, opts = {}) {
+    const { file, method } = this.check(ai, opts);
     let updater, args;
     if (ai === 'codex' && method === 'standalone') { updater = file; args = ['update']; }
     else if (ai === 'claude' && method === 'homebrew-cask') { updater = this.find('brew'); args = ['upgrade', '--cask', 'claude-code@latest']; }
@@ -366,19 +395,20 @@ class AiTools {
     this.operation = { ai, kind: 'update', startedAt: new Date().toISOString() };
     this.updateEpoch[ai] = (this.updateEpoch[ai] || 0) + 1;
     try {
-      const beforeVersion = await this.version(ai, file);
-      await this.run(updater, args, { timeout: 600000 });
+      const beforeVersion = await this.version(ai, file, false, opts);
+      await this.run(updater, args, { timeout: 600000, env: opts.env });
       delete this.updateChecks[ai];
       let afterVersion = '', verifyError = '';
-      try { afterVersion = await this.version(ai, this.find(ai) || file, true); }
+      try { afterVersion = await this.version(ai, this.find(ai) || file, true, opts); }
       catch (e) { verifyError = e.reason || e.message; }
       let models;
       try {
-        const found = await this.fetchModels(ai, this.find(ai) || file);
+        const found = await this.fetchModels(ai, this.find(ai) || file, opts);
         models = found.unchanged
           ? { ok: true, models: this.catalogs[ai].models, added: 0, refreshedAt: this.catalogs[ai].refreshedAt,
             source: this.catalogs[ai].source, unchanged: true, warning: lt('Claude Code のローカル候補を新しく確認できず、前回の内容を残しました') }
           : this.saveCatalog(ai, found);
+        if (!found.unchanged) models.observedModels = found.models;
       }
       catch (e) { models = { ok: false, error: e.status ? e.reason : failure('models', e).reason }; }
       return { ok: true, ai, beforeVersion, afterVersion, changed: Boolean(afterVersion && beforeVersion !== afterVersion),
@@ -387,7 +417,25 @@ class AiTools {
     finally { this.operation = null; }
   }
 
-  isOperating() { return Boolean(this.operation); }
+  assertOwner(opts = {}) {
+    const blocked=this.canOperate?.();if(blocked)throw toolError(409,'busy',blocked);
+    if (this.maintenance && opts.owner !== this.maintenance.owner) throw toolError(409, 'busy', lt('別の更新・モデル再取得が進行中です'));
+  }
+  acquire(kind, ai) {
+    const blocked=this.canOperate?.();if(blocked)throw toolError(409,'busy',blocked);
+    if (this.isOperating() || this.checking.size) throw toolError(409, 'busy', lt('別の更新・モデル再取得が進行中です'));
+    const owner = Symbol('ai-maintenance');
+    this.maintenance = { owner, operation: { kind, ai, startedAt: new Date().toISOString() } };
+    return owner;
+  }
+  release(owner) { if (this.maintenance?.owner === owner) this.maintenance = null; }
+  isOperating(ai) {
+    const op = this.operation || this.maintenance?.operation;
+    if (!ai) return Boolean(op);
+    // Pure update checks never replace a CLI or run a model refresh.
+    if (!this.operation && op?.kind === 'check') return false;
+    return Boolean(op && (!op.ai || op.ai === ai));
+  }
 }
 
 module.exports = { grokModels, AiTools, agyModels, codexModels, claudeModels, claudeInitialize, methodFor, toolError, executable };

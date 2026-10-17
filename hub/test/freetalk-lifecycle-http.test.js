@@ -2,19 +2,60 @@
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os');
-const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'hub-ft-lifecycle-http-')),root=path.join(tmp,'root'),home=path.join(tmp,'home'),bin=path.join(tmp,'bin');
+const tmp=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'hub-ft-lifecycle-http-'))),root=path.join(tmp,'root'),home=path.join(tmp,'home'),bin=path.join(tmp,'bin');
 fs.mkdirSync(bin);fs.mkdirSync(path.join(root,'_hub'),{recursive:true});
 fs.copyFileSync(path.join(__dirname,'../../docs/project-hub/templates/_hub/roles.yaml'),path.join(root,'_hub/roles.yaml'));
 fs.writeFileSync(path.join(bin,'codex'),`#!${process.execPath}
 if(process.argv.includes('--version')){console.log('fake codex');process.exit(0)}
 process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'fake-'+process.pid}));setTimeout(()=>{console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'AIがまとめた要約'}}));console.log(JSON.stringify({type:'turn.completed'}));},250);});`,{mode:0o755});
 const port=46000+Math.floor(Math.random()*1000);Object.assign(process.env,{HUB_ROOT:root,HUB_FREETALK_HOME:home,HOME:home,HUB_DRY_RUN:'1',HUB_PORT:String(port),PATH:bin+path.delimiter+process.env.PATH});
-const {server}=require('../server'),{Store}=require('../lib/store'),chat=require('../lib/chat');const store=new Store(root);let base,a,b,body,r;
+const procwatch=require('../lib/procwatch'),createWatch=procwatch.create;let background=[],parents=new Map();
+procwatch.create=opts=>({...createWatch(opts),list:()=>background.slice(),hasAncestor:(pid,matches)=>procwatch.hasAncestor(pid,parents,matches)});
+const {server,chats,sessions}=require('../server'),{Store}=require('../lib/store'),chat=require('../lib/chat');
+procwatch.create=createWatch;
+const store=new Store(root);let base,a,b,body,r;
 const post=(route,body={},headers={'X-Hub':'1'})=>fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});
 const status=async id=>await(await fetch(base+'/api/freetalk/status?project=freetalk&task='+id)).json();
 const idle=async id=>{for(let i=0;i<300;i++){const h=await status(id);if(!h.reason)return h;await new Promise(r=>setTimeout(r,20));}throw Error('fake CLI did not end');};
 test.before(async()=>{await new Promise(r=>server.listen(port,'127.0.0.1',r));base='http://127.0.0.1:'+port;await post('/api/freetalk/ensure');a=await(await post('/api/freetalk/topic')).json();b=await(await post('/api/freetalk/topic')).json();});
 test.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));fs.rmSync(tmp,{recursive:true,force:true});});
+test('話題削除HTTP：再起動後の別話題の監督中PIDは妨げず、対象の会話・ターミナル・待機は保護',async t=>{
+ const target=await(await post('/api/freetalk/topic')).json(),key=chats.key('freetalk',target.id),otherKey=chats.key('freetalk',b.id),terminalKey=sessions.key('freetalk',target.id,'codex');
+ const child={pid:41001,supervisorPid:41002,dir:path.join(tmp,'owned-run'),safe:()=>true},otherRun={ai:'codex',model:'GPT-6.1-Sol',child,supervised:true};
+ const otherFile=store.taskFile('freetalk',b.id),before=fs.readFileSync(otherFile);
+ t.after(()=>{background=[];parents=new Map();chats.running.delete(key);chats.running.delete(otherKey);chats.spoolRuns.delete(child);chats.queues.delete(key);sessions.map.delete(terminalKey);});
+ chats.spoolRuns.add(child);chats.running.set(otherKey,otherRun);
+ // procwatch's shared cwd guess points at the target, although Hub owns another topic.
+ background=[{pid:child.pid,project:'freetalk',task:target.id,cwd:home}];
+ assert.equal(chats.supervisedPid(child.pid),true);assert.equal((await status(target.id)).reason,'');
+ // A CLI launched through a tool's node wrapper has the same verified owner.
+ background=[{pid:41004,project:'freetalk',task:target.id,cwd:home}];parents=new Map([[41004,41005],[41005,child.pid]]);
+ assert.equal((await status(target.id)).reason,'');
+ assert.equal((await post('/api/freetalk/clean',{project:'freetalk',confirm:true})).status,409);
+ const blocked=async pattern=>{assert.match((await status(target.id)).reason,pattern);const res=await post('/api/freetalk/delete',{project:'freetalk',task:target.id,confirm:true});assert.equal(res.status,409);assert.match((await res.json()).error,pattern);assert.ok(store.taskFile('freetalk',target.id));};
+ chats.running.set(key,{ai:'codex',model:'GPT-6.1-Sol',child,supervised:true});await blocked(/AIが作業中/);chats.running.delete(key);
+ sessions.map.set(terminalKey,{exited:false,lastOut:Date.now()});await blocked(/AIが作業中/);sessions.map.delete(terminalKey);
+ chats.setQueue('freetalk',target.id,[{id:'fixture-wait',ai:'codex'}]);await blocked(/順番待ち/);chats.setQueue('freetalk',target.id,[]);
+ const del=await post('/api/freetalk/delete',{project:'freetalk',task:target.id,confirm:true});assert.equal(del.status,200,JSON.stringify(await del.clone().json()));
+ assert.equal(store.taskFile('freetalk',target.id),null);assert.deepEqual(fs.readFileSync(otherFile),before);assert.equal(chats.busy('freetalk',b.id),otherRun);
+});
+test('話題削除HTTP：監督中PIDがあっても外部・不明・監督を確認できないPIDは保護',async t=>{
+ const child={pid:41001,supervisorPid:41002,dir:path.join(tmp,'unconfirmed-run'),safe:()=>true};chats.spoolRuns.add(child);
+ t.after(()=>{background=[];parents=new Map();chats.spoolRuns.delete(child);});
+ const owned={pid:child.pid,project:'freetalk',task:b.id};
+ for(const unknown of [{pid:41003,project:'freetalk',task:b.id},{pid:null,project:'freetalk',task:null}])for(const rows of [[owned,unknown],[unknown,owned]]){
+  background=rows;const res=await post('/api/freetalk/delete',{project:'freetalk',task:a.id,confirm:true});assert.equal(res.status,409);assert.match((await res.json()).error,/freetalkでAIが作業中/);assert.ok(store.taskFile('freetalk',a.id));
+ }
+ child.safe=()=>false;background=[owned];assert.equal(chats.supervisedPid(child.pid),false);
+ const res=await post('/api/freetalk/delete',{project:'freetalk',task:a.id,confirm:true});assert.equal(res.status,409);assert.ok(store.taskFile('freetalk',a.id));
+ background=[{pid:41004,project:'freetalk',task:b.id}];parents=new Map([[41004,41005],[41005,child.pid]]);
+ const nested=await post('/api/freetalk/delete',{project:'freetalk',task:a.id,confirm:true});assert.equal(nested.status,409);assert.ok(store.taskFile('freetalk',a.id));
+ // A dead owner's stale ps entry is harmless itself, but cannot vouch for a surviving child.
+ child.pid=2147483647;fs.mkdirSync(child.dir,{recursive:true});fs.writeFileSync(path.join(child.dir,'exit.json'),'{}');
+ assert.equal(chats.supervisedPid(child.pid),true);assert.equal(chats.supervisedPid(child.pid,{activeOnly:true}),false);
+ parents=new Map([[41004,41005],[41005,child.pid]]);
+ const orphan=await post('/api/freetalk/delete',{project:'freetalk',task:a.id,confirm:true});assert.equal(orphan.status,409);assert.ok(store.taskFile('freetalk',a.id));
+});
 test('3段目HTTP：認証・別表記と稼働/待機保護、現在AIへの要約',async()=>{
  assert.equal((await post('/api/freetalk/clean',{project:'freetalk',confirm:true},{})).status,403);
  for(const project of ['FreeTalk','FREETALK','normal'])assert.equal((await post('/api/freetalk/clean',{project,confirm:true})).status,409);
@@ -40,7 +81,7 @@ test('3段目HTTP：確認した名前・要約・ファイルで独立し同操
 });
 test('3段目HTTP：移行元は会話/要約/クリア/設定/MCP/添付を書き込めない',async()=>{
  assert.equal((await status(a.id)).migrated.project,r.project);
- for(const [route,extra]of [['/api/chat/send',{ai:'codex',model:'GPT-6.1-Sol',text:'再開'}],['/api/chat/note',{text:'追加'}],['/api/chatgpt/result',{text:'追加'}],['/api/freetalk/rotate',{confirm:true}],['/api/freetalk/summary',{}],['/api/task',{memo:'変更'}],['/api/task/attach',{paths:[path.join(home,'Documents/freetalk/AGENTS.md')]}],['/api/accounts/select',{ai:'codex',account:'default'}]])assert.equal((await post(route,{project:'freetalk',task:a.id,...extra})).status,409,route);
+ for(const [route,extra]of [['/api/chat/send',{ai:'codex',model:'GPT-6.1-Sol',text:'再開'}],['/api/chat/note',{text:'追加'}],['/api/chatgpt/result',{text:'追加'}],['/api/freetalk/rotate',{confirm:true}],['/api/freetalk/summary',{}],['/api/task',{memo:'変更'}],['/api/task/attach',{paths:[path.join(home,'Documents/freetalk/AGENTS.md')]}],['/api/accounts/select',{ai:'codex',account:'default'}]])assert.equal((await post(route,{project:'freetalk',task:a.id,...extra})).status,route==='/api/chatgpt/result'?410:409,route);
  assert.equal((await post('/api/mcp/call',{name:'hub_report',arguments:{project:'freetalk',task:a.id,text:'変更'}})).status,409);
  const upload=await fetch(base+'/api/task/upload?'+new URLSearchParams({project:'freetalk',task:a.id,name:'a.txt'}),{method:'POST',headers:{'X-Hub':'1'},body:'資料'});assert.equal(upload.status,409);
  assert.equal((await post('/api/task/read',{project:'freetalk',task:a.id})).status,200);

@@ -31,7 +31,7 @@ function fixture(t, options = {}) {
     if (options.conflict) fs.writeFileSync(path.join(upstream, 'text.txt'), 'upstream changed\n');
     git(upstream, 'add', '.'); git(upstream, 'commit', '-qm', 'new version');
   }
-  const latestCommit = git(upstream, 'rev-parse', 'HEAD'), events = [];
+  const latestCommit = git(upstream, 'rev-parse', 'HEAD'), events = [], testEnvs = [];
   let remoteReads = 0, time = 1700000000000, busy = false;
   const defaults = {
     root, source, appPath, upstream, platform: 'darwin', env: { HUB_AUTO_UPDATE: '1', HUB_STORAGE_GUARD: '/fixture/guard' }, now: () => time, guard: async () => true, busy: () => busy,
@@ -42,6 +42,7 @@ function fixture(t, options = {}) {
       assert.equal(file, 'npm');
       assert.equal(opts.env.HUB_SKIP_APP, '1');
       assert.notEqual(opts.env.HUB_ROOT, root);
+      if (args[0] === 'test' || args[1] === 'test:langpack') testEnvs.push({ ...opts.env });
       if (options.failStep === args[0]) throw Error('fixture command failure');
       return '';
     },
@@ -49,8 +50,21 @@ function fixture(t, options = {}) {
     verify: async app => { events.push('verify'); assert.equal(fs.readFileSync(path.join(app, 'marker'), 'utf8'), 'new'); },
   };
   const make = extra => new AppUpdate({ ...defaults, ...extra });
-  return { dir, root, source, appPath, upstream, originalHead, latestCommit, events, make, reads: () => remoteReads, clock: value => { time = value; }, advance: () => { time += DAY; }, busy: value => { busy = value; }, marker: () => fs.readFileSync(path.join(appPath, 'marker'), 'utf8') };
+  return { dir, root, source, appPath, upstream, originalHead, latestCommit, events, testEnvs, make, reads: () => remoteReads, clock: value => { time = value; }, advance: () => { time += DAY; }, busy: value => { busy = value; }, marker: () => fs.readFileSync(path.join(appPath, 'marker'), 'utf8') };
 }
+
+test('only translated updates require strict UI translation coverage during tests', async t => {
+  for (const translate of [undefined, async () => {}]) {
+    const f = fixture(t);
+    assert.equal((await f.make({ translate }).check()).phase, 'installed');
+    assert.equal(f.testEnvs.length, translate ? 2 : 1);
+    if (translate) {
+      for (const env of f.testEnvs) assert.equal(env.HUB_I18N_STRICT, '1');
+      assert.ok(f.events.includes('npm:run'));
+    }
+    else assert.equal(Object.hasOwn(f.testEnvs[0], 'HUB_I18N_STRICT'), false);
+  }
+});
 
 test('public default is off; saved switch overrides the local opt-in environment', async t => {
   const f = fixture(t), app = f.make({ env: { HUB_AUTO_UPDATE: '0', HUB_STORAGE_GUARD: '/fixture/guard' } });
@@ -124,7 +138,7 @@ test('translation, locked install, all tests, build and signatures precede commi
   });
   const status = await app.check();
   assert.equal(status.phase, 'installed'); assert.equal(status.pending, false); assert.equal(status.latestVersion, '1.0.1');
-  assert.deepEqual(f.events, ['translate', 'npm:ci', 'npm:test', 'build', 'verify', 'validate', 'verify', 'publish']);
+  assert.deepEqual(f.events, ['translate', 'npm:ci', 'npm:test', 'npm:run', 'build', 'verify', 'validate', 'verify', 'publish']);
   assert.equal(status.prUrl, 'https://github.com/kieiken/project-hub/pull/123');
   assert.equal(fs.readFileSync(path.join(status.backup, 'marker'), 'utf8'), 'old');
   assert.equal(git(f.source, 'rev-parse', 'HEAD'), f.originalHead);
@@ -134,12 +148,14 @@ test('translation, locked install, all tests, build and signatures precede commi
 });
 
 test('test/build/signature failures preserve the previous app and never publish', async t => {
-  for (const failure of ['test', 'build', 'verify']) {
+  for (const failure of ['test', 'run', 'build', 'verify']) {
     const f = fixture(t, { failStep: failure }); let published = false;
     const options = { publish: async () => { published = true; } };
+    if (failure === 'run') options.translate = async () => {};
     if (failure === 'build') options.build = async () => { throw Error('fixture build failure'); };
     if (failure === 'verify') options.verify = async () => { throw Error('fixture signature failure'); };
     const status = await f.make(options).check(); assert.equal(status.phase, 'failed'); assert.equal(f.marker(), 'old'); assert.equal(published, false);
+    if (failure === 'run') assert.equal(f.events.includes('build'), false);
   }
 });
 

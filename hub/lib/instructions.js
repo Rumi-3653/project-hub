@@ -6,16 +6,26 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { ARTIFACT_POLICY } = require('./artifact-policy');
 const START = '\n<fixed_rules>\n', END = '\n</fixed_rules>\n';
+const SEND_TEXT_RULE = lt('人が他のAI・アプリ・会話へ送る文は、本文だけを独立した ```text 枠に入れ、送り先と「枠内を全部コピーして送る」は枠外に書く。引用記号・説明を枠に入れず、送り先・送信ごとに枠を分ける。');
+const WORKFLOW_RULE = lt('【役割呼び出しと検証】役割分担は担当先の指定であり、全役割を毎回呼ぶ指定ではない。この確認方針を古い検証・委任の定型より優先する。相談・アイデア・短い説明・軽微な修正は現在の担当が必要箇所を確認する。軽微かどうかは行数ではなく、既存の動作・権限・データ構造・外部連携を変えず影響範囲が明確かで判断する。関連変更はまとめて実施し、依頼された一連の変更が揃い確認できる時点で必要な検証を行う。チェック担当を呼ぶのは、軽微でない変更を含む時・影響の大きい操作の前・人が求めた時だけ。該当する場合は独立確認を一回行う。指示一通・返信一回を自動の区切りにしない。再確認は変更箇所と影響範囲だけ。共通部への影響・新しい不具合など根拠がある時だけ範囲を広げる。新しい変更・問題がなければ繰り返さず、チェック後に変更がなければ最終確認も兼ねる。チェック後の修正が軽微なら、修正担当の自己確認で終え、チェック担当を再び呼ばない。ただし、影響の大きい操作の個別確認や人が求めた再確認は行う。公開・認証・金銭・データ削除など影響の大きい操作の個別確認は維持する。原因と次の手が実質1つに決まり既存の承認の範囲で行える時は、説明だけで番を終えず、修正・検証・保存・記録や必要な委任まで進める。止めて人に確かめるのは、結果が変わる選択肢が複数ある時・公開/push/本体反映/削除/認証/金銭の承認が要る時・他の作業中の変更を上書きする恐れがある時・前提を確かめられない時だけで、その前に進められる部分は済ませる。');
 const TEMPLATES = lt`## 委任の定型
-実装→チェック：最新HEADと未保存変更を確かめる→変更前を保存→最小の実装→関連・全体試験→commit→実施した手順だけ済→同じ作業のclaude・claude-fable-5-1へ独立チェックを委任して番を終える。本体反映・push・本番切替はしない。
-チェック→報告：差分と試験を独立に確かめる→要修正は同じ作業のcodex・gpt-6.1-solへ戻す／取り込み可なら人へ報告。`;
+実装→チェック：役割呼び出しと検証の決まりに従い、関連変更が揃い、軽微でない変更を含む時・影響の大きい操作の前・人が求めた時だけ使う。軽微な変更だけなら現在の担当の自己確認で終える。チェック後の軽微な修正も自己確認で終え、影響の大きい操作の個別確認や人が求めた再確認を除き再委任しない。最新HEADと未保存変更を確かめ、許可範囲で最小の実装・保存を行い、変更に必要な試験と確認結果を記録する。全体試験は共通部への影響など根拠がある時だけ。同じ作業のclaude・claude-fable-5-1へ確認範囲・差分・検証結果を渡し、委任したら番を終える。本体反映・push・本番切替はしない。
+チェック→報告：指定された差分・影響範囲と既存の検証結果を独立に確かめる。新しい変更・問題がなければ試験を繰り返さず、チェック後に変更がなければ最終確認も兼ねる。要修正は同じ作業のcodex・gpt-6.1-solへ戻し、軽微な修正は修正担当の自己確認で終える（影響の大きい操作の個別確認や人が求めた再確認は行う）／取り込み可なら人へ報告。`;
 function templates(roleData) {
   if (!roleData) return TEMPLATES;
   const slot = name => { const s = require('./roles').delegateSlot(roleData, name); return s ? lt`${s.ai}・${s.model}` : '人'; };
   return TEMPLATES.replace('claude・claude-fable-5-1', slot('チェック')).replace('codex・gpt-6.1-sol', slot('コーディング'));
 }
 const DIFFERENCE = lt('委任は差分6行：目的／読む（相対パス）／やる／条件／出力（ファイル・済手順）／次（担当・定型）。共通事項は省き、定型指定時に全文の ## 委任の定型 を読む。');
+const TEXT_RULE = lt('最新の再開要約は2000字以内で置き換える。上に足さない。初回整理後は /api/task/body/summary で原文を保管してから置換する。AI稼働中は更新依頼だけ保存し、終了後に原文保管と置換を行う。表示不足は hub_search_archive で確認する。');
+function creditRule(data) {
+  if (data?.preferCredits !== true || !['claude', 'codex'].some(ai => data.checkCredits?.[ai] === true)) return '';
+  const targets = ['claude', 'codex'].filter(ai => data.checkCredits?.[ai] === true).map(ai => ai === 'claude' ? 'Claude' : 'Codex').join(' / ');
+  return lt`【既存クレジット優先の承認】対象は${targets}の確認ON側だけ。優先利用OFFまで、契約枠上限後の利用可能な既存クレジット利用を人が許可。自動チャージなし/OFF確認済み、既存残高の範囲のみ。購入・自動チャージ・APIキー課金・認証変更は禁止。Hubが送信前に同じAI/アカウントの新鮮な正式情報を確認し、利用可能なら元担当を優先。不明・古い・取得失敗・枯渇・正式CLI拒否なら既存交代/待機。月間追加利用枠は実残高と扱わない。AIは確認を省略したり自分でCLIや交代を再実行しない。`;
+}
 function packet({ pdir, task, project, policy, issues, common, contextRule, askRule, port, roleData }) {
+  // 全文・固定指示に同じ方針を一回ずつ置き、モデル・上限の分割に混ぜない。
+  policy = policy.replace(WORKFLOW_RULE + '\n', '');
   const at = policy.indexOf(lt('【人への操作案内の決まり】'));
   const models = policy.slice(0, at < 0 ? policy.length : at);
   const guidance = at < 0 ? '' : policy.slice(at);
@@ -25,18 +35,23 @@ function packet({ pdir, task, project, policy, issues, common, contextRule, askR
   const delegateAt = models.indexOf(lt('【別の AI'));
   const modelPart = models.slice(0, delegateAt < 0 ? models.length : delegateAt);
   const delegate = delegateAt < 0 ? '' : models.slice(delegateAt);
-  const full = [ARTIFACT_POLICY, lt('## モデルと上限'), modelPart, lt('## 委任'), delegate, DIFFERENCE, templates(roleData), lt('## 問題点'), issues, lt('## 操作案内'), fixedGuidance, lt('## 長い会話'), contextRule, lt('## 質問'), askRule].join('\n\n');
+  const full = [ARTIFACT_POLICY, lt('## 本文量'), TEXT_RULE, lt('## 人がコピーして送る文'), SEND_TEXT_RULE, lt('## モデルと上限'), modelPart, WORKFLOW_RULE, lt('## 委任'), delegate, DIFFERENCE, templates(roleData), lt('## 問題点'), issues, lt('## 操作案内'), fixedGuidance, lt('## 長い会話'), contextRule, lt('## 質問'), askRule].join('\n\n');
   const file = path.join(pdir, '.ai', 'chat', `${task}.rules.md`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let old; try { old = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  if (old !== full) { const tmp = file + `.${process.pid}.tmp`; fs.writeFileSync(tmp, full); fs.renameSync(tmp, file); }
+  if (old !== full) { const tmp = file + `.${process.pid}.tmp`; fs.writeFileSync(tmp, full); require('./integration-writes').write(file,()=>fs.renameSync(tmp, file)); }
   const lines = modelPart.trim().split('\n');
-  const limit = /現在は自動交代がオフ|目前自動切換已關閉/.test(modelPart) ? lines.slice(1).join('\n') : lt('【利用上限の時】会話の司令塔・チェックFableだけ、HubがCLIエラー構造＋正式文で判定し終了後Astraへ。保持中は期限/手動解除までAstra開始。AIは確認不要。「上限」・引用で自分で担当を変えない・止まらない。main不変。済んだ部分は繰り返さず残りを続ける。');
+  let limit = roleData?.specialMode?.enabled ? lines.slice(1).join('\n') : roleData ? roleData.switch?.auto === true
+    ? lt('【利用上限の時】HubがCLI構造＋正式文/新鮮な未丸め100%で判定。終了後、設定main⇔backupモデル/思考へ。期限/手動解除まで保持。両側上限待機。AIは確認不要。引用で自分で担当を変えない・止まらない。main不変。済操作・委任は再実行禁止。従量課金禁止。')
+    : lt('【利用上限の時】自動交代はオフ。自分で別のモデルへ切り替えない。') : lines.slice(1).join('\n');
+  if (!roleData?.specialMode?.enabled && creditRule(roleData)) {
+    limit = limit.replace(lt('従量課金禁止。'), lt('購入・自動チャージ・APIキー課金は禁止。')) + '\n' + creditRule(roleData);
+  }
   const coding = roleData && require('./roles').delegateSlot(roleData, 'コーディング');
   const ids = JSON.stringify({ project: project || path.basename(pdir), task }).slice(1, -1);
   const fixed = [
     lt`台帳=${pdir}。cwd内は相対パス。全文：台帳/.ai/chat/${task}.rules.md（必要時参照）。`,
-    lines[0], limit,
+    lines[0], limit, WORKFLOW_RULE,
     lt`全文版：${crypto.createHash('sha256').update(full).digest('hex').slice(0, 12)}`,
     lt`【別の AI に作業を渡す時】codex / claude / agy / grok を裏で起動しない。会話でcurl -s -X POST http://127.0.0.1:${port}/api/delegate -H 'X-Hub: 1' -H 'Content-Type: application/json' -d '{${ids},"ai":"${coding?.ai || 'codex'}","model":"${coding?.model || 'gpt-6.1-sol'}","title":"短い名前","text":"差分"}'。ai・model欄は必須。渡したら終了。全文 ## 委任。`,
     lt('新しいプロジェクト・子プロジェクト・作業ファイルを作らない。やっていない手順に [x] を付けない。'),
@@ -44,6 +59,7 @@ function packet({ pdir, task, project, policy, issues, common, contextRule, askR
     lt('成果は作業ファイルの ## 成果 に書く。ZIPは配布時だけ。共通で優先。全文の ## 成果と保管。'),
     lt('【操作案内】画面未確認。見える名前・［ボタン名］・場所で条件付き案内、AI終了後。全文 ## 操作案内。委任がターミナル稼働で断られた時だけ作業画面［ターミナル］の対象AI欄［停止］を頼む。'),
     lt('issues変更時は全文 ## 問題点 を読み、同じプロジェクトの要約も更新。'),
+    SEND_TEXT_RULE,
     common,
   ].filter(Boolean).join('\n');
   return START + fixed + END + info;
@@ -61,7 +77,7 @@ function select(prompt, { meta, ai, sid, resume, restore = false }) {
   if (!part) return { prefix: prompt };
   const sent = meta.rulesSent?.[ai];
   const short = resume && sent?.sid === sid && sent.hash === part.hash && sent.turns < 4 && !sent.restore && !restore;
-  const fixed = short ? lt`【決まり】前回と同じ（版 ${part.hash}）。全文：${part.file}。思い出せない時はその全文を読む。` : part.fixed;
+  const fixed = short ? lt`【決まり】前回と同じ（版 ${part.hash}）。全文：${part.file}。思い出せない時はその全文を読む。` + '\n' + SEND_TEXT_RULE : part.fixed;
   return { prefix: [fixed, part.dynamic].filter(Boolean).join('\n\n'), rules: { hash: part.hash, sid, turns: short ? sent.turns + 1 : 1, restore: false }, fixed, short };
 }
-module.exports = { packet, select, split, DIFFERENCE, TEMPLATES, templates };
+module.exports = { packet, select, split, SEND_TEXT_RULE, WORKFLOW_RULE, DIFFERENCE, TEMPLATES, templates, creditRule };

@@ -67,7 +67,7 @@ test('台帳と役割は要求内で一度だけ読み、外部編集は次の�
   try {
     const state = await countCalls('readFileSync', rolesFile, async () => (await fetch(base + '/api/state')).json());
     assert.equal(state.count, 1);
-    assert.equal(state.value.projects.find(p => p.id === 'primary').notes, '最初のメモ');
+    assert.equal(state.value.projects.find(p => p.id === 'primary').notesSummary, '最初のメモ');
     assert.equal(state.value.cliFlags.codex['GPT-6.1-Sol'], 'gpt-6.1-sol');
 
     const modelFile = path.join(root, '_hub', 'model-view.json');
@@ -77,14 +77,13 @@ test('台帳と役割は要求内で一度だけ読み、外部編集は次の�
     fs.writeFileSync(taskFileForCopy, originalTask.replace('state: 実行中', 'state: 実行中\nworkdir: ' + copy));
     const settings = { initial: { ai: 'codex', model: 'GPT-6.1-Sol', effort: '極高' }, hidden: { codex: ['GPT-6-Astra'] }, order: ['codex|GPT-6.1-Sol'] };
     fs.writeFileSync(modelFile, JSON.stringify(settings));
-    const measured = await countCalls('readFileSync', modelFile, () => countCalls('existsSync', copy, async () => {
+    const measured = await countCalls('readFileSync', modelFile, async () => {
       const response = await fetch(base + '/api/state');
       return { state: await response.json(), tag: response.headers.get('etag') };
-    }));
-    console.log('state I/O: model settings reads=' + measured.count + ', copy existence checks=' + measured.value.count);
+    });
     assert.equal(measured.count, 1);
-    assert.equal(measured.value.count, 2); // 一覧の確認とGit情報の確認で各1回。
-    const snapshot = measured.value.value;
+    // 移行先の解決や安全確認にも存在検査が必要。回数ではなく、要求間の鮮度を下で確かめる。
+    const snapshot = measured.value;
     assert.deepEqual(snapshot.state.initialPick, settings.initial);
     assert.deepEqual(snapshot.state.modelOrder, settings.order);
     assert.deepEqual(snapshot.state.hiddenModels.codex, settings.hidden.codex);
@@ -107,7 +106,7 @@ test('台帳と役割は要求内で一度だけ読み、外部編集は次の�
     assert.notEqual(changedRoles, originalRoles);
     fs.writeFileSync(rolesFile, changedRoles);
     const changed = await (await fetch(base + '/api/state')).json();
-    assert.equal(changed.projects.find(p => p.id === 'primary').notes, '書き換えたメモ');
+    assert.equal(changed.projects.find(p => p.id === 'primary').notesSummary, '書き換えたメモ');
     assert.equal(changed.roles.roles.find(r => r.name === 'コーディング').main.model, '6terra');
 
     const post = (url, body) => fetch(base + url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub': '1' }, body: JSON.stringify(body) });

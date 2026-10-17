@@ -3,7 +3,9 @@
 process.env.HUB_LANG = 'ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process');
 const {Store}=require('../lib/store'),{Removal}=require('../lib/remove'),{TaskTransfer}=require('../lib/task-transfer'),{TaskIntegrate}=require('../lib/task-integrate'),graph=require('../public/project-order'),git=require('../lib/git'),chat=require('../lib/chat');
+const cleanupReview=i=>({disposition:'cleanup',review:{...i.review,confirmed:true,residual:'なし',undecided:'なし'}});
 const sh=(dir,...args)=>execFileSync('git',['-C',dir,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+const {IntegrateAuto}=require('../lib/integrate-auto');
 function fixture(t,opts={}){
  const project=opts.project||'Fixture';
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'hub-integrate-'));const oldTrash=process.env.HUB_TRASH;process.env.HUB_TRASH=path.join(root,'Trash');t.after(()=>{if(oldTrash===undefined)delete process.env.HUB_TRASH;else process.env.HUB_TRASH=oldTrash;});t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
@@ -21,7 +23,7 @@ function fixture(t,opts={}){
    write(path.join(dir,'作業',c.id,'report.txt'),title+' report');return store.readTask(store.taskFile(project,c.id));
  };
  const preview=only=>integrate.preview(project,parent.id,only);
- const apply=(d,items=d.items)=>integrate.apply({project:project,task:parent.id,token:d.token,confirm:true,selected:items.map(i=>({project:i.project,task:i.task,files:i.selected,optional:[]}))});
+ const apply=(d,items=d.items)=>integrate.apply({project:project,task:parent.id,token:d.token,confirm:true,legacyConfirmed:true,selected:items.map(i=>({project:i.project,task:i.task,disposition:'cleanup',review:{...i.review,confirmed:true,residual:'なし',undecided:'なし'},files:i.selected,optional:[]}))});
  return {root,dir,body,write,store,parent,removal,transfer,child,preview,apply,get integrate(){return integrate;},restart(){integrate=make();},sh};
 }
 function emptyMerge(dir){
@@ -30,6 +32,94 @@ function emptyMerge(dir){
  sh(dir,'checkout','-q',branch);sh(dir,'merge','--no-ff','--no-commit','unrelated-empty');
  assert.equal(git.merging(dir),true);
 }
+test('要約開始の旧統合判定：完了した子と現在本体の包含だけ許可し、履歴と再送保護を保持',t=>{
+ const f=fixture(t),project='Fixture',task=f.parent.id,head=f.sh(f.body,'rev-parse','HEAD');
+ const record={id:require('node:crypto').randomUUID(),project,task,complete:true,items:[{state:'受領済み'},{state:'片付け済み'}],auto:{thenMain:false,main:{state:'done',skipped:true},pendingMain:{id:require('node:crypto').randomUUID(),main:{state:'intent',sourceHead:head},stopped:{reason:'old failure'}}}};
+ f.integrate.save(record);const before=fs.readFileSync(f.integrate.file(project,task));
+ const index=f.sh(f.body,'rev-parse','--path-format=absolute','--git-path','index'),indexBefore=fs.readFileSync(index);
+ assert.equal(f.integrate.historyBlocker(project,task),'');
+ assert.equal(f.integrate.pending()[0].mainPending.main.state,'intent','eligibility never settles/replays the intent');
+ assert.deepEqual(fs.readFileSync(f.integrate.file(project,task)),before);assert.deepEqual(fs.readFileSync(index),indexBefore);
+ let inspections=0;const native=f.integrate.gitw;f.integrate.gitw={...native,inspect:(...a)=>{inspections++;return native.inspect(...a);}};
+ f.integrate.pending();assert.equal(inspections,0,'the polling path does not inspect Git');
+ for(const mutate of [r=>r.complete=false,r=>r.items[0].state='確認待ち',r=>r.auto.main.state='intent',r=>r.auto.thenMain=true,r=>r.auto.pendingMain.id=r.id,r=>r.auto.pendingMain.main.state='unknown',r=>r.abandoned={reason:'stopped-organize'},r=>r.id=null,r=>r.project='other',r=>r.task='other']){
+  const r=structuredClone(record);mutate(r);fs.writeFileSync(f.integrate.file(project,task),JSON.stringify(r));
+  assert.ok(f.integrate.historyBlocker(project,task));
+ }assert.equal(inspections,0,'true pending/mismatched scope never uses historical Git evidence');
+ f.integrate.save(record);
+ for(const failing of [{inspect:()=>{throw Error('status unavailable');}},{merging:()=>true},{inspect:(...a)=>({...native.inspect(...a),status:'UU base.txt\n'})},{isAncestor:()=>false},{isAncestor:()=>{throw Error('missing commit');}}]){
+  f.integrate.gitw={...native,...failing};assert.match(f.integrate.historyBlocker(project,task),/確認できません/);
+ }f.integrate.gitw=native;
+ const r=structuredClone(record);r.auto.pendingMain.main.sourceHead='missing';f.integrate.save(r);assert.ok(f.integrate.historyBlocker(project,task));f.integrate.save(record);
+ f.sh(f.body,'checkout','--orphan','unrelated-main');f.sh(f.body,'commit','-qm','same tree, different history');
+ assert.ok(f.integrate.historyBlocker(project,task),'same content and clean status do not prove inclusion');
+ f.sh(f.body,'checkout','-q','--detach',head);assert.equal(f.integrate.historyBlocker(project,task),'','a new check reads the current main without cached permission');
+ assert.equal(f.integrate.historyBlocker(project,'other-task'),'');assert.deepEqual(fs.readFileSync(f.integrate.file(project,task)),before);
+});
+test('要約開始の記録破損拒否：不存在とnull・配列・欠損・不正JSONを区別する',t=>{
+ const f=fixture(t),project='Fixture',task=f.parent.id,file=f.integrate.file(project,task);
+ assert.equal(f.integrate.historyBlocker(project,task),'');fs.mkdirSync(path.dirname(file),{recursive:true});
+ const native=f.integrate.gitw;f.integrate.gitw={...native,inspect:()=>assert.fail('malformed records cannot use Git evidence')};
+ for(const raw of ['null','[]','{}','{',JSON.stringify({project,task,complete:false,items:[]})]){
+  fs.writeFileSync(file,raw);assert.ok(f.integrate.historyBlocker(project,task));assert.equal(fs.readFileSync(file,'utf8'),raw);
+ }
+});
+test('古い本体intentの表示証拠はclean本体の祖先だけ、ゼロ差分・dirty・不明は未確認、原物と再送禁止を保持',t=>{
+ const f=fixture(t),w=git.prepare({base:f.body,workRoot:f.removal.workRoot({id:'Fixture'}),taskId:f.parent.id});
+ f.store.updateTask('Fixture',f.parent.id,{workdir:w.dir});
+ f.sh(w.dir,'commit','--allow-empty','-qm','saved source with zero diff');const source=git.inspect(w.dir).head;
+ const old={id:'old',project:'Fixture',task:f.parent.id,complete:true,items:[],auto:{thenMain:true,main:{state:'intent',sourceHead:source},stopped:{reason:'old failure'}}};f.integrate.save(old);
+ const before=fs.readFileSync(f.integrate.file('Fixture',f.parent.id),'utf8');
+ assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id).reflected,false,'equal trees cannot prove old source was applied');
+ f.sh(f.body,'merge','--no-ff','--no-edit',source);
+ const tracked=path.join(f.body,'base.txt'),stat=fs.statSync(tracked);fs.utimesSync(tracked,stat.atime, new Date(stat.mtimeMs+2000));
+ const index=f.sh(f.body,'rev-parse','--path-format=absolute','--git-path','index'),indexBefore=fs.readFileSync(index);
+ const proof=f.integrate.mainDisplay('Fixture',f.parent.id);assert.equal(proof.reflected,true);assert.equal(proof.mainHead,f.sh(f.body,'rev-parse','HEAD'));assert.deepEqual(fs.readFileSync(index),indexBefore,'display does not refresh the main index');
+ assert.equal(f.integrate.preview('Fixture',f.parent.id,undefined,{simple:true}).mainDisplay.reflected,true);
+ f.write(path.join(f.body,'base.txt'),'later body');git.save(f.body,'later saved version');assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id).reflected,true,'later main versions retain the historical source');
+ f.write(path.join(f.body,'unsaved'),'dirty');{const d=f.integrate.mainDisplay('Fixture',f.parent.id);assert.equal(d.reflected,true,'an unrelated uncommitted file does not undo the saved history');assert.equal(d.mainUncommitted,1);}fs.unlinkSync(path.join(f.body,'unsaved'));
+ {const native=f.integrate.gitw;f.integrate.gitw={...native,inspect:(dir,o)=>({...native.inspect(dir,o),status:'UU base.txt\n'})};assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id).reflected,false,'an unresolved conflict stays unconfirmed');f.integrate.gitw=native;}
+ assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id).mainUncommitted,undefined,'a clean main has no separate unsaved notice');
+ for(const sourceHead of [undefined,'invalid','f'.repeat(40)])assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id,{...old,auto:{...old.auto,main:{state:'intent',sourceHead}}}).reflected,false);
+ emptyMerge(f.body);assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id).reflected,false);f.sh(f.body,'merge','--abort');
+ const native=f.integrate.gitw;f.integrate.gitw={...native,isAncestor:()=>{throw Error('fixture unavailable');}};assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id).reflected,false);f.integrate.gitw=native;
+ assert.equal(fs.readFileSync(f.integrate.file('Fixture',f.parent.id),'utf8'),before);assert.equal(f.integrate.pending()[0].mainPending.main.state,'intent');
+ const read=f.integrate.read;f.integrate.read=()=>{throw Error('fixture malformed history');};assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id),null);f.integrate.read=read;
+ let requests=0;const auto=new IntegrateAuto({integrate:f.integrate,busy:()=>false,dispatch:()=>requests++,mergeMain:()=>requests++});assert.equal(auto.resumeStatus(old).allowed,false);assert.equal(requests,0);
+});
+test('本体status取得失敗はpreviewのclean相当値で迂回できず、表示検査は読取限定',t=>{
+ const f=fixture(t),source=f.sh(f.body,'rev-parse','HEAD');
+ const old={auto:{pendingMain:{id:'old',main:{state:'intent',sourceHead:source}}}},before=JSON.stringify(old),native=f.integrate.gitw;
+ const calls=[];let fail=true;
+ f.integrate.gitw={...native,inspect:(dir,options)=>{calls.push({dir,options});if(fail){const e=Error('status unavailable');e.status=128;throw e;}return native.inspect(dir,options);}};
+ const snapshot={head:source,status:''};
+ assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id,old,snapshot).reflected,false,'a boolean preview is not a successful status acquisition');
+ assert.deepEqual(calls,[{dir:f.body,options:{readOnly:true}}]);
+ fail=false;assert.equal(f.integrate.mainDisplay('Fixture',f.parent.id,old,snapshot).reflected,true);
+ f.write(path.join(f.body,'uncommitted'),'dirty');{const d=f.integrate.mainDisplay('Fixture',f.parent.id,old,snapshot);assert.equal(d.reflected,true);assert.equal(d.mainUncommitted,1);}
+ assert.equal(JSON.stringify(old),before);
+});
+test('正式再開：停止履歴を保持しthenMain:false、受領済み・検証済みattemptを繰り返さない',async t=>{
+ const f=fixture(t);f.child('完了子');const d=f.preview();
+ f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,auto:true,selected:d.items.map(i=>({project:i.project,task:i.task,disposition:'continue'}))});
+ const auto=new IntegrateAuto({integrate:f.integrate,busy:()=>false,dispatch:async()=>assert.fail('再委任禁止'),mergeMain:async()=>assert.fail('本体反映禁止')});
+ const r=f.integrate.read('Fixture',f.parent.id),k='a'.repeat(64);r.auto.attempts[k]={phase:'verified',reviewHead:r.auto.targetHead};f.integrate.save(r);
+ auto.stop('Fixture',f.parent.id,'人停止');const old=f.integrate.read('Fixture',f.parent.id),receipt=f.transfer.read('Fixture',r.items[0].task),rows=chat.read(f.dir,f.parent.id);
+ const preview=f.preview(),out=auto.resume({project:'Fixture',task:f.parent.id,token:preview.token});assert.equal(out.thenMain,false);
+ let resumed=f.integrate.read('Fixture',f.parent.id);assert.deepEqual(resumed.auto.stopHistory,[old.auto.stopped]);assert.equal(resumed.auto.resumed[0].head,r.auto.targetHead);assert.equal(resumed.auto.resumed[0].previousThenMain,true);assert.deepEqual(resumed.auto.attempts[k],r.auto.attempts[k]);
+ await auto.tick();assert.equal(f.integrate.read('Fixture',f.parent.id).auto.main.skipped,true);assert.deepEqual(f.transfer.read('Fixture',r.items[0].task),receipt);assert.deepEqual(chat.read(f.dir,f.parent.id),rows);
+ assert.throws(()=>auto.resume({project:'Fixture',task:f.parent.id,token:preview.token}));
+});
+for(const mode of ['token','dirty','source','scope','main-intent','busy','archive-history'])test('正式再開の前提変更は記録を変えず拒否：'+mode,t=>{
+ const f=fixture(t);const c=f.child('子'),d=f.preview();f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,auto:true,selected:d.items.map(i=>({project:i.project,task:i.task,disposition:'continue'}))});
+ const auto=new IntegrateAuto({integrate:f.integrate,busy:()=>mode==='busy',dispatch:async()=>{},mergeMain:async()=>{}});auto.stop('Fixture',f.parent.id);const p=f.preview();
+ if(mode==='dirty')f.write(path.join(f.body,'unsaved'),'dirty');
+ if(mode==='source'){const r=f.integrate.read('Fixture',f.parent.id);r.items[0].source.head='b'.repeat(40);f.integrate.save(r);}
+ if(mode==='scope'){const r=f.integrate.read('Fixture',f.parent.id);r.auto.scope[0].files.push({id:'hidden'});f.integrate.save(r);}
+ if(mode==='main-intent'){const r=f.integrate.read('Fixture',f.parent.id);r.auto.main={state:'intent'};f.integrate.save(r);}
+ if(mode==='archive-history'){const r=f.integrate.read('Fixture',f.parent.id);r.auto.targetHead='b'.repeat(40);f.integrate.save(r);}
+ const before=f.integrate.read('Fixture',f.parent.id);assert.throws(()=>auto.resume({project:'Fixture',task:f.parent.id,token:mode==='token'?'bad':p.token}));assert.deepEqual(f.integrate.read('Fixture',f.parent.id),before);
+});
 function mergeState(dir){
  return {snapshot:git.inspect(dir),mergeHead:sh(dir,'rev-parse','MERGE_HEAD'),index:fs.readFileSync(sh(dir,'rev-parse','--path-format=absolute','--git-path','index')).toString('base64')};
 }
@@ -91,9 +181,9 @@ test('拒否理由は祖先関係・未承認中間親・承認済み親・子�
  assert.throws(()=>f.transfer.context('Fixture',leaf.id,{targetProject:'Fixture',targetTask:f.parent.id,integrating:'test'}),/未完の中間親「中間」/);
  assert.equal(f.integrate.preview('Fixture',mid.id,only(leaf.id)).items[0].task,leaf.id);
  assert.throws(()=>f.preview(only(stranger.id)),/祖先ではありません/);
- f.store.setStep('Fixture',mid.id,0,false);assert.throws(()=>f.preview(only(mid.id)),/手順・質問が残って/);
+ f.store.setStep('Fixture',mid.id,0,false);assert.match(f.preview(only(mid.id)).items[0].cleanupBlockers.join(' '),/手順・質問が残って/);
  f.store.setStep('Fixture',mid.id,0,true);f.store.updateTask('Fixture',mid.id,{question:'回答待ち'});
- const d=f.preview(only(mid.id));assert.ok(d.items[0].blockers.some(x=>x.includes('手順・質問')));
+ const d=f.preview(only(mid.id));assert.ok(d.items[0].cleanupBlockers.some(x=>x.includes('手順・質問')));
  assert.throws(()=>f.transfer.context('Fixture',mid.id,{targetProject:'Fixture',targetTask:f.parent.id,integrating:'test'}),/手順・質問が残って/);
  f.store.decideTask('Fixture',f.parent.id,'approve',f.store.readTask(f.store.taskFile('Fixture',f.parent.id)).completionHash);
  const p=f.store.listProjects()[0];assert.deepEqual(graph.integrators(p,p.tasks.find(x=>x.id===mid.id)),[]);
@@ -111,7 +201,8 @@ test('確認後の親の承認状態変更を受領前に拒否し、hashの再�
 test('成果を渡すだけではコピー・会話・記録を残し、通知は一度、未引渡しも祖先が拾う',t=>{
  const f=fixture(t),c=f.child('子');chat.append(f.dir,c.id,{role:'assistant',text:'child history'});
  const d=f.transfer.offerPreview('Fixture',c.id);assert.deepEqual(d.blockers,[]);
- const b={project:'Fixture',task:c.id,token:d.token,confirm:true,selected:d.selected};f.transfer.offer(b);f.transfer.offer(b);
+ const b={project:'Fixture',task:c.id,token:d.token,confirm:true,selected:d.selected};const first=f.transfer.offer(b);
+ const once=fs.readFileSync(f.transfer.file('Fixture',c.id),'utf8');assert.deepEqual(f.transfer.offer(b),first,'a repeated submit returns the first result');assert.equal(fs.readFileSync(f.transfer.file('Fixture',c.id),'utf8'),once,'the repeat writes nothing');
  assert.ok(fs.existsSync(c.workdir));assert.ok(f.store.taskFile('Fixture',c.id));assert.equal(chat.read(f.dir,c.id).length,1);assert.equal(chat.read(f.dir,f.parent.id).length,1);assert.deepEqual(f.transfer.pending(),[]);
  const c2=f.child('未引渡し'),p=f.preview();assert.equal(p.items.find(i=>i.task===c.id).handedUp,true);assert.equal(p.items.find(i=>i.task===c2.id).handedUp,false);
  f.apply(p);assert.equal(fs.readFileSync(path.join(f.body,'子.txt'),'utf8'),'子\n');assert.equal(fs.readFileSync(path.join(f.body,'未引渡し.txt'),'utf8'),'未引渡し\n');assert.equal(f.store.taskFile('Fixture',c.id),null);assert.equal(f.store.taskFile('Fixture',c2.id),null);
@@ -148,8 +239,8 @@ test('受領片付けの途中失敗を再起動後に継続し、別祖先・�
 test('孫→子を強制し未完中間親と未完子孫を保護、成功後に両方片付ける',t=>{
  const f=fixture(t),c=f.child('子'),g=f.child('孫',c.id);f.store.decideTask('Fixture',c.id,'approve',c.completionHash);const d=f.preview();assert.equal(d.items[0].task,g.id);assert.equal(d.items[1].task,c.id);
  assert.throws(()=>f.apply(d,d.items.slice().reverse()),/孫から/);assert.throws(()=>f.apply(d,[d.items[1]]),/孫から/);f.apply(d);assert.equal(f.store.taskFile('Fixture',c.id),null);assert.equal(f.store.taskFile('Fixture',g.id),null);
- const h=fixture(t),mid=h.child('中間'),leaf=h.child('下',mid.id);h.store.setStep('Fixture',mid.id,0,false);assert.equal(h.preview().items.length,0);assert.equal(h.integrate.preview('Fixture',mid.id).items[0].task,leaf.id);
- const k=fixture(t),parent=k.child('完了親'),unfinished=k.store.createTask('Fixture',{title:'未完の孫',parent:parent.id});assert.match(k.preview().items.find(i=>i.task===parent.id).blockers.join(' '),/未完了/);assert.ok(k.store.taskFile('Fixture',unfinished.id));
+ const h=fixture(t),mid=h.child('中間'),leaf=h.child('下',mid.id);h.store.setStep('Fixture',mid.id,0,false);assert.equal(h.preview().items.length,1);assert.equal(h.preview().items[0].task,mid.id);assert.equal(h.integrate.preview('Fixture',mid.id).items[0].task,leaf.id);
+ const k=fixture(t),parent=k.child('完了親'),unfinished=k.store.createTask('Fixture',{title:'未完の孫',parent:parent.id});assert.match(k.preview().items.find(i=>i.task===parent.id).cleanupBlockers.join(' '),/未完了/);assert.ok(k.store.taskFile('Fixture',unfinished.id));
 });
 test('コピー退避直後に停止しても退避先を照合しGit登録整理から再開する',t=>{
  const f=fixture(t),c=f.child('子'),branch=git.inspect(c.workdir).branch;
@@ -166,13 +257,13 @@ test('成果改変・確認後のコード変更・順番待ちは保存/merge/�
 test('共有から参照された専用一時物は残し、任意選択の専用フォルダだけTrash',t=>{
  const f=fixture(t),c=f.child('子',f.parent.id,false),other=f.store.createTask('Fixture',{title:'参照元'}),temp=f.write(path.join(f.dir,'.ai/work',c.id,'memo.txt'),'shared');
  fs.appendFileSync(f.store.taskFile('Fixture',other.id),'\n参照 .ai/work/'+c.id+'/memo.txt\n');const d=f.preview();assert.ok(d.items[0].keep.some(x=>x.path===path.dirname(temp)));
- f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id,files:d.items[0].selected,optional:['作業/'+c.id]}]});
+ f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{...cleanupReview(d.items[0]),project:'Fixture',task:c.id,files:d.items[0].selected,optional:['作業/'+c.id]}]});
  assert.equal(fs.existsSync(temp),true);assert.equal(fs.existsSync(path.join(f.dir,'作業',c.id)),false);assert.ok(f.transfer.read('Fixture',c.id).complete);
 });
 
 for(const stop of ['notification','copy-move','cleanup-save'])test('R1 専用一時物と任意フォルダ付きで'+stop+'停止後に一度だけ受領・片付け',t=>{
  const f=fixture(t),c=f.child('再開');f.write(path.join(f.dir,'.ai/work',c.id,'temp.txt'),'temporary');
- const apply=()=>{const d=f.preview();return f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project:i.project,task:i.task,files:i.selected,optional:['作業/'+i.task]}))});};
+ const apply=()=>{const d=f.preview();return f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({...cleanupReview(i),project:i.project,task:i.task,files:i.selected,optional:['作業/'+i.task]}))});};
  if(stop==='notification')f.transfer.beforeCleanup=()=>{throw Error('fixture interruption');};
  if(stop==='copy-move')f.integrate.gitw={...git,cleanupCopy:args=>git.cleanupCopy({...args,beforeMove:data=>{args.beforeMove(data);fs.renameSync(c.workdir,data.trashed);throw Error('fixture interruption');}})};
  if(stop==='cleanup-save'){const save=f.removal.save.bind(f.removal);f.removal.save=r=>{save(r);throw Error('fixture interruption');};}
@@ -189,14 +280,14 @@ test('R1 受領先の参照は元フォルダと誤認せず、真の共有参�
 });
 for(const change of ['new-untracked','existing-local','tracked'])test('R2 受領停止後の'+change+'変更は未統合のまま片付けない',t=>{
  const f=fixture(t),c=f.child('保持');f.write(path.join(c.workdir,'.env'),'INITIAL=1\n');
- f.write(path.join(c.workdir,'.gitignore'),'scratch/\n');git.save(c.workdir,'ignore');f.write(path.join(c.workdir,'scratch','temp.txt'),'original ignored temporary');
+ f.write(path.join(c.workdir,'.gitignore'),'scratch/\n.env\n');git.save(c.workdir,'ignore');f.write(path.join(c.workdir,'scratch','temp.txt'),'original ignored temporary');
  f.transfer.beforeCleanup=()=>{throw Error('fixture stop');};assert.throws(()=>f.apply(f.preview()),/fixture stop/);
  const filename=change==='new-untracked'?'new-unintegrated.txt':change==='existing-local'?'.env':'base.txt';f.write(path.join(c.workdir,filename),'new unintegrated work\n');
  f.restart();assert.throws(()=>f.apply(f.preview()),/未統合/);assert.ok(fs.existsSync(c.workdir));assert.ok(f.store.taskFile('Fixture',c.id));assert.equal(f.transfer.read('Fixture',c.id).complete,false);
  assert.notEqual(fs.existsSync(path.join(f.body,filename))&&fs.readFileSync(path.join(f.body,filename),'utf8'),'new unintegrated work\n');
 });
-test('R2 最初からあるignore一時物と非ignoreローカル設定は再開時コピーとともにTrash',t=>{
- const f=fixture(t),c=f.child('設定');f.write(path.join(c.workdir,'.env'),'LOCAL=1\n');f.write(path.join(c.workdir,'.gitignore'),'scratch/\n');git.save(c.workdir,'ignore');f.write(path.join(c.workdir,'scratch','temp.txt'),'ignored');
+test('R2 最初からあるignore一時物とignoreローカル設定は再開時コピーとともにTrash',t=>{
+ const f=fixture(t),c=f.child('設定');f.write(path.join(c.workdir,'.env'),'LOCAL=1\n');f.write(path.join(c.workdir,'.gitignore'),'scratch/\n.env\n');git.save(c.workdir,'ignore');f.write(path.join(c.workdir,'scratch','temp.txt'),'ignored');
  f.transfer.beforeCleanup=()=>{throw Error('fixture stop');};assert.throws(()=>f.apply(f.preview()),/fixture stop/);f.restart();assert.equal(f.apply(f.preview()).complete,true);
  const copy=f.integrate.read('Fixture',f.parent.id).items[0].copyTrashed;assert.equal(fs.readFileSync(path.join(copy,'.env'),'utf8'),'LOCAL=1\n');assert.equal(fs.readFileSync(path.join(copy,'scratch','temp.txt'),'utf8'),'ignored');assert.equal(fs.existsSync(path.join(f.body,'.env')),false);
 });
@@ -205,7 +296,7 @@ for(const target of ['child-tracked','child-untracked','parent-tracked','parent-
  if(target.startsWith('parent')){const w=git.prepare({base:f.body,workRoot:f.removal.workRoot({id:'Fixture'}),taskId:f.parent.id});f.store.updateTask('Fixture',f.parent.id,{workdir:w.dir});dir=w.dir;}
  const filename=target.endsWith('-untracked')?'new.txt':'base.txt';f.write(path.join(dir,filename),'previewed version\n');const d=f.preview(),before=git.inspect(dir),head=sh(f.body,'rev-parse','HEAD');
  f.write(path.join(dir,filename),'unreviewed version\n');const after=git.inspect(dir);assert.equal(before.status,after.status);assert.notEqual(before.content,after.content);
- assert.throws(()=>f.apply(d),target.startsWith('parent')?/統合先が変わりました/:/子の変更が変わりました/);assert.equal(sh(f.body,'rev-parse','HEAD'),head);assert.ok(f.store.taskFile('Fixture',c.id));assert.ok(fs.existsSync(c.workdir));assert.equal(f.integrate.read('Fixture',f.parent.id),null);
+ assert.throws(()=>f.apply(d),target.startsWith('parent')?/統合先が変わりました|未保存の変更を保存/:/変更を保存/);assert.equal(sh(f.body,'rev-parse','HEAD'),head);assert.ok(f.store.taskFile('Fixture',c.id));assert.ok(fs.existsSync(c.workdir));assert.equal(f.integrate.read('Fixture',f.parent.id),null);
 });
 test('R4 旧版の対象外の子を戻した後、祖先の統合候補として受領する',t=>{
  const f=fixture(t),c=f.child('旧対象外');f.store.updateTask('Fixture',c.id,{mergeExcluded:true});assert.match(f.preview().items[0].blockers.join(' '),/対象から外され/);
@@ -289,7 +380,7 @@ test('未引渡しの統合も専用成果を優先し、共有の過去資料�
  const f=fixture(t),c=f.child('子',f.parent.id,false),big=f.write(path.join(f.dir,'成果物','big.zip'),'');fs.truncateSync(big,65*1024*1024);
  for(let n=0;n<501;n++)f.write(path.join(f.dir,'作業',`${n}.txt`),'shared');
  const d=f.preview(),i=d.items[0];assert.equal(i.candidateError,null);assert.deepEqual(i.blockers,[]);assert.equal(i.files.length,1);assert.equal(i.files[0].relative,'作業/'+c.id+'/report.txt');assert.equal(i.skipped.count,0);assert.deepEqual(i.selected,[i.files[0].id]);
- assert.throws(()=>f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id,files:['project:成果物/big.zip']}]}),/選択が不正/);
+ assert.throws(()=>f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{...cleanupReview(d.items[0]),project:'Fixture',task:c.id,files:['project:成果物/big.zip']}]}),/選択が不正/);
  assert.equal(f.transfer.read('Fixture',c.id),null);
 });
 test('専用成果の超過時は統合に指定案内を一つだけ出し、引渡し後は記録済みfilesを使う',t=>{
@@ -322,7 +413,7 @@ for(const place of ['body','copy'])test('復旧R1 保存先の未解消衝突か
  const mergeHead=sh(target,'rev-parse','MERGE_HEAD'),before=git.inspect(target),journal=fs.readFileSync(f.integrate.file('Fixture',f.parent.id),'utf8');
  const vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8'),fn=source.slice(source.indexOf('function assertWorkspaceIdle('),source.indexOf('const inWork ='));
  let prepares=0,active=[];const p=f.store.readProject('Fixture'),parent=f.store.readTask(f.store.taskFile('Fixture',f.parent.id));
- const ctx={lt:require('../lib/locale').lt,appUpdate:{applying:()=>false},fs,path,expandHome:x=>x,baseOf:()=>f.body,DRY:false,taskIntegrate:f.integrate,gitw:{prepare:()=>{prepares++;throw Error('new copy forbidden');}},workRoot:()=>f.removal.workRoot(p),store:f.store,maintenance:{locked:()=>false},github:{assertStart:()=>{}},githubProject:p=>p,sessions:{list:()=>active},chats:{running:new Map()}};
+ const ctx={executionGate:{assert:()=>{}},discussion:null,restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,appUpdate:{applying:()=>false},fs,path,expandHome:x=>x,baseOf:()=>f.body,DRY:false,taskIntegrate:f.integrate,gitw:{prepare:()=>{prepares++;throw Error('new copy forbidden');}},workRoot:()=>f.removal.workRoot(p),store:f.store,maintenance:{locked:()=>false},github:{assertStart:()=>{}},githubProject:p=>p,sessions:{list:()=>active},chats:{running:new Map()}};
  vm.createContext(ctx);vm.runInContext(fn,ctx);assert.equal(ctx.startDir(p,parent).dir,target);assert.equal(prepares,0);
  assert.equal(f.store.readTask(f.store.taskFile('Fixture',f.parent.id)).workdir,'');assert.deepEqual(git.inspect(target),before);assert.equal(sh(target,'rev-parse','MERGE_HEAD'),mergeHead);
  assert.throws(()=>git.recoveryTarget(target,f.body,{clean:false}),/取り込みが途中/);
@@ -458,7 +549,7 @@ for(const who of ['target','source'])for(const after of [false,true])test('統�
 });
 test('保存先が本体のAI再開も同時作業保護を維持し、保存先がコピーなら従来の隔離を維持する',t=>{
  const f=fixture(t),other=f.child('別作業'),vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8'),fn=source.slice(source.indexOf('function assertWorkspaceIdle('),source.indexOf('function workDir('));
- let active=[],seen;const chats={running:new Map()},ctx={lt:require('../lib/locale').lt,appUpdate:{applying:()=>false,busyMessage:()=>"fixture update applying"},fs,path,expandHome:x=>x,baseOf:()=>f.body,maintenance:{locked:()=>false},github:{assertStart:(p,t)=>{seen=t.workdir;}},githubProject:p=>p,taskIntegrate:f.integrate,sessions:{list:()=>active},chats,store:f.store};vm.createContext(ctx);vm.runInContext(fn,ctx);
+ let active=[],seen;const chats={running:new Map()},ctx={executionGate:{assert:()=>{}},restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,appUpdate:{applying:()=>false,busyMessage:()=>"fixture update applying"},fs,path,expandHome:x=>x,baseOf:()=>f.body,maintenance:{locked:()=>false},github:{assertStart:(p,t)=>{seen=t.workdir;}},githubProject:p=>p,taskIntegrate:f.integrate,sessions:{list:()=>active},chats,store:f.store};vm.createContext(ctx);vm.runInContext(fn,ctx);
  const p=f.store.readProject('Fixture'),parent=f.store.readTask(f.store.taskFile('Fixture',f.parent.id));
  active=[{project:p.id,task:other.id,running:true}];assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,{...parent,workspaceMode:'shared',workdir:f.body}));
  f.integrate.save({id:'pending-base',project:p.id,task:parent.id,target:f.body,items:[],complete:false});
@@ -469,6 +560,27 @@ test('保存先が本体のAI再開も同時作業保護を維持し、保存先
  active=[{project:p.id,task:other.id,running:true}];assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,parent));assert.equal(seen,copy);
  active=[{project:p.id,task:parent.id,running:true}];assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,other));
  ctx.appUpdate.applying=()=>true;assert.throws(()=>ctx.assertWorkspaceIdle(p,parent),error=>error.status===409&&error.message==="fixture update applying");
+});
+
+for (const surface of ['chat', 'terminal']) test('freetalkの別話題だけ並行開始し、同話題・通常本体・検証中の保護を維持：'+surface,()=>{
+ const vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8'),fn=source.slice(source.indexOf('function assertWorkspaceIdle('),source.indexOf('function workDir('));
+ const a={id:'a',workspaceMode:'direct'},b={id:'b',workspaceMode:'direct'},p={id:'freetalk',kind:'freetalk',tasks:[a,b]},ordinary={id:'ordinary',tasks:[a]};
+ const chats={running:new Map()},active=surface==='terminal'?[{project:p.id,task:a.id,running:true}]:[];
+ if(surface==='chat')chats.running.set(p.id+'\0'+a.id,{});
+ const ctx={executionGate:{assert:()=>{}},restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,fs,path,expandHome:x=>x,baseOf:()=>os.tmpdir(),appUpdate:{applying:()=>false,busyMessage:()=> 'update applying'},maintenance:{locked:()=>false},github:{assertStart:()=>{}},githubProject:p=>p,taskIntegrate:{read:()=>null},sessions:{list:()=>active},chats,store:{listProjects:()=>[p,ordinary]}};
+ vm.createContext(ctx);vm.runInContext(fn,ctx);
+ const blocked=error=>error.status===409&&/本体での同時作業/.test(error.message);
+ assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,b));
+ assert.throws(()=>ctx.assertWorkspaceIdle(p,a),blocked);
+ if(surface==='chat')assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,a,true));
+ else assert.throws(()=>ctx.assertWorkspaceIdle(p,a,true),blocked);
+ assert.throws(()=>ctx.assertWorkspaceIdle(p,{workspaceMode:'direct'}),blocked);
+ assert.throws(()=>ctx.assertWorkspaceIdle(ordinary,a),blocked);
+ assert.throws(()=>ctx.assertWorkspaceIdle({...p,kind:undefined},b),blocked);
+ ctx.maintenance.locked=()=>true;
+ assert.throws(()=>ctx.assertWorkspaceIdle(p,b),error=>error.status===409&&/検証中/.test(error.message));
+ ctx.maintenance.locked=()=>false;ctx.appUpdate.applying=()=>true;
+ assert.throws(()=>ctx.assertWorkspaceIdle(p,b),error=>error.status===409&&error.message==='update applying');
 });
 
 function bookkeepingFixture(f){
@@ -552,12 +664,42 @@ for(const [childVersion,targetVersion,expected] of [['1.4.7','1.0.2','1.4.7'],['
 });
 
 // 成果の宣言→内容説明→1操作の統合。利用者の台帳には触れない。
+test('未統合コピーの成果宣言は完了検査と統合previewで一致し親だけへ保持受領する', async t=>{
+ const f=fixture(t),w=git.prepare({base:f.body,workRoot:f.removal.workRoot({id:'Fixture'}),taskId:f.parent.id});
+ f.store.updateTask('Fixture',f.parent.id,{workdir:w.dir});
+ const c=f.child('保存済み子'),head=git.inspect(c.workdir).head;fs.unlinkSync(path.join(f.dir,'作業',c.id,'report.txt'));
+ f.store.appendSection('Fixture',c.id,'成果',`- 本体保存済み：.@${head.slice(0,8)}（未統合の保存済み機能）`);
+ f.store.setStep('Fixture',c.id,0,false);
+ const original=git.inspect(f.body),p=f.store.listProjects()[0],task=p.tasks.find(x=>x.id===c.id),issue=f.transfer.resultIssue(p,task);
+ const waiting=new IntegrateAuto({integrate:f.integrate,waitStatus:()=>[{kind:'chat',message:'AI稼働中'}]});
+ const only=[{project:'Fixture',task:c.id}];
+ const blocked=waiting.preview({project:'Fixture',task:f.parent.id,only});
+ assert.equal(blocked.token,undefined);assert.equal(blocked.items[0].needsResults,false);assert.equal(f.transfer.read('Fixture',c.id),null);
+ const d=f.preview(only);
+ assert.equal(issue.ok,true);assert.equal(d.items[0].needsResults,false);assert.deepEqual(d.items[0].results,issue.results);assert.deepEqual(d.items[0].blockers,[]);
+ const request={project:'Fixture',task:f.parent.id,token:d.token,confirm:true,auto:true,thenMain:false,selected:[{project:'Fixture',task:c.id,disposition:'continue'}]};
+ f.integrate.apply(request);
+ const auto=new IntegrateAuto({integrate:f.integrate,busy:()=>false,dispatch:async()=>assert.fail('再委任不要'),mergeMain:async()=>assert.fail('本体反映禁止')});await auto.tick();
+ const r=f.integrate.read('Fixture',f.parent.id),receipt=f.transfer.read('Fixture',c.id);
+ assert.equal(r.complete,true);assert.equal(r.auto.thenMain,false);assert.equal(r.auto.main.skipped,true);
+ assert.equal(git.isAncestor(w.dir,head),true);assert.deepEqual(git.inspect(f.body),original);
+ assert.equal(fs.existsSync(c.workdir),true);assert.ok(f.store.taskFile('Fixture',c.id));assert.equal(f.store.readTask(f.store.taskFile('Fixture',c.id)).steps[0].done,false);
+ assert.deepEqual(receipt.results,issue.results);const received=f.preview(only);
+ assert.deepEqual(received.items,[]);assert.equal(received.retainedItems[0].alreadyReceived,true);
+});
+test('未統合コピー成果を本体へ受領した後も成果照合は同じで正規の片付けが完了する',t=>{
+ const f=fixture(t),c=f.child('保存済み子'),head=git.inspect(c.workdir).head;
+ f.store.appendSection('Fixture',c.id,'成果',`- 本体保存済み：.@${head}（保存済み機能）`);
+ const d=f.preview(),results=d.items[0].results;assert.deepEqual(d.items[0].blockers,[]);
+ assert.equal(f.apply(d).complete,true);assert.equal(fs.existsSync(c.workdir),false);
+ assert.equal(git.isAncestor(f.body,head),true);assert.deepEqual(f.transfer.read('Fixture',c.id).results,results);
+});
 for(const kind of ['本体保存済み','なし'])test('成果ファイルなしの子も1回で受領・片付け：'+kind,t=>{
  const f=fixture(t),c=f.child('確認',f.parent.id,false);fs.unlinkSync(path.join(f.dir,'作業',c.id,'report.txt'));
  const commit=sh(f.body,'rev-parse','HEAD');
  f.store.appendSection('Fixture',c.id,'成果',kind==='なし'?'- なし：確認だけ。結果はこの作業ファイルに記録':`- 本体保存済み：.@${commit.slice(0,8)}（確認した変更）`);
  const head=git.inspect(f.body),d=f.preview(),i=d.items[0];assert.deepEqual(i.blockers,[]);assert.equal(i.resultReady,true);assert.deepEqual(i.files,[]);
- const out=f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id}]});
+ const out=f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{...cleanupReview(d.items[0]),project:'Fixture',task:c.id}]});
  assert.equal(out.complete,true);assert.equal(f.store.taskFile('Fixture',c.id),null);assert.deepEqual(git.inspect(f.body),head);
  const receipt=f.transfer.read('Fixture',c.id);assert.equal(receipt.complete,true);assert.deepEqual(receipt.files,[]);assert.equal(receipt.results[0].kind,kind);
  assert.match(chat.read(f.dir,f.parent.id).find(x=>x.handoff).text,new RegExp(kind));assert.equal(f.apply({...d,resume:false}).duplicate,true);
@@ -591,15 +733,15 @@ test('宣言した共有ファイルだけを説明付きで受領し、同内�
 });
 test('新規統合は成果全件と専用フォルダを自動処理し、追加成果や間引きを拒否',t=>{
  const f=fixture(t),c=f.child('調査',f.parent.id,false),second=f.write(path.join(f.dir,'作業',c.id,'second.txt'),'second');
- let d=f.preview();assert.throws(()=>f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id,files:[d.items[0].files[0].id]}]}),/全件/);
+ let d=f.preview();assert.throws(()=>f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{...cleanupReview(d.items[0]),project:'Fixture',task:c.id,files:[d.items[0].files[0].id]}]}),/全件/);
  f.write(path.join(f.dir,'作業',c.id,'third.txt'),'third');assert.throws(()=>f.apply(d),/成果ファイルが変わ/);assert.ok(fs.existsSync(second));
- d=f.preview();assert.equal(f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id}]}).complete,true);
+ d=f.preview();assert.equal(f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{...cleanupReview(d.items[0]),project:'Fixture',task:c.id}]}).complete,true);
  assert.equal(fs.existsSync(path.dirname(second)),false);assert.equal(f.transfer.read('Fixture',c.id).files.length,3);
 });
 test('成果物専用フォルダの正本と共有原本は自動で片付けない',t=>{
  const f=fixture(t),c=f.child('調査',f.parent.id,false);fs.unlinkSync(path.join(f.dir,'作業',c.id,'report.txt'));
  const canonical=f.write(path.join(f.dir,'成果物',c.id,'result.txt'),'canonical');const d=f.preview();
- assert.equal(f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id}]}).complete,true);
+ assert.equal(f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{...cleanupReview(d.items[0]),project:'Fixture',task:c.id}]}).complete,true);
  assert.equal(fs.readFileSync(canonical,'utf8'),'canonical');assert.equal(f.transfer.read('Fixture',c.id).files[0].to,canonical);
 });
 test('同内容を受領中に正本が変わると上書き・片付けせず再開も止める',t=>{
@@ -614,7 +756,7 @@ test('同内容2成果も内部配置ごと保持し、内容は全件受領記�
 });
 
 // v4.72.0 独立指摘の実行可能な一式と旧部分引渡しを回帰検証。
-const integrateAll=f=>{const d=f.preview();return f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project:i.project,task:i.task}))});};
+const integrateAll=f=>{const d=f.preview();return f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({...cleanupReview(i),project:i.project,task:i.task}))});};
 for(const existing of ['scattered','bundle','wrong-mode'])test('成果一式の同内容config・配置・実行権限を保持：'+existing,t=>{
  const f=fixture(t),c=f.child('一式',f.parent.id,false),base=path.join(f.dir,'作業',c.id);
  fs.unlinkSync(path.join(base,'report.txt'));
@@ -755,4 +897,192 @@ test('正本そのものの一式は未宣言の原物を間引かず保持',t=>
  assert.equal(integrateAll(f).complete,true);const r=f.transfer.read('Fixture',f.c.id);
  assert.ok(r.files.every(x=>x.existing&&x.to===x.path));assert.equal(fs.readFileSync(path.join(source,'bundle/.original'),'utf8'),'original');
  assert.equal(execFileSync(path.join(source,'bundle/main.cjs'),[],{encoding:'utf8'}).trim(),'current.json');
+});
+
+function retainedApply(f,d,overrides={}){return f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project:i.project,task:i.task,review:{...i.review,confirmed:true,evidence:'独立確認済み',undecided:'未採用PR',residual:'後で検討'},...overrides}))});}
+for(const kind of ['なし','ファイル','本体保存済み'])test('継続受領後も末尾の成果宣言と完了検査を保持：'+kind,t=>{
+ const f=fixture(t),c=f.child('成果欄を保持'),file=f.store.taskFile('Fixture',c.id);
+ const value=kind==='なし'?'確認のみ':kind==='ファイル'?`作業/${c.id}/report.txt（確認結果）`:`.@${sh(f.body,'rev-parse','HEAD')}（保存済み）`;
+ fs.appendFileSync(file,`\n## 成果\n- ${kind}：${value}\n`);
+ const {readResults}=require('../lib/task-results'),before=readResults(file);
+ assert.equal(retainedApply(f,f.preview()).complete,true);
+ assert.deepEqual(readResults(file),before);
+ const kept=f.store.readTask(file),p=f.store.readProject('Fixture');
+ assert.equal(f.transfer.resultIssue(p,kept).ok,true);
+ assert.equal(kept.continuation,true);assert.equal(kept.workdir,c.workdir);assert.equal(kept.question,c.question);
+ assert.equal(f.transfer.read('Fixture',c.id).retained,true);
+ assert.ok(fs.readFileSync(file,'utf8').split('## やったこと\n')[1].split(/\n## /)[0].includes('成果を受領し作業を継続'));
+});
+test('継続受領は未済手順・質問・子孫・原文・コピーを保持する',t=>{
+ const f=fixture(t),c=f.child('継続');f.store.setStep('Fixture',c.id,0,false);f.store.updateTask('Fixture',c.id,{question:'次の採用判断'});const grand=f.child('孫',c.id,false),log=chat.append(f.dir,c.id,{role:'user',text:'元の会話'});
+ const d=f.preview([{project:'Fixture',task:c.id}]);assert.equal(d.items.length,1);assert.equal(d.items[0].blockers.length,0);
+ const out=retainedApply(f,d);assert.equal(out.complete,true);assert.equal(out.items[0].state,'保持受領済み');assert.ok(fs.existsSync(c.workdir));assert.ok(f.store.taskFile('Fixture',grand.id));assert.deepEqual(chat.read(f.dir,c.id),[log]);
+ const kept=f.store.readTask(f.store.taskFile('Fixture',c.id));assert.equal(kept.steps[0].done,false);assert.equal(kept.question,'次の採用判断');assert.equal(kept.workdir,c.workdir);assert.equal(kept.completionPending,false);assert.equal(f.transfer.read('Fixture',c.id).retained,true);assert.equal(fs.existsSync(path.join(f.root,'Trash')),false);
+});
+test('末尾の成果宣言を継続受領メモで壊さず、完了ゲートと次の統合が通る',t=>{
+ const f=fixture(t),c=f.child('成果末尾'),file=f.store.taskFile('Fixture',c.id);
+ f.store.appendSection('Fixture',c.id,'成果','- なし：配布ファイルなし（コードはcopy）');
+ const {readResults}=require('../lib/task-results'),{ResultsGate}=require('../lib/results-gate');
+ const before=readResults(file);assert.equal(before.length,1);
+ assert.equal(retainedApply(f,f.preview()).complete,true);
+ assert.deepEqual(readResults(file),before);
+ const kept=f.store.readTask(file),all=f.store.listProjects(),p=all.find(p=>p.id==='Fixture');
+ assert.match(kept.done,/成果を受領し作業を継続/);assert.equal(kept.workdir,c.workdir);
+ assert.equal(f.transfer.resultIssue(p,kept).ok,true);
+ assert.equal(new ResultsGate({store:f.store,transfer:f.transfer}).approvalIssue(p,kept,all).ok,true);
+ assert.deepEqual(f.preview().items,[]); // 受領済みの同じ成果は未受領一覧に出さない。
+ f.write(path.join(c.workdir,'additional.txt'),'次の保存済み成果');git.save(c.workdir,'increment');
+ const next=f.preview();assert.equal(next.items.length,1);assert.deepEqual(next.items[0].blockers,[]);
+ assert.equal(retainedApply(f,next).complete,true);assert.deepEqual(readResults(file),before);
+});
+test('保持受領の重複は通知せず、増分は履歴を保全して一度だけ受領',t=>{
+ const f=fixture(t),c=f.child('継続'),first=retainedApply(f,f.preview()),receipt=f.transfer.read('Fixture',c.id),head=sh(f.body,'rev-parse','HEAD');
+ retainedApply(f,f.preview());assert.equal(chat.read(f.dir,f.parent.id).filter(r=>r.handoff).length,1);assert.equal(f.transfer.read('Fixture',c.id).id,receipt.id);assert.equal(sh(f.body,'rev-parse','HEAD'),head);
+ f.write(path.join(c.workdir,'additional.txt'),'次の差分');git.save(c.workdir,'increment');retainedApply(f,f.preview());
+ const next=f.transfer.read('Fixture',c.id);assert.notEqual(next.id,receipt.id);assert.equal(next.previous,receipt.id);assert.equal(chat.read(f.dir,f.parent.id).filter(r=>r.handoff).length,2);assert.equal(JSON.parse(fs.readFileSync(path.join(f.transfer.dir,'history',receipt.id+'.json'),'utf8')).id,receipt.id);assert.ok(fs.existsSync(c.workdir));
+});
+test('保存していないコードと残件の片付けを拒否する',t=>{
+ const f=fixture(t),c=f.child('継続');f.write(path.join(c.workdir,'dirty.txt'),'未保存');assert.match(f.preview().items[0].blockers.join(' '),/保存/);git.save(c.workdir,'save');const d=f.preview();assert.throws(()=>retainedApply(f,d,{disposition:'cleanup'}),/残件/);assert.ok(f.store.taskFile('Fixture',c.id));
+});
+for(const failure of ['task-rename','receipt-save'])test('継続記録の途中保存を復旧し、稼働中の再開と二重通知を防ぐ：'+failure,t=>{
+ const f=fixture(t),c=f.child('復旧',f.parent.id,false),file=f.store.taskFile('Fixture',c.id),before=fs.readFileSync(file,'utf8');
+ const save=f.transfer.save.bind(f.transfer),rename=fs.renameSync;let injected=false;
+ f.transfer.save=r=>{if(failure==='receipt-save'&&r.retained&&r.complete&&!injected){injected=true;throw Error('fixture retention stop');}save(r);};
+ fs.renameSync=(from,to)=>{if(failure==='task-rename'&&to===file&&!injected){injected=true;throw Error('fixture retention stop');}return rename(from,to);};
+ try{assert.throws(()=>retainedApply(f,f.preview()),/fixture retention stop/);}finally{fs.renameSync=rename;f.transfer.save=save;}
+ let receipt=f.transfer.read('Fixture',c.id);assert.equal(receipt.complete,false);assert.ok(receipt.retention);
+ const stopped=fs.readFileSync(file,'utf8');if(failure==='task-rename')assert.equal(stopped,before);
+ const busy=f.removal.busy;f.removal.busy=(p,id)=>id===c.id;
+ assert.throws(()=>f.transfer.continue(receipt),/稼働中/);assert.equal(fs.readFileSync(file,'utf8'),stopped);f.removal.busy=busy;
+ f.restart();assert.equal(f.apply(f.preview()).complete,true);receipt=f.transfer.read('Fixture',c.id);assert.equal(receipt.complete,true);assert.equal(receipt.retained,true);
+ assert.equal(chat.read(f.dir,f.parent.id).filter(r=>r.handoff).length,1);assert.equal((fs.readFileSync(file,'utf8').match(/成果を受領し作業を継続/g)||[]).length,1);assert.ok(fs.existsSync(file));
+});
+
+// Rejected confirmation is editable with the same preview; rejection never starts a receipt.
+test('確認不足・空欄・長過ぎ入力は予約前に拒否し、同じtokenで修正後だけ一度受領する',t=>{
+ const f=fixture(t),c=f.child('確認ループ'),d=f.preview(),i=d.items[0];
+ const send=review=>f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:i.project,task:i.task,disposition:'continue',review}]});
+ const valid={...i.review,confirmed:true,evidence:'人が確認',residual:'残件を保持',undecided:'未採用PR'};
+ const before={head:git.inspect(f.body).head,task:fs.readFileSync(f.store.taskFile('Fixture',c.id),'utf8'),messages:chat.read(f.dir,f.parent.id)};
+ for(const review of [{...valid,confirmed:false},{...valid,sourceHead:'different'},...['scope','planned','undecided','residual','evidence'].flatMap(k=>[{...valid,[k]:'  '},{...valid,[k]:'字'.repeat(10001)}])]){
+  assert.throws(()=>send(review),/確認してください|記入してください/);
+  assert.equal(f.integrate.read('Fixture',f.parent.id),null);assert.equal(f.transfer.read('Fixture',c.id),null);
+  assert.equal(git.inspect(f.body).head,before.head);assert.equal(fs.readFileSync(f.store.taskFile('Fixture',c.id),'utf8'),before.task);assert.deepEqual(chat.read(f.dir,f.parent.id),before.messages);
+ }
+ assert.equal(send(valid).complete,true);assert.equal(chat.read(f.dir,f.parent.id).filter(x=>x.handoff).length,1);assert.ok(f.store.taskFile('Fixture',c.id));
+ // Reusing the accepted token cannot create another receipt.
+ const receipt=f.transfer.read("Fixture",c.id).id,head=git.inspect(f.body).head;
+ assert.equal(send(valid).complete,true);assert.equal(f.transfer.read("Fixture",c.id).id,receipt);assert.equal(git.inspect(f.body).head,head);assert.equal(chat.read(f.dir,f.parent.id).filter(x=>x.handoff).length,1);
+});
+
+test('期限切れのtokenは確認済みでも受領せず、新しい確認でのみ進む',t=>{
+ const f=fixture(t),c=f.child('期限'),d=f.preview();f.integrate.tokens.get(d.token).at=Date.now()-600001;
+ assert.throws(()=>retainedApply(f,d),/もう一度統合内容/);assert.equal(f.integrate.read('Fixture',f.parent.id),null);assert.equal(f.transfer.read('Fixture',c.id),null);
+ assert.equal(retainedApply(f,f.preview()).complete,true);assert.equal(chat.read(f.dir,f.parent.id).filter(x=>x.handoff).length,1);
+});
+
+test('自動開始は残件未知の子を保持し、受領済み衝突の再依頼を拒否',t=>{
+ const f=fixture(t),c=f.child('申告無し');const d=f.preview();
+ assert.equal(d.items[0].remaining.status,'不明');const out=f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,auto:true,thenMain:false,selected:[{project:'Fixture',task:c.id}]});
+ assert.equal(out.complete,true);assert.equal(out.items[0].state,'保持受領済み');assert.ok(f.store.taskFile('Fixture',c.id));assert.ok(fs.existsSync(c.workdir));
+ const record=f.integrate.read('Fixture',f.parent.id);assert.equal(record.auto.scope[0].disposition,'continue');assert.equal(record.items[0].review.residual,'未確認');
+});
+test('自動開始の残件なし申告は片付け、確認中の申告変更は拒否',t=>{
+ const f=fixture(t),c=f.child('申告済み');const file=f.store.taskFile('Fixture',c.id);
+ fs.appendFileSync(file,'\n## 残件申告\n```json\n'+JSON.stringify({status:'なし',items:'なし',undecided:'なし',evidence:'独立合格'})+'\n```\n');
+ const d=f.preview();assert.equal(d.items[0].remaining.status,'なし');fs.appendFileSync(file,'\n追加変更\n');assert.throws(()=>f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,auto:true,selected:[{project:'Fixture',task:c.id}]}),/子作業|変わりました/);
+ const next=f.preview();const out=f.integrate.apply({project:'Fixture',task:f.parent.id,token:next.token,confirm:true,auto:true,thenMain:false,selected:[{project:'Fixture',task:c.id}]});assert.equal(out.items[0].state,'片付け済み');assert.equal(f.store.taskFile('Fixture',c.id),null);
+});
+
+test('古い衝突は保存済み祖先から受領待ちへ表示を更新し再解消委任を拒否',t=>{
+ const f=fixture(t),c=f.child('表示が古い子'),d=f.preview(),i=d.items[0];
+ const run=f.integrate.run;f.integrate.run=r=>({partial:true,conflict:true});
+ try{f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,selected:[{project:'Fixture',task:c.id,disposition:'continue',review:{...i.review,confirmed:true,evidence:'確認済み'}}]});}finally{f.integrate.run=run;}
+ const r=f.integrate.read('Fixture',f.parent.id);r.items[0].state='衝突';r.items[0].conflictPaths=['obsolete.txt'];r.items[0].conflictKind='content';f.integrate.save(r);
+ git.merge({dir:c.workdir,workRoot:f.removal.workRoot({id:'Fixture'}),title:'saved',target:f.body,cleanup:false});
+ const next=f.preview();assert.equal(next.items[0].codeAlready,true);assert.equal(next.items[0].state,'取り込み済み（受領待ち）');assert.equal(next.items[0].conflictPaths,undefined);
+ assert.throws(()=>f.integrate.conflictRequest({project:'Fixture',task:f.parent.id,childProject:'Fixture',childTask:c.id,token:next.token}),/コードは取り込み済み/);
+ assert.equal(f.apply(next).complete,true);assert.ok(f.store.taskFile('Fixture',c.id));
+});
+
+test('実Gitの自動統合：衝突保存→独立合格→正式受領→保持本体取り込みを一度で完走',async t=>{
+ const f=fixture(t),w=git.prepare({base:f.body,workRoot:f.removal.workRoot({id:'Fixture'}),taskId:f.parent.id});f.store.updateTask('Fixture',f.parent.id,{workdir:w.dir});
+ const c=f.child('自動解消');f.write(path.join(w.dir,'base.txt'),'parent\n');git.save(w.dir,'parent change');f.write(path.join(c.workdir,'base.txt'),'child\n');git.save(c.workdir,'child change');
+ const d=f.preview(),out=f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,confirm:true,auto:true,selected:[{project:'Fixture',task:c.id}]});assert.equal(out.conflict,true);assert.equal(f.store.readTask(f.store.taskFile('Fixture',f.parent.id)).question,'');
+ const issues=[];let mains=0;const {IntegrateAuto}=require('../lib/integrate-auto'),auto=new IntegrateAuto({integrate:f.integrate,busy:()=>false,dispatch:async r=>issues.push(r),mergeMain:async()=>{mains++;const merged=git.merge({dir:w.dir,workRoot:f.removal.workRoot({id:'Fixture'}),target:f.body,cleanup:false});return {...merged,retained:true};}});auto.pendingRequest=()=>true;
+ await auto.tick();assert.equal(issues.length,1);const k=Object.keys(f.integrate.read('Fixture',f.parent.id).auto.attempts)[0];
+ try{sh(w.dir,'merge','--no-ff','--no-edit',git.inspect(c.workdir).head);}catch{}f.write(path.join(w.dir,'base.txt'),'parent\nchild\n');sh(w.dir,'add','.');sh(w.dir,'commit','-qm','preserve both');
+ auto.settled({project:'Fixture',task:f.parent.id,text:`[integration-auto:${k}:code]`},{text:'双方の意味を保存'});await auto.tick();assert.equal(issues.length,2);assert.equal(f.transfer.read('Fixture',c.id).complete,undefined);
+ auto.settled({project:'Fixture',task:f.parent.id,text:`[integration-auto:${k}:review]`},{text:`[integration-review:${k}:pass]`,integrationAuto:{key:k,phase:'review',closed:true,isolation:{version:1,request:f.integrate.read('Fixture',f.parent.id).auto.attempts[k].delivery.request,resumed:false}}});await auto.tick();await auto.tick();
+ const r=f.integrate.read('Fixture',f.parent.id);assert.equal(r.complete,true);assert.equal(r.items[0].state,'保持受領済み');assert.equal(r.auto.main.state,'done');assert.equal(mains,1);assert.equal(issues.length,2);assert.equal(f.integrate.pending().length,0);
+ assert.equal(fs.readFileSync(path.join(f.body,'base.txt'),'utf8'),'parent\nchild\n');assert.equal(sh(f.body,'rev-parse','HEAD^{tree}'),sh(w.dir,'rev-parse','HEAD^{tree}'));assert.ok(fs.existsSync(c.workdir));assert.ok(fs.existsSync(w.dir));assert.ok(f.store.taskFile('Fixture',f.parent.id));assert.ok(f.store.taskFile('Fixture',c.id));
+});
+
+test('受領済み通知を成果で判定し、空の開始・再起動・確認文変更で再受領しない',t=>{
+ const f=fixture(t),c=f.child('通知');retainedApply(f,f.preview());f.restart();
+ const receipt=f.transfer.read('Fixture',c.id),record=f.integrate.read('Fixture',f.parent.id),messages=chat.read(f.dir,f.parent.id),head=git.inspect(f.body).head;
+ const d=f.preview();assert.equal(d.items.length,0);assert.equal(d.retainedItems.length,1);
+ assert.equal(f.transfer.offers().find(x=>x.task===c.id).pending,false);
+ const out=f.integrate.apply({project:'Fixture',task:f.parent.id,token:d.token,selected:[{project:'Fixture',task:c.id,disposition:'continue',review:{...d.retainedItems[0].review,confirmed:true,evidence:'別の確認文',residual:'後日',undecided:'別文'}}],confirm:true,auto:false});
+ assert.equal(out.noChanges,true);assert.deepEqual(f.transfer.read('Fixture',c.id),receipt);assert.deepEqual(f.integrate.read('Fixture',f.parent.id),record);assert.deepEqual(chat.read(f.dir,f.parent.id),messages);assert.equal(git.inspect(f.body).head,head);
+ assert.equal(f.integrate.apply({project:'Fixture',task:f.parent.id,token:f.preview().token,selected:[],confirm:true,auto:true}).noChanges,true);
+});
+test('受領履歴の無い子は一覧のたびに統合前確認を走らせず、未受領と示す',t=>{
+ const f=fixture(t),c=f.child('未受領');
+ const spy=()=>{const calls=[],real=f.transfer.offerState;f.transfer.offerState=(p,x,...rest)=>{calls.push(x.id);return real(p,x,...rest);};return calls;};
+ let calls=spy();assert.equal(f.transfer.offers().find(x=>x.task===c.id).pending,true);assert.deepEqual(calls,[]);
+ retainedApply(f,f.preview());f.restart();
+ calls=spy();assert.equal(f.transfer.offers().find(x=>x.task===c.id).pending,false);assert.deepEqual(calls,[c.id]);
+});
+test('壊れた受領記録は未確認で残し、他の子の通知を妨げない',t=>{
+ const f=fixture(t),bad=f.child('壊れた記録',f.parent.id,false),good=f.child('正常な子',f.parent.id,false);
+ const file=f.transfer.file('Fixture',bad.id);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'broken');
+ const offers=f.transfer.offers();assert.equal(offers.find(x=>x.task===bad.id).pending,true);assert.ok(offers.find(x=>x.task===bad.id).reason);
+ assert.equal(offers.find(x=>x.task===good.id).pending,true);assert.equal(fs.readFileSync(file,'utf8'),'broken');
+});
+for(const [name,patch] of Object.entries({object:{received:{}},string:{received:'bad'},null:{received:null},number:{received:1},boolean:{received:false},element:{received:[null]},targetNull:{received:[{target:null}]},targetString:{received:[{target:'bad'}]},targetMissing:{received:[{}]},targetProject:{received:[{target:{project:1,task:'parent'}}]},targetTask:{received:[{target:{project:'Fixture',task:''}}]},targetDir:{received:[{target:{project:'Fixture',task:'parent',dir:{}}}]}}))test('不正受領履歴は子単位で未確認・原物保持し整理を拒否：'+name,t=>{
+ const f=fixture(t),bad=f.child('不正履歴',f.parent.id,false),good=f.child('受領済み正常子',f.parent.id,false);
+ retainedApply(f,f.preview());
+ const record=f.transfer.read('Fixture',bad.id),file=f.transfer.file('Fixture',bad.id),raw=JSON.stringify({...record,...patch});fs.writeFileSync(file,raw);
+ const goodReceipt=f.transfer.read('Fixture',good.id),messages=chat.read(f.dir,f.parent.id),head=git.inspect(f.body).head;
+ for(let n=0;n<2;n++){
+  const offers=f.transfer.offers(),broken=offers.find(x=>x.task===bad.id),normal=offers.find(x=>x.task===good.id);
+  assert.equal(broken.pending,true);assert.equal(broken.received,null);assert.match(broken.reason,/受領履歴/);assert.equal(normal.pending,false);assert.ok(normal.received);
+  assert.throws(()=>f.transfer.receiptHistory(f.transfer.read('Fixture',bad.id)),/受領履歴/);
+  assert.throws(()=>f.preview(),/受領履歴/); // An unavailable history never yields a cleanup token.
+  assert.equal(fs.readFileSync(file,'utf8'),raw);assert.deepEqual(f.transfer.read('Fixture',good.id),goodReceipt);assert.deepEqual(chat.read(f.dir,f.parent.id),messages);assert.equal(git.inspect(f.body).head,head);
+  f.restart();
+ }
+});
+for(const change of ['code','file','delete','results','dirty','target','destination','task'])test('追加成果または不明な変更は受領済み通知から除外しない：'+change,t=>{
+ const f=fixture(t),c=f.child('追加');retainedApply(f,f.preview());
+ if(change==='code'){f.write(path.join(c.workdir,'new.txt'),'new');git.save(c.workdir,'new');}
+ if(change==='file')f.write(path.join(f.dir,'作業',c.id,'second.txt'),'new');
+ if(change==='delete')fs.unlinkSync(path.join(f.dir,'作業',c.id,'report.txt'));
+ if(change==='results')f.store.appendSection('Fixture',c.id,'成果','- なし：追加の分析記録');
+ if(change==='dirty')f.write(path.join(c.workdir,'unsaved.txt'),'dirty');
+ if(change==='target'){const w=git.prepare({base:f.body,workRoot:f.removal.workRoot({id:'Fixture'}),taskId:f.parent.id});f.store.updateTask('Fixture',f.parent.id,{workdir:w.dir});}
+ if(change==='destination'){const r=f.transfer.read('Fixture',c.id);fs.writeFileSync(r.received.flatMap(x=>x.files)[0].to,'changed');}
+ if(change==='task')f.store.appendSection('Fixture',c.id,'メモ','未確認の追加作業');
+ const d=f.preview();assert.equal(d.items.length,1);assert.equal(f.transfer.offers().find(x=>x.task===c.id).pending,true);if(change==='destination')assert.match(d.items[0].blockers.join(' '),/以前受け取った成果/);
+});
+test('旧申告なしの受領済み子を根拠付きで片付け、保持本体取込を再発行しない',t=>{
+ const f=fixture(t),c=f.child('旧完了');retainedApply(f,f.preview());const d=f.preview(),i=d.retainedItems[0];
+ assert.equal(i.needsRemaining,true);assert.equal(i.remaining.status,'不明');
+ const selected=[{project:'Fixture',task:c.id,disposition:'cleanup',cleanupAudit:{items:'なし',undecided:'なし',evidence:'独立レビューと保存済み成果・作業本文を照合、未採用判断なし'}}];
+ const b={project:'Fixture',task:f.parent.id,token:d.token,selected,auto:true,confirm:true,thenMain:true};
+ assert.equal(f.integrate.apply(b).complete,true);assert.equal(f.integrate.read('Fixture',f.parent.id).auto.thenMain,false);assert.equal(f.store.taskFile('Fixture',c.id),null);assert.equal(fs.existsSync(c.workdir),false);assert.equal(f.integrate.apply(b).duplicate,true);
+});
+for(const mode of ['steps','question','descendant','declared','evidence','stale','hidden'])test('完了子監査は実残件・更新・隠し原物を保護：'+mode,t=>{
+ const f=fixture(t),c=f.child('監査');retainedApply(f,f.preview());
+ if(mode==='steps')f.store.setStep('Fixture',c.id,0,false);
+ if(mode==='question')f.store.updateTask('Fixture',c.id,{question:'採用待ち'});
+ if(mode==='descendant')f.child('未了子孫',c.id,false);
+ if(mode==='declared')f.store.appendSection('Fixture',c.id,'残件申告','```json\n'+JSON.stringify({status:'あり',items:'実Pro往復',undecided:'なし',evidence:'実残件確認'})+'\n```');
+ if(mode==='hidden')f.write(path.join(f.dir,'作業',c.id,'.unreceived'),'hidden original');
+ const d=f.preview(),i=[...d.items,...d.retainedItems][0];
+ const b={project:'Fixture',task:f.parent.id,token:d.token,selected:[{project:'Fixture',task:c.id,disposition:'cleanup',cleanupAudit:{items:'なし',undecided:'なし',evidence:mode==='evidence'?'未確認':'独立確認済み、成果保存と本文・判断待ちを確認した'}}],auto:true,confirm:true};
+ if(mode==='stale')f.store.appendSection('Fixture',c.id,'メモ','新残件');
+ if(mode==='hidden'){assert.equal(f.integrate.apply(b).complete,true);assert.equal(fs.readFileSync(path.join(f.dir,'作業',c.id,'.unreceived'),'utf8'),'hidden original');}
+ else {assert.throws(()=>f.integrate.apply(b));assert.ok(f.store.taskFile('Fixture',c.id));assert.ok(fs.existsSync(c.workdir));}
 });

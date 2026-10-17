@@ -79,7 +79,8 @@ test('verification runs only confirmed existing scripts, skips npm hooks and loc
  assert.equal((await f.m.verify('P','','',false)).ok,true);
  await assert.rejects(()=>f.m.verify('P','test','stale',true),/選び直/);
  await assert.rejects(()=>f.m.verify('P','test',s[0].hash,false),/選び直/);
- const pending=f.m.verify('P','test',s[0].hash,true);assert.equal(f.m.locked('P'),true);assert.throws(()=>f.m.apply('P','bad',[],true),/検証が動いて/);
+ await assert.rejects(()=>f.m.verify('P','test',s[0].hash,true,()=>{throw Error('execution lease denied');}),/execution lease denied/);assert.equal(f.m.locked('P'),false);
+ let leased=false;const pending=f.m.verify('P','test',s[0].hash,true,()=>{assert.equal(f.m.locked('P'),false);leased=true;});assert.equal(leased,true);assert.equal(f.m.locked('P'),true);assert.throws(()=>f.m.apply('P','bad',[],true),/検証が動いて/);
  const r=await pending;assert.equal(r.ok,true);assert.match(r.result.output,/fixture passed/);assert.equal(fs.existsSync(path.join(f.dir,'hook-ran')),false);assert.equal(f.m.locked('P'),false);
 });
 test('verification reports broken structure and terminates an overlong local script',async t=>{

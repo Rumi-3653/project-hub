@@ -12,7 +12,7 @@ const operation = (text, label) => text.split('\n').find(line => line.startsWith
 test('完了確認は同じ画面の黄色い帯で行い、コピーなしでは取り込ませない', () => {
   const text = info({ completionPending: true });
   assert.match(text, /黄色い帯.*［完了に移す］［まだ続ける］/);
-  assert.match(text, /［あなたの番］の［完了確認］/);
+  assert.match(text, /［あなたの番］の［完了］/);
   assert.match(text, /取り込みは不要/);
   assert.doesNotMatch(text, /［本体に取り込む］がある/);
   assert.match(text, /この返事が終わってから/);
@@ -98,6 +98,13 @@ test('子作業とプロジェクト間の派生にも成果引渡しと条件�
   const q={...p,id:'q',tasks:[]},derived={...child,kind:'derived',derivedFrom:'p/main'};
   assert.match(guidance(q,derived,{projects:[p,q]}),/渡す先は「本作業」/);
   assert.match(guidance(p,child),/必要に応じGitHubへの更新/);
+});
+
+test('未完了の子は完了を強いず、途中の引渡しと保持する統合を案内する',()=>{
+ const parent={id:'main',title:'本作業',state:'実行中',steps:[]},child={id:'child',title:'続きあり',parent:'main',state:'返事待ち',question:'実試験待ち',steps:[{done:false}]};
+ const p={id:'p',name:'親',tasks:[parent,child],phases:[]};
+ assert.match(guidance(p,child),/［成果を渡す（途中）］.*残手順を保持/);
+ assert.match(guidance(p,parent),/［統合する（途中の子は残す）］.*完了した子だけ［統合して片付ける］/);
 });
 
 test('対象外の子を戻す案内も表示し、直接取り込みは案内しない',()=>{

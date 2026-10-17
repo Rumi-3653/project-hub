@@ -1,0 +1,30 @@
+'use strict';
+process.env.HUB_LANG = 'ja';
+const test = require('node:test'), assert = require('node:assert/strict');
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-skills-api-'))), home = path.join(root, 'home');
+let server, sessions, base;
+test.before(async () => {
+  const probe = require('node:http').createServer();
+  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
+  delete process.env.CLAUDE_CONFIG_DIR; delete process.env.CODEX_HOME;
+  Object.assign(process.env, { HUB_ROOT: root, HUB_AI_HOME: home, HUB_PORT: String(port), HUB_DRY_RUN: '1' });
+  const dir = path.join(home, '.codex/skills/fixture'); fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: Fixture\ndescription: Test description\n---\nPRIVATE BODY');
+  ({ server, sessions } = require('../server'));
+  await new Promise(resolve => server.listen(port, '127.0.0.1', resolve)); base = 'http://127.0.0.1:' + server.address().port;
+});
+test.after(async () => { sessions.stopAll(); await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); });
+test('Readonly GET needs no X-Hub, masks HOME, omits file bodies and refreshes without changing skills', async () => {
+  const file = path.join(home, '.codex/skills/fixture/SKILL.md'), before = fs.readFileSync(file);
+  const r = await fetch(base + '/api/skills'); assert.equal(r.status, 200);
+  const data = await r.json(); assert.equal(data.ais.codex.dir, '~/.codex/skills');
+  assert.deepEqual(data.ais.codex.items, [{ name: 'Fixture', description: 'Test description', source: 'user' }]);
+  assert.doesNotMatch(JSON.stringify(data), /PRIVATE BODY|SKILL\.md|hub-skills-api-/);
+  assert.equal(data.ais.agy.found, false);
+  const second = path.join(home, '.codex/skills/second'); fs.mkdirSync(second); fs.writeFileSync(path.join(second, 'SKILL.md'), 'no metadata');
+  assert.equal((await (await fetch(base + '/api/skills')).json()).ais.codex.items.length, 1);
+  assert.equal((await (await fetch(base + '/api/skills?fresh=1')).json()).ais.codex.items.length, 2);
+  assert.deepEqual(fs.readFileSync(file), before);
+});

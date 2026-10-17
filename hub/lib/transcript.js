@@ -102,9 +102,20 @@ function fromTerminal(buf) {
 }
 
 // 会話を集める。ai: 'claude' | 'codex'、dir: 作業の場所、since: 始めた時刻（ms）
-function collect({ ai, dir, since, buf, accountDir }) {
+function collect({ ai, dir, since, buf, accountDir, source }) {
   const from = since ? since - 60000 : 0;
   let r = null;
+  if (source) {
+    const rows = lines(source), msgs = [];
+    for (const row of rows) {
+      const message = ai === 'codex' && row.type === 'response_item' ? row.payload : row;
+      if (!['user', 'assistant'].includes(message?.role || message?.type) || row.isMeta || row.isSidechain) continue;
+      const text = textOf(message.message?.content || message.content).trim();
+      if (text) msgs.push({ role: message.role || message.type, text });
+    }
+    if (msgs.length) return { kind: 'log', source, msgs };
+    return { kind: 'screen', text: fromTerminal(buf || '') };
+  }
   try { r = ai === 'codex' ? fromCodex(dir, from, accountDir) : ai === 'claude' ? fromClaude(dir, from, accountDir) : null; } catch (e) { r = null; }
   if (r) return { kind: 'log', source: r.source, msgs: r.msgs };
   return { kind: 'screen', text: fromTerminal(buf || '') };
@@ -143,4 +154,4 @@ function packet({ fromLabel, toLabel, taskFile, board, convo, extra }) {
   ].join('\n');
 }
 
-module.exports = { collect, packet, stripAnsi, fromTerminal, LIMIT };
+module.exports = { recentJsonl, same, collect, packet, stripAnsi, fromTerminal, LIMIT };

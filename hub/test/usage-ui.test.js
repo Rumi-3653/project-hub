@@ -5,13 +5,37 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const source=fs.readFileSync(path.join(__dirname,'../public/usage.js'),'utf8');
 const NOW=Date.parse('2026-10-03T00:00:00Z');
 const snapshot={providers:{codex:{status:'ok',fetchedAt:new Date(NOW).toISOString(),windows:[{id:'codex:primary',label:'週間枠',usedPercent:0,resetsAt:'2026-10-04T00:00:00Z'}]},claude:{status:'unavailable',message:'CLIが見つかりません',attemptedAt:new Date(NOW).toISOString()}}};
-function app(){
+function app(language='ja'){
   const elements=new Map(),events=new Map();
   const media={matches:false,addEventListener(n,cb){events.set('media:'+n,cb);}};
   const el=id=>{if(!elements.has(id))elements.set(id,{hidden:id==='#usage-drawer',get textContent(){return this.innerHTML.replace(/<[^>]*>/g,'').replace(/&lt;/g,'<').replace(/&quot;/g,'"').replace(/&amp;/g,'&');},set textContent(v){this.innerHTML=String(v);},innerHTML:'',addEventListener(n,cb){events.set(id+':'+n,cb);},setAttribute(n,v){this[n]=v;},focus(){this.focused=true;}});return elements.get(id);};
   const c=vm.createContext({$:el,esc:s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'),api:()=>new Promise(()=>{}),document:{hidden:false,addEventListener(n,cb,capture){events.set(n+(capture?':capture':''),cb);}},matchMedia(query){assert.equal(query,'(max-width: 900px)');return media;},setInterval(){},console});
+  if(language==='zh-TW'){
+    c.HUB_LOCALE={locale:language,messages:require('../../langpacks/zh-TW/ui.json')};
+    c.document.documentElement={};c.document.querySelectorAll=()=>[];
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/locale.js'),'utf8'),c);
+  }
   vm.runInContext(source,c);return{c,el,events,media};
 }
+test('Retained usage limits show active credit priority in Japanese and Traditional Chinese',()=>{
+  for(const language of ['ja','zh-TW']){
+    const a=app(language),limit={ai:'codex',model:'gpt-6.1-sol',account:'work',hold:true,until:null,creditPriority:true};
+    const active=a.c.usageHtml({limits:[limit],providers:{}},NOW);
+    assert.match(active,language==='ja'?/既存クレジットを優先中/:/正在優先使用現有點數/);
+    assert.match(active,/data-limit-model="gpt-6.1-sol"/);
+    const inactive=a.c.usageHtml({limits:[{...limit,creditPriority:false}],providers:{}},NOW);
+    assert.doesNotMatch(inactive,language==='ja'?/既存クレジットを優先中/:/正在優先使用現有點數/);
+  }
+});
+test('繁体字のチケット操作とClaude案内を翻訳し、アカウント名・チケット名・識別子は保持する',()=>{
+  const a=app('zh-TW'),p={...snapshot.providers.codex,account:'work',accountName:'日本語の名前',resetCredits:{count:1,items:[{title:'日本語のチケット名',expiresAt:null,action:{token:'opaque-token'}}]}};
+  const html=a.c.usageHtml({accountProviders:[{ai:'codex',...p},{ai:'claude',status:'unavailable'}]},NOW);
+  assert.match(html,/>使用<\/button>/);assert.match(html,/開啟使用狀況/);assert.match(html,/可在 Claude 的設定頁面/);assert.match(html,/請核對瀏覽器中的帳號/);
+  assert.doesNotMatch(html,/リセットチケットはClaude|利用状況を開く|期限切れのチケットは使えません/);
+  assert.match(html,/日本語の名前/);assert.match(html,/日本語のチケット名/);assert.match(html,/data-reset-account="work" data-reset-token="opaque-token"/);
+  const expired=a.c.usageExtras('codex',{...p,resetCredits:{count:1,items:[{title:'Expired',expiresAt:new Date(NOW-1).toISOString()}]}},NOW);
+  assert.match(expired,/已過期的票券無法使用/);
+});
 test('Both provider headings keep their names after a decorative icon in available and unavailable cards',()=>{
   const a=app();
   for(const status of ['ok','unavailable']){
@@ -70,7 +94,7 @@ test('OpenAI mark is a monochrome decorative knot and plan badges keep escaped p
   const escaped=a.c.usageHtml({providers:{codex:{...snapshot.providers.codex,plan:'<img src=x>'}}},NOW);
   assert.match(escaped,/usage-plan">&lt;img/);assert.doesNotMatch(escaped,/<img/);
 });
-test('Desktop includes all Claude model scopes; compact text stays short while labels remain complete',()=>{
+test('Top bar icons keep periods and all Claude model scopes at every width while labels remain complete',()=>{
   const a=app(),claude={status:'ok',fetchedAt:new Date().toISOString(),windows:[
     {id:'five_hour',label:'5時間枠',usedPercent:7,resetsAt:null},
     {id:'seven_day',label:'週間枠',usedPercent:78,resetsAt:null},
@@ -80,13 +104,14 @@ test('Desktop includes all Claude model scopes; compact text stays short while l
   ]};
   a.c.current={providers:{claude}};vm.runInContext('usageData=current',a.c);a.c.drawUsage();
   assert.equal(a.c.usageSummary('claude',claude),'Claude 5時間 7%・週間 78%・Fable 100%・<img src=x> 90%');
-  assert.equal(a.c.usageSummary('claude',claude,Date.now(),false,false,true),'Claude 5hr 7%・78%・Fable 100%・<img src=x> 90%');
+  assert.equal(a.c.usageSummary('claude',claude,Date.now(),false,false,true),'Claude 5h 7% 7d 78% Fable 100% <img src=x> 90%');
   const button=a.el('#usage-toggle');
+  assert.match(button.innerHTML,/<svg class="usage-icon usage-icon-claude"/);
   assert.match(button.innerHTML,/Fable <span class="usage-value usage-limit">100%/);
   assert.match(button.innerHTML,/&lt;img/);assert.doesNotMatch(button.innerHTML,/<img|OAuth/);
   assert.doesNotMatch(button['aria-label'],/<span/);assert.match(button['aria-label'],/Fable 100%/);
   a.media.matches=true;a.events.get('media:change')();
-  assert.equal(button.textContent,'CC 5hr 7% W 78%');
+  assert.equal(button.textContent,'5h 7% 7d 78% Fable 100% <img src=x> 90%');
   assert.match(button.title,/Fable 100%/);
   const expired={...claude,windows:[{...claude.windows[3],resetsAt:new Date(Date.now()-1000).toISOString()}]};
   assert.match(a.c.usageSummary('claude',expired),/再確認待ち/);
@@ -121,14 +146,15 @@ test('Narrow top bar switches dynamically and keeps full accessible labels',()=>
   a.c.current={providers:{codex:{status:'ok',fetchedAt:new Date().toISOString(),windows:[{id:'codex:primary',label:'週間枠',usedPercent:8,resetsAt:null}]},claude:{status:'ok',fetchedAt:new Date().toISOString(),windows:[{id:'claude:session',label:'5時間枠',usedPercent:23,resetsAt:null},{id:'claude:weekly',label:'週間枠',usedPercent:63,resetsAt:null}]}}};
   vm.runInContext('usageData=current',a.c);
   a.c.drawUsage();
-  const full='Codex 週間 8% / Claude 5時間 23%・週間 63%',line='Codex 8% / Claude 5hr 23%・63%';
+  const full='Codex 週間 8% / Claude 5時間 23%・週間 63%',line='7d 8% / 5h 23% 7d 63%';
   assert.equal(a.el('#usage-toggle').textContent,line);
+  for(const ai of ['codex','claude'])assert.match(a.el('#usage-toggle').innerHTML,new RegExp(`<svg class="usage-icon usage-icon-${ai}"`));
   a.media.matches=true;a.events.get('media:change')();
-  assert.equal(a.el('#usage-toggle').textContent,'CX 8% / CC 5hr 23% W 63%');
+  assert.equal(a.el('#usage-toggle').textContent,line);
   assert.ok(a.el('#usage-toggle')['aria-label'].startsWith(full));
   assert.ok(a.el('#usage-toggle').title.startsWith(full));
   a.c.current.providers.claude.windows[1].usedPercent=64;a.c.drawUsage();
-  assert.match(a.el('#usage-toggle').textContent,/W 64%$/);
+  assert.match(a.el('#usage-toggle').textContent,/7d 64%$/);
   a.media.matches=false;a.events.get('media:change')();
   assert.equal(a.el('#usage-toggle').textContent,line.replace('63%','64%'));
 });
@@ -155,8 +181,8 @@ test('Usage details distinguish zero, unavailable, missing reset and passed rese
 test('Top bar shows real supplied windows and stale or expired data is identified',()=>{
   const a=app(),p=snapshot.providers.codex;
   assert.equal(a.c.usageSummary('codex',p,NOW),'Codex 週間 0%');
-  assert.equal(a.c.usageSummary('codex',p,NOW,false,false,true),'Codex 0%');
-  assert.equal(a.c.usageSummary('codex',{...p,windows:[{...p.windows[0],resetsAt:'2026-10-02T00:00:00Z'}]},NOW,false,false,true),'Codex 再確認待ち');
+  assert.equal(a.c.usageSummary('codex',p,NOW,false,false,true),'Codex 7d 0%');
+  assert.equal(a.c.usageSummary('codex',{...p,windows:[{...p.windows[0],resetsAt:'2026-10-02T00:00:00Z'}]},NOW,false,false,true),'Codex 7d 再確認待ち');
   assert.match(a.c.usageSummary('codex',p,NOW+7*60000),/前回の情報/);
   assert.match(a.c.usageSummary('codex',{...p,fetchedAt:new Date(NOW+86400000).toISOString()},NOW+86400000),/再確認待ち/);
   assert.match(a.c.usageSummary('claude',snapshot.providers.claude,NOW),/未取得/);
@@ -272,4 +298,82 @@ test('解除前の利用状況取得が遅れて失敗しても、成功した�
   a.c.api = route => route === '/api/limits/fable/clear' ? Promise.resolve({ ...snapshot, fableLimit: null }) : new Promise((_, r) => { reject = r; });
   const pending = a.c.loadUsage(); await a.c.clearFableLimit(); reject(Error('fixture old load denied')); await pending;
   assert.match(a.el('#usage-body').innerHTML, /使用 <span class="usage-value[^"]*">0%/); assert.doesNotMatch(a.el('#usage-toggle').textContent, /利用状況 未取得/);
+});
+
+test('Claude/Codex全モデルの保持を個別表示し、個別解除だけ送り遅い再描画を無効にする', async () => {
+  const a = app(), until = new Date(NOW + 3600000).toISOString();
+  const data = { ...snapshot, limits: [
+    { ai: 'codex', model: 'gpt-6.1-sol', account: 'work', hold: true, until },
+    { ai: 'claude', model: 'claude-opus-5-5', account: '<work>', hold: true, until: null }
+  ] };
+  const html = a.c.usageHtml(data, NOW); assert.match(html, /gpt-6.1-sol/); assert.match(html, /claude-opus-5-5/);
+  assert.match(html, /&lt;work>/); assert.match(html, /両方が上限中なら待機/); assert.equal((html.match(/>保持を解除<\/button>/g) || []).length, 2);
+  assert.doesNotMatch(a.c.usageHtml({ ...data, limits: [] }, NOW), />保持を解除<\/button>/);
+  let calls = [], finish; a.c.confirm = () => true; a.c.api = (...args) => { calls.push(args); return new Promise(r => finish = r); };
+  const pending = a.c.clearModelLimit({ limitAi: 'claude', limitModel: 'claude-opus-5-5', limitAccount: 'work' });
+  await a.c.clearModelLimit({ limitAi: 'codex', limitModel: 'gpt-6.1-sol', limitAccount: 'default' });
+  assert.equal(calls.length, 1); assert.equal(calls[0][0], '/api/limits/clear'); assert.equal(calls[0][1].model, 'claude-opus-5-5'); assert.equal(calls[0][1].account, 'work');
+  finish({ ...snapshot, limits: [] }); await pending; assert.equal(vm.runInContext('usageVersion', a.c), 1);
+});
+test('credit exception is restricted to default Codex, preserves exact fractional display and confirms only once',async()=>{
+ const a=app(),p={ai:'codex',account:'default',status:'ok',credits:{balance:'62500.0000000000',unlimited:false}};
+ assert.match(a.c.creditExceptionHtml(p,null),/data-credit-action="start"/);assert.equal(a.c.creditExceptionHtml({...p,account:'work'},null),'');assert.equal(a.c.creditExceptionHtml({...p,ai:'claude'},null),'');
+ assert.equal(a.c.creditExceptionHtml({...p,credits:{...p.credits,balance:'62500.0000000001'}},null),'');assert.equal(a.c.creditExceptionHtml({...p,credits:{...p.credits,hasCredits:false}},null),'');
+ const e={state:'active',lastBalance:'62499.9999999999',startBalance:'62500.0000000000'};assert.match(a.c.creditExceptionHtml(p,e),/62,499\.9999999999/);
+ const calls=[];a.c.confirm=()=>false;a.c.api=async(...args)=>{calls.push(args);return {...snapshot,creditException:e};};await a.c.changeCreditException({creditAction:'start',creditBalance:p.credits.balance});assert.equal(calls.length,0);
+ a.c.confirm=()=>true;await a.c.changeCreditException({creditAction:'start',creditBalance:p.credits.balance});assert.equal(calls.length,1);assert.equal(calls[0][0],'/api/limits/credit-exception');assert.equal(calls[0][1].account,'default');assert.equal(calls[0][1].expectedBalance,p.credits.balance);
+ assert.match(a.el('#usage-body').innerHTML,/既存クレジットで継続中/);assert.doesNotMatch(a.el('#usage-body').innerHTML,/data-credit-action="end" disabled/);
+});
+test('ticket and credit exception controls coexist and cannot start together',async()=>{
+  const a=app(),p={...snapshot.providers.codex,ai:'codex',account:'default',credits:{balance:'62500',unlimited:false},resetCredits:{count:1,items:[{title:'Full',action:{token:'opaque'}}]}};
+  a.c.current={providers:{codex:p},accountProviders:[p]};vm.runInContext('usageLoading=false;usageData=current',a.c);
+  assert.match(a.c.usageHtml(a.c.current,NOW),/data-reset-token="opaque"/);
+  assert.match(a.c.usageHtml(a.c.current,NOW),/data-credit-action="start"/);
+  let resolve,calls=0;a.c.confirm=()=>true;a.c.api=()=>{calls++;return new Promise(r=>resolve=r);};
+  const ticket=a.c.useResetTicket({resetAccount:'default',resetToken:'opaque',resetRetry:'false'});
+  await a.c.changeCreditException({creditAction:'start',creditBalance:'62500'});assert.equal(calls,1);
+  assert.match(a.el('#usage-body').innerHTML,/data-credit-action="start"[^>]* disabled/);
+  resolve({outcome:'nothingToReset',usage:a.c.current});await ticket;
+  const credit=a.c.changeCreditException({creditAction:'start',creditBalance:'62500'});
+  await a.c.useResetTicket({resetAccount:'default',resetToken:'opaque',resetRetry:'false'});assert.equal(calls,2);
+  assert.match(a.el('#usage-body').innerHTML,/data-reset-token="opaque"[^>]* disabled/);
+  resolve(a.c.current);await credit;
+});
+test('Claude guide links only to usage settings, including unavailable cards; Codex buttons hide real ticket IDs',()=>{
+  const a=app();vm.runInContext('usageLoading=false',a.c);
+  for(const status of ['ok','unavailable']) {
+    const html=a.c.usageHtml({providers:{claude:{status,windows:[],fetchedAt:new Date(NOW).toISOString()}}},NOW);
+    assert.match(html,/href="https:\/\/claude.ai\/settings\/usage" target="_blank" rel="noopener noreferrer"/);
+    assert.match(html,/ブラウザーのアカウント/);assert.doesNotMatch(html,/data-reset-token/);
+  }
+  const p={account:'work',fetchedAt:new Date(NOW).toISOString(),resetCredits:{count:1,items:[{title:'<Reset>',expiresAt:new Date(NOW+1000).toISOString(),action:{token:'opaque',retry:false}}]}};
+  const html=a.c.usageExtras('codex',p,NOW);assert.match(html,/data-reset-account="work" data-reset-token="opaque"/);assert.match(html,/&lt;Reset>/);assert.doesNotMatch(html,/ disabled/);
+  assert.match(a.c.usageExtras('codex',p,NOW+2000),/ disabled/);
+  assert.match(a.c.usageExtras('codex',p,NOW+7*60000),/ disabled/);
+});
+test('Using a ticket requires confirmation, sends one request and renders each outcome',async()=>{
+  for(const outcome of ['reset','nothingToReset','noCredit','alreadyRedeemed']) {
+    const a=app(),p={...snapshot.providers.codex,account:'work',accountName:'仕事用',resetCredits:{count:1,items:[{title:'Full',action:{token:'opaque'}}]}};
+    a.c.current={providers:{codex:p},accountProviders:[{ai:'codex',...p}]};vm.runInContext('usageLoading=false;usageData=current',a.c);
+    let calls=0,resolve,prompt;a.c.confirm=s=>{prompt=s;return false;};a.c.api=()=>{calls++;return new Promise(r=>resolve=r);};
+    const d={resetAccount:'work',resetToken:'opaque',resetRetry:'false'};await a.c.useResetTicket(d);assert.equal(calls,0);
+    a.c.confirm=s=>{prompt=s;return true;};
+    a.c.api=(route,body,headers)=>{calls++;assert.equal(route,'/api/usage/reset');assert.equal(body.account,'work');assert.equal(body.token,'opaque');assert.equal(body.confirmed,true);assert.equal(headers['X-Hub'],'1');return new Promise(r=>resolve=r);};
+    const pending=a.c.useResetTicket(d);await a.c.useResetTicket(d);await a.c.loadUsage(true);assert.equal(calls,1);assert.match(prompt,/仕事用.*無料.*1枚/);
+    assert.match(a.el('#usage-body').innerHTML,/data-reset-token="opaque"[^>]* disabled/);
+    resolve({outcome,usage:a.c.current});await pending;assert.doesNotMatch(a.el('#usage-body').innerHTML,/確認中/);
+    const expected={reset:'リセットしました',nothingToReset:'チケットは使用していません',noCredit:'チケットがありません',alreadyRedeemed:'すでに使用'};
+    assert.match(a.el('#usage-body').innerHTML,new RegExp(expected[outcome]));
+  }
+});
+test('Lost reset response blocks reuse until a successful read; manual retry is explicit and late replies cannot replace another context',async()=>{
+  const a=app();a.c.current={providers:{codex:{...snapshot.providers.codex,account:'default',resetCredits:{count:1,items:[{title:'Full',action:{token:'opaque'}}]}}}};
+  vm.runInContext('usageLoading=false;usageData=current',a.c);a.c.confirm=()=>true;let calls=0;
+  a.c.api=()=>{calls++;return Promise.reject(Error('SECRET'));};const d={resetAccount:'default',resetToken:'opaque',resetRetry:'false'};
+  await a.c.useResetTicket(d);await a.c.useResetTicket(d);assert.equal(calls,1);assert.match(a.el('#usage-body').innerHTML,/自動では送り直しません/);assert.doesNotMatch(a.el('#usage-body').innerHTML,/SECRET/);
+  a.c.current.providers.codex.resetCredits.items[0].action.retry=true;a.c.api=()=>Promise.resolve(a.c.current);await a.c.loadUsage(true);
+  let resolve,prompt;a.c.confirm=s=>{prompt=s;return true;};a.c.api=(route,body)=>{assert.equal(body.retry,true);return new Promise(r=>resolve=r);};
+  const p=a.c.useResetTicket({...d,resetRetry:'true'});assert.match(prompt,/同じ受付番号/);
+  vm.runInContext('usageVersion++;usageData={providers:{}}',a.c);resolve({outcome:'reset',usage:a.c.current});await p;
+  assert.equal(Object.keys(vm.runInContext('usageData.providers',a.c)).length,0);
 });

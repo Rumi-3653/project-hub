@@ -11,7 +11,7 @@ const chat = require('../lib/chat');
 const LIMIT = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-fable-switch-'));
 const root = path.join(tmp, 'workspace'), dir = path.join(root, 'Product', 'Switch fixture'), bin = path.join(tmp, 'bin');
-let server, base, count = 0;
+let server, sessions, base, count = 0;
 const rolesFile = path.join(root, '_hub/roles.yaml');
 function config(auto = true, backup = 'GPT-6-Astra') {
   fs.writeFileSync(rolesFile, `models:\n  claude-code: [Fable 5.1, Opus 5.5]\n  codex: [GPT-6-Astra, GPT-6.1-Sol]\nroles:\n  司令塔: { main: [claude-code, Fable 5.1, 極高], backup: [codex, ${backup}, 極高] }\n  チェック: { main: [claude-code, Fable 5.1, 極高], backup: [codex, ${backup}, 極高] }\n  文章: { main: [claude-code, Opus 5.5, 高], backup: [codex, GPT-6.1-Sol, 高] }\nswitch:\n  auto: ${auto}\n`);
@@ -27,7 +27,7 @@ const replies = id => rows(id).filter(r => r.role === 'assistant');
 const queue = id => { try { return JSON.parse(fs.readFileSync(path.join(dir, '.ai/chat', id + '.queue.json'))); } catch { return []; } };
 const post = (route, id, body) => fetch(base + route, { method: 'POST', headers: { 'X-Hub': '1', 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify({ project: 'Switch fixture', task: id, ...body }) });
 const wait = async pred => { for (let i = 0; i < 250; i++) { if (pred()) return; await new Promise(r => setTimeout(r, 20)); } assert.ok(pred(), 'fixture completed'); };
-const clearLimit = async () => { if (base) assert.equal((await post('/api/limits/fable/clear', null, {})).status, 200); try { fs.unlinkSync(path.join(root, '_hub/fable-limit.json')); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
+const clearLimit = async () => { if (base) for (const [ai, model] of [['claude', 'claude-fable-5-1'], ['claude', 'claude-opus-5-5'], ['codex', 'gpt-6-astra'], ['codex', 'gpt-6.1-sol']]) assert.equal((await post('/api/limits/clear', null, { ai, model })).status, 200); try { fs.unlinkSync(path.join(root, '_hub/fable-limit.json')); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
 test.beforeEach(clearLimit);
 const send = async (id, scenario, extra = {}) => { await clearLimit(); const r = await post('/api/chat/send', id, { ai: 'claude', model: 'claude-fable-5-1', text: 'scenario=' + scenario, ...extra }); assert.equal(r.status, 200, await r.text()); };
 const captured = row => JSON.parse(row.text);
@@ -43,9 +43,9 @@ const fs=require('node:fs'),path=require('node:path'),ai=${JSON.stringify(ai)},l
 process.stdin.on('data',d=>input+=d);process.stdin.on('end',async ()=>{
  const current=input.slice(input.lastIndexOf('# 今回の依頼')), scenario=(current.match(/scenario=([\\w-]+)/)||[])[1]||'ok',out=o=>console.log(JSON.stringify(o));
  const info=JSON.stringify({ai,args:process.argv.slice(2),cwd:process.cwd(),input:input.replaceAll('[[質問]]','(template)').replaceAll('[[/質問]]','(end)')});
- if(ai==='codex'){out({type:'thread.started',thread_id:'switch-codex'});out({type:'item.completed',item:{type:'agent_message',text:info}});out({type:'turn.completed'});return;}
+ if(ai==='codex'){out({type:'thread.started',thread_id:'switch-codex'});if(scenario==='codex-limit'){out({type:'turn.failed',error:{message:"You've hit your usage limit. Try again later."}});process.exitCode=1;return;}out({type:'item.completed',item:{type:'agent_message',text:info}});out({type:'turn.completed'});return;}
  out({type:'system',session_id:'switch-claude'});
- if(['ok','quote'].includes(scenario)){out({type:'assistant',message:{content:[{type:'text',text:scenario==='quote'?limit:info}]}});out({type:'result',is_error:false,result:''});return;}
+ if(['ok','quote','codex-limit'].includes(scenario)){out({type:'assistant',message:{content:[{type:'text',text:scenario==='quote'?limit:info}]}});out({type:'result',is_error:false,result:''});return;}
  if(['auth','network','model','temporary','synthetic-auth'].includes(scenario)){
   const msg={auth:'authentication failed',network:'network failed',model:'unknown model',temporary:'Too many requests', 'synthetic-auth':'authentication failed'}[scenario];
   out({type:'assistant',error:scenario==='temporary'?'rate_limit':'auth_error',isApiErrorMessage:true,message:{model:'<synthetic>',content:[{type:'text',text:msg}]}});out({type:'result',is_error:true,result:msg});return;
@@ -58,15 +58,17 @@ process.stdin.on('data',d=>input+=d);process.stdin.on('end',async ()=>{
   out({type:'assistant',message:{content:[{type:'tool_use',name:'delegate',input:{result:await response.json()}}]}});
  }
  if(scenario==='missing')fs.rmdirSync(process.cwd());
- if(scenario!=='result-only')out({type:'assistant',error:'rate_limit',isApiErrorMessage:true,message:{model:'<synthetic>',content:[{type:'text',text:limit}]}});
- if(scenario!=='assistant-only')out({type:'result',is_error:true,result:limit});
- if(scenario==='hold'){const timer=setInterval(()=>{if(fs.existsSync(path.join(tmp,'release'))){clearInterval(timer);process.exit(1);}},20);}else process.exitCode=1;
+ if(scenario==='hold')await new Promise(resolve=>{const timer=setInterval(()=>{if(fs.existsSync(path.join(tmp,'release'))){clearInterval(timer);resolve();}},20);});
+ const actualLimit={ 'session-limit':"You've hit your session limit · resets 3pm (Asia/Tokyo)",'weekly-limit':"You've hit your weekly limit · resets Oct 10 at 9am",'usage-limit':"You've hit your usage limit." }[scenario]||limit;
+ if(scenario!=='result-only')out({type:'assistant',error:'rate_limit',isApiErrorMessage:true,message:{model:'<synthetic>',content:[{type:'text',text:actualLimit}]}});
+ if(scenario!=='assistant-only')out({type:'result',is_error:true,result:actualLimit});
+ process.exitCode=1;
 });process.on('SIGTERM',()=>process.exit(143));
 `, { mode: 0o755 });
   Object.assign(process.env, { PATH: bin + ':/usr/bin:/bin', HUB_ROOT: root, HUB_PORT: '0', HUB_DRY_RUN: '1', HUB_AI_HOME: path.join(tmp, 'home'), HUB_TRASH: path.join(tmp, 'trash') });
   ({ server } = require('../server')); await new Promise(r => server.listen(0, '127.0.0.1', r)); const port = server.address().port;
-  await new Promise(r => server.close(r)); process.env.HUB_PORT = String(port); delete require.cache[require.resolve('../server')];
-  ({ server } = require('../server')); await new Promise(r => server.listen(port, '127.0.0.1', r)); base = 'http://127.0.0.1:' + port;
+  await new Promise(r => server.close(r)); process.env.HUB_PORT = String(port); require.cache[require.resolve('../server')]?.exports.stopControl.cleanExit();delete require.cache[require.resolve('../server')];
+  ({ server, sessions } = require('../server')); await new Promise(r => server.listen(port, '127.0.0.1', r)); base = 'http://127.0.0.1:' + port;
 });
 test.after(async () => { if (server) await new Promise(r => server.close(r)); });
 
@@ -79,6 +81,23 @@ test('CLI構造と正式文を両方検査し、本文引用・混雑・他エ�
     { type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Too many requests' }] } },
     { type: 'assistant', isApiErrorMessage: true, message: { model: '<synthetic>', content: [{ type: 'text', text: 'authentication failed' }] } },
     { type: 'result', is_error: true, result: 'network failed; quoted: ' + LIMIT }]) assert.equal(limitEvents(o).length, 0);
+});
+
+test('実機のsession/weekly/usage正式文はエラー構造だけ検知し、引用と課金エラーは除外する', () => {
+  const limitEvents = o => chat.parse('claude', o).filter(e => e.kind === 'limit');
+  for (const text of ["You've hit your session limit · resets 3pm (Asia/Tokyo)", "You've hit your weekly limit · resets Oct 10 at 9am", "You've hit your usage limit."]) {
+    for (const o of [{ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text }] } },
+      { type: 'assistant', isApiErrorMessage: true, message: { model: '<synthetic>', content: [{ type: 'text', text }] } },
+      { type: 'result', is_error: true, result: text }]) assert.equal(limitEvents(o).length, 1, text);
+    for (const o of [{ type: 'assistant', message: { content: [{ type: 'text', text }] } },
+      { type: 'assistant', isApiErrorMessage: true, message: { model: 'claude-opus-5-5', content: [{ type: 'text', text }] } },
+      { type: 'result', is_error: false, result: text }, { type: 'user', error: 'rate_limit', message: { content: [{ type: 'text', text }] } },
+      { type: 'result', is_error: true, result: 'Quoted error: ' + text }]) assert.equal(limitEvents(o).length, 0, text);
+  }
+  for (const text of ['Too many requests', 'authentication failed', 'Usage credits are required', 'Credit balance is too low']) {
+    assert.equal(limitEvents({ type: 'assistant', error: 'rate_limit', isApiErrorMessage: true, message: { model: '<synthetic>', content: [{ type: 'text', text }] } }).length, 0);
+    assert.equal(limitEvents({ type: 'result', is_error: true, result: text }).length, 0);
+  }
 });
 
 test('正式上限はcloseを待ち、後続2件の前にAstraを保存し元依頼/引数を引き継ぐ', async () => {
@@ -111,6 +130,20 @@ test('assistantだけ/resultだけの正式上限にも交代しtool済みの残
   assert.equal(fs.readFileSync(path.join(tmp, 'side-effect'), 'utf8'), 'once\n');
 });
 
+test('実機のClaude正式文でFableからAstra、OpusからSolへ終了後に続ける', async () => {
+  config();
+  for (const [role, model, backup] of [['チェック', 'claude-fable-5-1', 'GPT-6-Astra'], ['文章', 'claude-opus-5-5', 'GPT-6.1-Sol']]) {
+    for (const scenario of ['session-limit', 'weekly-limit', 'usage-limit']) {
+      const id = task(role); await send(id, scenario, { model }); await wait(() => replies(id).length === 2);
+      assert.equal(replies(id)[1].model, backup); assert.equal(queue(id).length, 0);
+      assert.match(captured(replies(id)[1]).input, new RegExp('scenario=' + scenario));
+      const held = JSON.parse(fs.readFileSync(path.join(root, '_hub/limits.json'), 'utf8'));
+      assert.equal(held[model].source, 'cli-limit');
+      if (scenario === 'session-limit') for (const other of ['claude-fable-5-1', 'claude-opus-5-5']) assert.equal(held[other].source, 'cli-limit');
+    }
+  }
+});
+
 test('本文引用/認証/通信/モデル拒否/一時混雑/対象外モデル・役割は交代しない', async () => {
   config(); for (const scenario of ['quote', 'auth', 'network', 'model', 'temporary', 'synthetic-auth']) {
     const id = task(); await send(id, scenario); await wait(() => replies(id).length === 1); assert.equal(queue(id).length, 0); assert.equal(rows(id).some(r => r.limitSwitch), false); assert.equal(fs.existsSync(path.join(root, '_hub/fable-limit.json')), false);
@@ -118,34 +151,71 @@ test('本文引用/認証/通信/モデル拒否/一時混雑/対象外モデル
   for (const [role, model] of [['文章', 'claude-fable-5-1'], ['司令塔', 'claude-opus-5-5']]) { const id = task(role); await send(id, 'result-only', { model }); await wait(() => replies(id).length === 1); assert.equal(queue(id).length, 0); }
 });
 
-test('autoオフやAstra以外のbackupは尊重しmain・他役割を変更しない', async () => {
+test('autoオフと変更したbackupを尊重しmain・他役割を変更しない', async () => {
   for (const [auto, backup] of [[false, 'GPT-6-Astra'], [true, 'GPT-6.1-Sol']]) {
-    config(auto, backup); const before = fs.readFileSync(rolesFile); const id = task(); await send(id, 'result-only'); await wait(() => replies(id).length === 1);
+    config(auto, backup);
+    // Record the baseline history before testing that switching changes no settings.
+    require('../lib/roles').read(rolesFile);
+    const before = fs.readFileSync(rolesFile); const id = task(); await send(id, 'result-only'); await wait(() => replies(id).length === (auto ? 2 : 1));
+    if (auto) assert.equal(replies(id)[1].model, backup);
     assert.equal(queue(id).length, 0); assert.deepEqual(fs.readFileSync(rolesFile), before);
   } config();
 });
 
-test('人の停止は交代せず待ち順を消す（上限出力後でも）', async () => {
+test('人の停止は交代せず待ち順を保留する（上限出力前の作業中）', async () => {
   config(); const id = task(); fs.unlinkSync(path.join(tmp, 'release')); await send(id, 'hold');
   assert.equal((await post('/api/chat/send', id, { ai: 'codex', model: 'gpt-6.1-sol', text: 'never', mode: 'queue' })).status, 200);
-  await new Promise(r => setTimeout(r, 100)); await post('/api/chat/stop', id, {}); await wait(() => replies(id).length === 1 && queue(id).length === 0);
+  await new Promise(r => setTimeout(r, 100)); await post('/api/chat/stop', id, {}); await wait(() => replies(id).length === 1 && queue(id).length === 1);
+  assert.equal(queue(id)[0].stopHeld,true);
   assert.equal(replies(id)[0].error, '止めました'); assert.equal(rows(id).some(r => r.limitSwitch), false);
+  assert.equal((await post('/api/ai/resume',id,{confirm:true})).status,200);
 });
 
 test('委任の明示Fableにも適用し、継続/キュー/terminalへ例外文を渡す', async () => {
   config(); const id = task('文章');
-  const delegated = await post('/api/delegate', id, { ai: 'claude', model: 'claude-fable-5-1', text: 'scenario=result-only', title: 'fixture check' }); assert.equal(delegated.status, 200);
+  const delegated = await post('/api/delegate', id, { ai: 'claude', model: 'claude-fable-5-1', role: 'チェック', text: 'scenario=result-only', title: 'fixture check' }); assert.equal(delegated.status, 200);
   await wait(() => replies(id).length === 2); assert.match(captured(replies(id)[1]).input, /fixture check/);
   await send(id, 'ok', { model: 'claude-opus-5-5' }); await wait(() => replies(id).length === 3); const resumed = captured(replies(id)[2]);
   assert.ok(resumed.args.includes('--resume')); assert.match(policy(resumed.input), /【利用上限の時】/);
   const terminal = await post('/api/term/start', id, { ai: 'claude' }); assert.equal(terminal.status, 200);
-  const prompt = (await terminal.json()).args.join('\n'); assert.match(prompt, /ターミナルでは自動の引き継ぎは無い/); assert.match(prompt, /【利用上限の時】/);
+  const prompt = (await terminal.json()).args.join('\n'); assert.match(prompt, /ターミナルでも.*交代先へ引き継ぐ/); assert.match(prompt, /【利用上限の時】/);
 });
 
 test('消えた前のcwdを安全な現在の作業場所に更新する', async () => {
   config(); const cwd = path.join(tmp, 'vanishing'); fs.mkdirSync(cwd); const id = task('チェック', cwd);
   await send(id, 'missing'); await wait(() => replies(id).length === 2);
   assert.equal(fs.realpathSync(captured(replies(id)[1]).cwd), fs.realpathSync(dir)); assert.equal(fs.existsSync(cwd), false);
+});
+test('設定画面で保存した交代先・思考が稼働中ターミナルの終了後起動にも反映する', async () => {
+  config(); const id = task('チェック'), spawned = [];
+  const oldPty = sessions.pty;
+  sessions.pty = { spawn(command, args) {
+    let exit;
+    const proc = { onData() {}, onExit(fn) { exit = fn; }, kill() { exit({ exitCode: 143 }); }, end(code = 1) { exit({ exitCode: code }); } };
+    spawned.push({ command, args, proc }); return proc;
+  } };
+  try {
+    const source = sessions.start({ project: 'Switch fixture', task: id, ai: 'claude', dir, command: 'claude', args: [], model: 'Fable 5.1', role: 'チェック', limitSlot: 'main', prompt: '元のターミナル依頼・済みの道具', limitMarker: 'terminal-exact-case' });
+    const data = require('../lib/roles').read(rolesFile).data.roles;
+    data.find(r => r.name === 'チェック').backup = { ai: 'codex', model: 'GPT-6.1-Sol', effort: 'MAX' };
+    assert.equal((await post('/api/roles', id, { roles: data })).status, 200);
+    const savedRoles = fs.readFileSync(rolesFile);
+    const logs = path.join(source.limitWatch.dir, 'fixture'); fs.mkdirSync(logs, { recursive: true });
+    fs.writeFileSync(path.join(logs, id + '.jsonl'), [
+      { type: 'user', cwd: dir, message: { content: [{ type: 'text', text: 'terminal-exact-case' }] } },
+      { type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: LIMIT }] } }
+    ].map(r => JSON.stringify({ timestamp: new Date().toISOString(), ...r })).join('\n') + '\n');
+    spawned[0].proc.end();
+    await wait(() => spawned.length === 2);
+    const next = sessions.get('Switch fixture', id, 'codex');
+    assert.equal(source.exited, true); assert.equal(next.model, 'GPT-6.1-Sol'); assert.equal(next.effort, 'MAX'); assert.equal(next.original, source.prompt);
+    assert.equal(spawned[1].args[spawned[1].args.indexOf('--model') + 1], 'gpt-6.1-sol');
+    assert.ok(spawned[1].args.includes('model_reasoning_effort=max'));
+    const pending = JSON.parse(fs.readFileSync(path.join(dir, '.ai/handoff', id + '-limit.json')));
+    assert.equal(pending.pending, false); assert.match(fs.readFileSync(pending.packet, 'utf8'), /元のターミナル依頼・済みの道具/);
+    assert.deepEqual(fs.readFileSync(rolesFile), savedRoles);
+    assert.match(fs.readFileSync(path.join(dir, '.ai/tasks', id + '.md'), 'utf8'), /model: Fable 5.1/);
+  } finally { sessions.stop('Switch fixture', id, 'codex'); sessions.pty = oldPty; }
 });
 
 test('Astra起動失敗では引き継ぎと後続を失わず、再開時の印も保つ', async () => {
@@ -163,9 +233,9 @@ test('二重close/同じ依頼/交代の番は再交代せず、終了境界の�
   const runner = new chat.ChatRunner({ dirOf: () => d, limitBackup: () => { switches++; return { ai: 'codex', model: 'GPT-6-Astra', effort: '極高', requireModel: true, requiredModel: 'gpt-6-astra' }; } });
   const o = { project: 'p', task: 't', pdir: d, dir: d, ai: 'claude', model: 'Fable 5.1', text: 'scenario=result-only', request: 'same' };
   runner.send(o); const run = runner.busy('p', 't'); await wait(() => chat.read(d, 't').filter(r => r.role === 'assistant').length === 2);
-  run.child.emit('close', 1); assert.equal(switches, 1);
-  runner.send({ ...o, limitSwitch: { request: 'same' } }); await wait(() => !runner.busy('p', 't')); assert.equal(switches, 1);
-  runner.send(o); await wait(() => !runner.busy('p', 't')); assert.equal(switches, 1);
+  run.child.emit('close', 1); assert.equal(switches, 2);
+  runner.send({ ...o, limitSwitch: { request: 'same' } }); await wait(() => !runner.busy('p', 't')); assert.equal(switches, 2);
+  runner.send(o); await wait(() => !runner.busy('p', 't')); assert.equal(switches, 2);
   const id = 'stop-boundary'; runner.watch('p', id, ev => { if (ev.type === 'idle') runner.stop('p', id); });
   runner.send({ ...o, task: id, request: 'boundary' }); await wait(() => !runner.busy('p', id)); assert.equal(runner.queue('p', id).length, 0); assert.equal(chat.read(d, id).filter(r => r.role === 'assistant').length, 1);
 });
@@ -256,5 +326,16 @@ test('正式上限の終了後に始まるAstraも許可×作業選択だけで�
     assert.ok(got.args.includes('gpt-6-astra'));
     assert.equal(got.args.includes('service_tier="fast"'), allowed && selected);
     assert.equal(rows(id).findLast(r => r.role === 'user').fast, allowed && selected);
+  }
+});
+
+test('Codex正式上限はSolからOpus、AstraからFableへ残りを引き渡す', async () => {
+  config();
+  for (const [role, model, expected] of [['文章', 'gpt-6.1-sol', 'Opus 5.5'], ['司令塔', 'gpt-6-astra', 'Fable 5.1']]) {
+    await clearLimit(); const id = task(role);
+    const r = await post('/api/chat/send', id, { ai: 'codex', model, text: 'scenario=codex-limit' }); assert.equal(r.status, 200);
+    await wait(() => replies(id).length === 2);
+    assert.equal(replies(id)[0].ai, 'codex'); assert.equal(replies(id)[1].model, expected);
+    assert.match(captured(replies(id)[1]).input, /済んだ部分.*繰り返さず/); assert.equal(queue(id).length, 0);
   }
 });

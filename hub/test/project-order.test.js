@@ -8,7 +8,7 @@ const { ProjectOrder, siblings, displayParent } = require('../lib/project-order'
 const client = require('../public/project-order');
 const ids = items => items.map(p => p.id);
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-order-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'hub-order-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   for (const [id, name, parent] of [['a','Alpha',''],['b','Beta',''],['c','Child','Alpha'],['d','Child','a'],['orphan','Orphan','missing']]) {
     const dir = path.join(root, 'Product', id); fs.mkdirSync(dir, { recursive: true });
@@ -71,7 +71,8 @@ test('HTTP order endpoint uses fixture ROOT, validates snapshot, keeps state ord
   const {server,sessions}=require('../server');await new Promise(r=>server.listen(port,'127.0.0.1',r));
   t.after(async()=>{sessions.stopAll();server.closeAllConnections();await new Promise(r=>server.close(r));});
   const url=`http://127.0.0.1:${port}`, post=(body,extra={})=>fetch(url+'/api/hierarchy/order',{method:'POST',headers:{'X-Hub':'1','Content-Type':'application/json',...extra},body:JSON.stringify(body)});
-  const state=await (await fetch(url+'/api/state')).json(), before=ids(siblings(state.projects,'')), order=before.slice().reverse();
+  const response=await fetch(url+'/api/state'),state=await response.json();assert.equal(response.status,200,JSON.stringify(state));
+  const before=ids(siblings(state.projects,'')), order=before.slice().reverse();
   const bytes=store.listProjects().map(p=>[p.dir,fs.readFileSync(path.join(p.dir,'PROJECT.md'))]);
   assert.equal((await post({parent:'',before,order})).status,200);
   const later=await (await fetch(url+'/api/state')).json();assert.deepEqual(ids(later.projects),ids(state.projects));assert.deepEqual(ids(siblings(later.projects,'',later.projectOrder)),order);

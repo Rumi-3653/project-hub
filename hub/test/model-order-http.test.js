@@ -68,3 +68,22 @@ test('スマホ表示API：初期値・権限・保存再読・不正値400・�
   await post('/api/models/phone', { key, name: '' }); await post('/api/models/phone', { labels: 'short' });
   assert.deepEqual((await (await fetch(base + '/api/state')).json()).phoneLabels, first.phoneLabels);
 });
+
+ test('特殊モードAPIはAIだけを保存し、権限・形式・再読込・他設定と役割を保持する', async () => {
+  const before = await (await fetch(base + '/api/state')).json();
+  const file = path.join(root, '_hub/model-view.json'), roles = fs.readFileSync(path.join(root, '_hub/roles.yaml'));
+  assert.deepEqual(before.specialMode, { enabled: false, ai: 'codex' });
+  assert.equal((await post('/api/special-mode', { enabled: true, ai: 'claude' }, {})).status, 403);
+  for (const bad of [{}, { enabled: 'true', ai: 'codex' }, { enabled: true, ai: 'agy' }, { enabled: true, ai: 'claude', model: 'Sonnet' }])
+    assert.equal((await post('/api/special-mode', bad)).status, 400);
+  const stored = JSON.parse(fs.readFileSync(file));
+  const mode = { enabled: true, ai: 'claude' };
+  assert.deepEqual((await (await post('/api/special-mode', mode)).json()).specialMode, mode);
+  assert.deepEqual(new (require('../lib/model-view').ModelView)(file).special(), mode);
+  const current = await (await fetch(base + '/api/state')).json();
+  assert.deepEqual(current.specialMode, mode); assert.deepEqual(current.roles, before.roles);
+  assert.deepEqual(fs.readFileSync(path.join(root, '_hub/roles.yaml')), roles);
+  const saved = JSON.parse(fs.readFileSync(file)); delete saved.specialMode; assert.deepEqual(saved, stored);
+  assert.equal((await post('/api/special-mode', { enabled: false, ai: 'claude' })).status, 200);
+  assert.deepEqual((await (await fetch(base + '/api/state')).json()).specialMode, { enabled: false, ai: 'claude' });
+ });

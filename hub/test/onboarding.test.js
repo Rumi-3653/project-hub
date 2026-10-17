@@ -42,7 +42,7 @@ test('resume, later, done, corrupt record and strict persistence keep only publi
 function cli(a, ai, mode) {
   const file = path.join(a.root, ai);
   if (mode === 'timeout') {
-    // Node起動の負荷を400msのタイムアウトに混ぜず、statusの待機を検証する。
+    // Node起動の負荷をタイムアウトに混ぜず、statusの待機を検証する。
     // execで置き換えるので、タイムアウト時に待機プロセスも直接終了する。
     const base = ai === 'claude' ? ['auth', 'status'] : ['login', 'status'];
     const calls = "'" + path.join(a.root, 'calls').replaceAll("'", "'\\''") + "'";
@@ -77,7 +77,9 @@ else { ${mode === 'timeout' ? 'setInterval(()=>{},1000);' : ai === 'claude' ? `c
 for (const ai of ['claude', 'codex']) {
   for (const mode of ['ready', 'required', 'missing', 'timeout']) {
     test(`${ai}: fake CLI ${mode}, only help and noninference status run, raw output never returned`, async t => {
-      const a = fixture(t, { timeout: mode === 'timeout' ? 400 : 5000 });
+      // A full-suite load can delay even /bin/sh startup beyond 400ms. Keep
+      // enough startup room while the 60s status command still actually times out.
+      const a = fixture(t, { timeout: mode === 'timeout' ? 2500 : 5000 });
       const file = cli(a, ai, mode);
       a.tools.find = () => file; a.tools.version = async () => '1.2.3';
       const r = await a.check([ai]);

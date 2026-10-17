@@ -1,5 +1,5 @@
 'use strict';
-const { lt } = require('./locale');
+const { lt, sectionPattern } = require('./locale');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -8,9 +8,11 @@ function git(dir, args) {
 }
 function snapshot(dir) { if (!dir) return { head: null, status: null }; return { head: git(dir, ['rev-parse', 'HEAD']), status: git(dir, ['status', '--short']) }; }
 function clip(value, max) { const text = String(value || ''); return text.length > max ? text.slice(0, max - 1) + '…' : text; }
-function buildHandoffCard({ original, user, rows, dir, pdir, task, queue = [], delegates = [], direct = false, evidence }) {
-  const intro = lt('【Fable の利用上限による自動の引き継ぎ】Fable 5.1 は利用上限で止まった。担当は起動設定どおり Codex・GPT-6-Astra。すでに済んだ部分は繰り返さず、残りを続ける。');
-  if (direct) return lt`【Fable の利用上限による自動の引き継ぎ】Fable 5.1 上限保持中（記録${evidence?.at || lt('確認済み')}・解除${evidence?.validUntil || lt('手動解除まで')}）。最初から Astra で開始。担当は起動設定どおり Codex・GPT-6-Astra。すでに済んだ部分は繰り返さず、残りを続ける。\n前の番は無い（保持中の開始）。\n\n元の依頼：\n${original}`;
+function buildHandoffCard({ original, user, rows, dir, pdir, task, queue = [], delegates = [], direct = false, evidence, reason, from = 'Fable 5.1', to = 'Codex・GPT-6-Astra' }) {
+  const intro = reason === 'capacity'
+    ? lt`【${from} のモデル混雑による自動の引き継ぎ】${from} はモデルの混雑で終了した。利用上限とは別の障害で、上限の保持や既定の担当は変更していない。Hubの設定どおり ${to} で一回だけ続ける。すでに済んだ部分と委任は繰り返さず、実物を確かめて残りを続ける。`
+    : lt`【${from} の利用上限による自動の引き継ぎ】${from} は利用上限で止まった。担当は起動設定どおり ${to}。すでに済んだ部分は繰り返さず、残りを続ける。`;
+  if (direct) return lt`【${from} の利用上限による自動の引き継ぎ】${from} 上限保持中（記録${evidence?.at || lt('確認済み')}・解除${evidence?.validUntil || lt('手動解除まで')}）。最初から ${to} で開始。担当は起動設定どおり ${to}。すでに済んだ部分は繰り返さず、残りを続ける。\n前の番は無い（保持中の開始）。\n\n元の依頼：\n${original}`;
   const index = rows.findIndex(r => r.role === 'user' && r.at === user?.at && r.text === user?.text);
   const tools = index < 0 ? null : rows.slice(index + 1).filter(r => r.tool === true);
   const now = snapshot(dir);
@@ -22,8 +24,8 @@ function buildHandoffCard({ original, user, rows, dir, pdir, task, queue = [], d
   const sent = delegates.filter(r => r.action === 'delegate' && outgoing(r));
   const unique = [...new Map([...pending, ...sent].map(r => [r.id || `${r.ai}:${r.model}:${r.title}`, r])).values()];
   let taskText = null; try { taskText = fs.readFileSync(path.join(pdir, '.ai', 'tasks', `${task}.md`), 'utf8'); } catch { /* 要確認 */ }
-  const steps = taskText?.match(/^## (?:手順|步驟)\n([\s\S]*?)(?=^## |$(?![\s\S]))/m)?.[1]?.trim();
-  const memo = taskText?.match(/^## (?:メモ|備註)\n+([^\n]+)/m)?.[1]?.slice(0, 200);
+  const steps = taskText?.match(new RegExp('^## (?:' + sectionPattern('手順') + ')\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))', 'm'))?.[1]?.trim();
+  const memo = taskText?.match(new RegExp('^## (?:' + sectionPattern('メモ') + ')\\n+([^\\n]+)', 'm'))?.[1]?.slice(0, 200);
   const statusLines = now.status?.split('\n').filter(Boolean) || [];
   const unchanged = tools?.length === 0 && safeHead && now.head === user.head && now.status === '' && user.status === '' && unique.length === 0;
   const gitInfo = !safeHead || !now.head || now.status === null ? lt('Git：確認できない：実物を確かめる') : lt`Git：開始 ${user.head} → 今 ${now.head}

@@ -35,7 +35,7 @@ class Hierarchy {
       const file=this.store.taskFile(project,task); if(!file) throw Error(lt('作業がありません'));
       const t=this.store.readTask(file); if(t.completionHash!==expectedHash) throw Error(lt('名前を確認中に作業が更新されました'));
       const before=fs.readFileSync(file,'utf8');if(hash(before)!==expectedHash)throw Error(lt('確認中に作業が更新されました'));let text=setScalar(before,'title',name);
-      if(before.includes('\r\n'))text=text.replace(/\r?\n/g,'\r\n');fs.writeFileSync(file,text);
+      if(before.includes('\r\n'))text=text.replace(/\r?\n/g,'\r\n');require('./integration-writes').write(file,()=>fs.writeFileSync(file,text));
       if(t.state==='完了') this.store.completion.approveTask(`${project}/${task}`,text);
       return this.store.readTask(file);
     }
@@ -69,10 +69,10 @@ class Hierarchy {
     fs.mkdirSync(backup,{recursive:true});
     for(const c of changes) fs.writeFileSync(path.join(backup,`${c.id}.md`),c.before);
     const temps=[];
-    try { for(const c of changes) { const tmp=c.file+'.'+randomUUID()+'.tmp';temps.push(tmp);fs.writeFileSync(tmp,c.text);fs.renameSync(tmp,c.file); } }
+    try { for(const c of changes) { const tmp=c.file+'.'+randomUUID()+'.tmp';temps.push(tmp);fs.writeFileSync(tmp,c.text);require('./integration-writes').write(c.file,()=>fs.renameSync(tmp,c.file)); } }
     catch(e) {
       const failures=[];
-      for(const c of changes)try {fs.writeFileSync(c.file,c.before);}catch(err){failures.push(c.id);}
+      for(const c of changes)try {require('./integration-writes').write(c.file,()=>fs.writeFileSync(c.file,c.before));}catch(err){failures.push(c.id);}
       for(const tmp of temps)try {if(fs.existsSync(tmp))fs.unlinkSync(tmp);}catch(err){/* 自動生成した一時物のみ */}
       throw Error(lt`${e.message}。変更前のバックアップ：${backup}${failures.length?lt('。自動復元できなかった台帳：')+failures.join(' / '):''}`);
     }

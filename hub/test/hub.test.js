@@ -1,4 +1,5 @@
 'use strict';
+const AGY_FIXTURE = { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' };
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 // 実行: node --test hub/test
@@ -66,7 +67,9 @@ test('Codexの全起動経路と再開で160k・全体の自動圧縮設定を�
   assert.ok(claude.stdin.includes(launchLib.CONTEXT_RULE));
 });
 
-test('各AIの最初と継続の番にCLI引数と一致する起動設定を渡す', () => {
+test('各AIの最初と継続の番にCLI引数と一致する起動設定を渡す', t => {
+  launchLib.setDiscoveredModels({ agy: { models: [AGY_FIXTURE], known: [AGY_FIXTURE] } });
+  t.after(() => launchLib.setDiscoveredModels({}));
   for (const [ai, model, label, flag] of [
     ['codex', 'GPT-6.1-Sol', 'GPT-6.1-Sol', 'gpt-6.1-sol'],
     ['codex', 'gpt-6.1-sol', 'GPT-6.1-Sol', 'gpt-6.1-sol'],
@@ -145,7 +148,8 @@ test('起動コマンドは場所と指示を安全に囲む', () => {
 });
 
 // ここから: 仮の AI-Workspace を作ってサーバーを動かす
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-'));
+// macOS /var is a symlink; fixture roots must satisfy the real noLinks guard.
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-')));
 const ROOT = path.join(tmp, 'AI-Workspace');
 const PORT = 45000 + Math.floor(Math.random() * 1000);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -171,11 +175,14 @@ test('setup.sh で台帳が作られ、2回目は触らない', () => {
     assert.ok(fs.existsSync(path.join(ROOT, 'Product', n, 'CLAUDE.md')), n + ' CLAUDE');
   }
   assert.ok(fs.existsSync(path.join(ROOT, '_hub', 'roles.yaml')));
+  const receipt = fs.readFileSync(path.join(ROOT, '_hub', 'seed-receipt.json'), 'utf8');
+  assert.ok(JSON.parse(receipt).files.length > 0);
   const f = path.join(ROOT, 'Product', 'サンプルアプリ', 'PROJECT.md');
   fs.appendFileSync(f, '\n手で足した行\n');
   const out = execFileSync('bash', [path.join(HUB, 'setup.sh')], { env }).toString();
   assert.match(out, /そのまま: サンプルアプリ/);
   assert.match(fs.readFileSync(f, 'utf8'), /手で足した行/);
+  assert.strictEqual(fs.readFileSync(path.join(ROOT, '_hub', 'seed-receipt.json'), 'utf8'), receipt);
   isolateSeedFolders(ROOT);
 });
 
@@ -185,6 +192,12 @@ test('サーバーを起動', async () => {
   process.env.HUB_PORT = String(PORT);
   process.env.HUB_DRY_RUN = '1';
   process.env.HUB_AI_HOME = path.join(tmp, 'ai-home');
+  // Install fixture CLIs before any state read caches executable lookups.
+  fs.mkdirSync(fakeBin2);
+  for (const ai of ['codex', 'claude']) {
+    fs.writeFileSync(path.join(fakeBin2, ai), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(unexpectedCliCall2)}, 'called'); process.exit(97);\n`, { mode: 0o755 });
+  }
+  process.env.PATH = fakeBin2 + path.delimiter + originalPath2;
   ({ server } = require('../server'));
   await new Promise(r => server.listen(PORT, '127.0.0.1', r));
 });
@@ -273,7 +286,7 @@ test('後片付け', () => {
 });
 
 // ---- 第2版: 作業画面・設定 ----
-const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'hub2-'));
+const tmp2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub2-')));
 const originalPath2 = process.env.PATH;
 const fakeBin2 = path.join(tmp2, 'bin');
 const unexpectedCliCall2 = path.join(tmp2, 'unexpected-cli-call');
@@ -281,23 +294,44 @@ const ROOT2 = path.join(tmp2, 'AI-Workspace');
 const PORT2 = 46000 + Math.floor(Math.random() * 1000);
 const BASE2 = `http://127.0.0.1:${PORT2}`;
 const post2 = (p, body) => fetch(BASE2 + p, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub': '1' }, body: JSON.stringify(body) });
-let server2, sessions2;
+let server2, sessions2, restartControl2;
+async function waitForFixture(condition, message) {
+  const deadline=Date.now()+10000;
+  while(!condition()&&Date.now()<deadline)await new Promise(r=>setTimeout(r,20));
+  assert.ok(condition(),message);
+}
+// A PTY bash can ignore Session.stop's default signal. End only these mock
+// shells through their input before discarding the session's process handle.
+async function stopFixtureSession(project,task,ai) {
+  const s=sessions2.get(project,task,ai);
+  if(s&&!s.exited){
+    // A loaded host can delay the bash startup and PTY output beyond a fixed sleep.
+    await waitForFixture(()=>s.exited || s.buf.includes('test> '),'mock bash must be ready before receiving exit');
+    // Attachment/handoff checks leave typed text in the mock shell's input.
+    // Cancel that line before sending the fixture's graceful exit command.
+    if(!s.exited){
+      const offset=s.buf.length;s.proc.write('\x03');
+      await waitForFixture(()=>s.exited || s.buf.slice(offset).includes('test> '),'mock bash must acknowledge cancellation before exit');
+    }
+    if(!s.exited)s.proc.write('\x15exit\r');
+    await waitForFixture(()=>s.exited,'mock bash must exit before the session is discarded');
+  }
+  sessions2.stop(project,task,ai);
+}
+async function stopFixtureSessions() {
+  for(const k of sessions2.map.keys())await stopFixtureSession(...k.split('\u0000'));
+}
 
 test('第2版: 準備して起動（実際に AI は動かさず、代わりに bash を使う）', async () => {
   execFileSync('bash', [path.join(HUB, 'setup.sh')], { env: { ...process.env, HUB_ROOT: ROOT2, HOME: tmp2, HUB_SKIP_NPM: '1' } });
   isolateSeedFolders(ROOT2);
-  // 導入済みCLIを隔離した見本で固定し、dry中に実行された場合は記録する。
-  fs.mkdirSync(fakeBin2);
-  for (const ai of ['codex', 'claude']) {
-    fs.writeFileSync(path.join(fakeBin2, ai), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(unexpectedCliCall2)}, 'called'); process.exit(97);\n`, { mode: 0o755 });
-  }
-  process.env.PATH = fakeBin2 + path.delimiter + originalPath2;
   // HUB_DRY_RUN=1 なので本物の claude / codex は起動しない（コマンドの組み立てだけ確かめる）
+  require.cache[require.resolve('../server')]?.exports.stopControl.cleanExit();
   delete require.cache[require.resolve('../server')];
   process.env.HUB_ROOT = ROOT2; process.env.HUB_PORT = String(PORT2); process.env.HUB_DRY_RUN = '1';
   process.env.HUB_AI_HOME = path.join(tmp2, 'ai-home');
   process.env.HUB_TRASH = path.join(tmp2,'fixture-trash');
-  ({ server: server2, sessions: sessions2 } = require('../server'));
+  ({ server: server2, sessions: sessions2, restartControl: restartControl2 } = require('../server'));
   await new Promise(r => server2.listen(PORT2, '127.0.0.1', r));
 });
 
@@ -378,7 +412,7 @@ test('役割分担を画面から保存でき、おかしな値は拒否', async
 
 test('作業画面: 本物の端末を開き、入力と出力が通る', async ctx => {
   if (!sessions2.available()) { console.log('node-pty なし: 省略'); return; }
-  ctx.after(() => sessions2.stopAll());
+  ctx.after(stopFixtureSessions);
   const s = sessions2.start({ project: 'サンプルアプリ', task: 'pty-test', ai: 'claude', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc', '-i'], cols: 80, rows: 24 });
   // 同じ作業にもう1つ（codex 役）を並べられる
   sessions2.start({ project: 'サンプルアプリ', task: 'pty-test', ai: 'codex', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc', '-i'], cols: 80, rows: 24 });
@@ -421,14 +455,18 @@ test('作業画面: 本物の端末を開き、入力と出力が通る', async 
   off2();
   off();
   // ストリームで読める
-  const ac = new AbortController();
+  const ac = new AbortController(),streamTimeout=setTimeout(()=>ac.abort(),5000);
   const r = await fetch(`${BASE2}/api/term/stream?project=${encodeURIComponent('サンプルアプリ')}&task=pty-test&ai=claude`, { signal: ac.signal });
   const reader = r.body.getReader();
   const { value } = await reader.read();
   assert.match(new TextDecoder().decode(value), /HELLO-3/);
   ac.abort();
+  clearTimeout(streamTimeout);
   assert.ok(sessions2.stop('サンプルアプリ', 'pty-test', 'claude'));
   assert.ok(sessions2.stop('サンプルアプリ', 'pty-test', 'codex'));
+  // A stop request retains the PTY until its observed exit, rather than
+  // treating a sent signal as proof. End these mock shells explicitly.
+  await stopFixtureSessions();
   assert.strictEqual(sessions2.list().length, 0);
   assert.strictEqual((await post2('/api/term/input', { project: 'サンプルアプリ', task: 'pty-test', ai: 'claude', data: 'x' })).status, 404);
   // 相手が動いていなければ、役割どおりに始める（テストでは組み立てだけ）
@@ -477,7 +515,9 @@ test('分岐：作業に分岐元を持たせられ、台帳の説明も読め�
   const st = await (await fetch(BASE2 + '/api/state')).json();
   const h = st.projects.find(p => p.id === 'サンプルアプリ');
   assert.ok(h.tasks.some(x => x.parent === 'sample-app-01'));
-  assert.strictEqual(typeof h.notes, 'string');
+  assert.strictEqual(h.notes, undefined);
+  assert.strictEqual(typeof h.notesSummary, 'string');
+  assert.strictEqual(typeof h.notesHash, 'string');
 });
 
 test('取り込み対象から外す・戻す：本体・コピー・再開先・作業状態を保ち、除外中の取り込みを拒否', async () => {
@@ -543,10 +583,14 @@ test('取り込み対象から外す・戻す：本体・コピー・再開先�
   assert.strictEqual(logs.filter(l => l.task === key.task && l.action === 'mergeexclude').length, 1);
   assert.strictEqual(logs.filter(l => l.task === key.task && l.action === 'mergeinclude').length, 1);
   process.env.HUB_TRASH = path.join(tmp2, 'Trash');
-  const merged = await post2('/api/task/merge', key);
+  // 未決の質問がある作業は、取り込んで続ける。確認前に保存しHEADを固定する。
+  gitw.save(r.dir, 'save retained draft');
+  const review = await (await post2('/api/task/merge/preview', key)).json();
+  const merged = await post2('/api/task/merge', {...key, disposition:'continue', confirm:true, sourceHead:review.sourceHead, targetHead:review.targetHead});
   assert.strictEqual(merged.status, 200, JSON.stringify(await merged.json()));
   assert.strictEqual(fs.readFileSync(path.join(main, 'draft.txt'), 'utf8'), 'keep draft\n');
-  assert.strictEqual(fs.existsSync(r.dir), false);
+  assert.strictEqual(fs.existsSync(r.dir), true);
+  assert.strictEqual(new Store(ROOT2).readTask(tf).question, '元の質問');
 });
 
 test('本体に取り込む：作業用コピーを取り込み、作業を完了にする。AI が動いている間は断る', async () => {
@@ -571,7 +615,7 @@ test('本体に取り込む：作業用コピーを取り込み、作業を完�
   if (sessions2.available()) {
     sessions2.start({ project: 'サンプルアプリ', task: 'merge-test', ai: 'codex', dir: r.dir, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc'], cols: 80, rows: 24 });
     assert.strictEqual((await post2('/api/task/merge', { project: 'サンプルアプリ', task: 'merge-test' })).status, 409);
-    sessions2.stop('サンプルアプリ', 'merge-test', 'codex');
+    await stopFixtureSession('サンプルアプリ', 'merge-test', 'codex');
   }
   const res = await post2('/api/task/merge', { project: 'サンプルアプリ', task: 'merge-test' });
   const j = await res.json();
@@ -585,7 +629,7 @@ test('本体に取り込む：作業用コピーを取り込み、作業を完�
 });
 
 
-test('ファイルを渡す：Inbox に保存し、作業ファイルに記録し、動いている AI の入力欄に場所を入れる', async () => {
+test('ファイルを渡す：Inbox に保存し、作業ファイルに記録し、動いている AI の入力欄に場所を入れる', async ctx => {
   const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'up-test.md');
   fs.writeFileSync(tf, '---\nid: up-test\ntitle: 渡す\nstate: 実行中\n---\n');
   const up = (q, body) => fetch(`${BASE2}/api/task/upload?${new URLSearchParams(q)}`, { method: 'POST', headers: { 'X-Hub': '1', 'Content-Type': 'application/octet-stream' }, body });
@@ -597,14 +641,22 @@ test('ファイルを渡す：Inbox に保存し、作業ファイルに記録�
   assert.strictEqual(fs.readFileSync(j.path, 'utf8'), 'PNG');
   assert.ok(fs.readFileSync(tf, 'utf8').includes(`ファイルを渡した: ${j.path}`));
   if (sessions2.available()) {
-    sessions2.start({ project: 'サンプルアプリ', task: 'up-test', ai: 'codex', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc', '-i'], cols: 80, rows: 24 });
+    // Check delivery, not readline's wrapping of a long temporary path.
+    const s = sessions2.start({ project: 'サンプルアプリ', task: 'up-test', ai: 'codex', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc', '-i'], cols: Math.max(80, Buffer.byteLength(ROOT2)+80), rows: 24 });
     const got = [];
     const off = sessions2.watch('サンプルアプリ', 'up-test', 'codex', ev => got.push(ev));
+    // A failed assertion must not leave this terminal blocking later tests.
+    ctx.after(async () => {
+      off();
+      await stopFixtureSession('サンプルアプリ', 'up-test', 'codex');
+      assert.strictEqual(s.exited, true);
+      assert.strictEqual(sessions2.get('サンプルアプリ', 'up-test', 'codex'), null);
+    });
+    await waitForFixture(()=>s.buf.includes('test> '),'attachment fixture must be ready before upload');
     j = await (await up({ project: 'サンプルアプリ', task: 'up-test', ai: 'codex', name: 'shot.png' }, Buffer.from('x'))).json();
     assert.strictEqual(j.typed, true);
-    await new Promise(r => setTimeout(r, 400));
+    await waitForFixture(()=>got.map(e => e.data || '').join('').includes(path.basename(j.path)), 'uploaded path must reach the PTY: '+JSON.stringify({path:j.path,output:s.buf}));
     assert.ok(got.map(e => e.data || '').join('').includes(path.basename(j.path)));
-    off(); sessions2.stop('サンプルアプリ', 'up-test', 'codex');
   }
   // 無い作業・CSRF の印なしは断る
   assert.strictEqual((await up({ project: 'サンプルアプリ', task: 'nai', name: 'a' }, Buffer.from('x'))).status, 400);
@@ -620,7 +672,7 @@ test('会話画面：送るたびに AI を選べ、変えた時は見ていな�
   fs.writeFileSync(path.join(bin, 'claude'), js(`const o=x=>console.log(JSON.stringify(x));o({type:'system',subtype:'init',session_id:'S-claude'});o({type:'assistant',message:{content:[{type:'tool_use',name:'Bash',input:{command:'npm test'}},{type:'text',text:'GOT['+i+'] ARGS['+a+']'}]}});o({type:'result',is_error:false,result:'x',session_id:'S-claude'});`), { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'codex'), js(`const o=x=>console.log(JSON.stringify(x));o({type:'thread.started',thread_id:'T-codex'});o({type:'item.completed',item:{type:'command_execution',command:'ls'}});o({type:'item.completed',item:{type:'agent_message',text:'CODEX['+i+'] ARGS['+a+']'}});o({type:'turn.completed'});`), { mode: 0o755 });
   const oldPath = process.env.PATH;
-  process.env.PATH = bin + ':' + oldPath;
+  process.env.PATH = bin + path.delimiter + oldPath;
   const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'chat-test.md');
   fs.writeFileSync(tf, '---\nid: chat-test\ntitle: 会話\nstate: 実行中\n---\n');
   const rows = () => chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'chat-test');
@@ -697,9 +749,11 @@ test('バージョン：package.json と変更の記録の一番上が同じ番�
   if (sessions2.available()) {
     sessions2.start({ project: 'サンプルアプリ', task: 'ver-test', ai: 'codex', dir: ROOT2, command: '/bin/bash', env: SHELL_ENV, args: ['--noprofile', '--norc'], cols: 80, rows: 24 });
     assert.strictEqual((await post2('/api/restart', {})).status, 409);
-    sessions2.stop('サンプルアプリ', 'ver-test', 'codex');
+    await stopFixtureSession('サンプルアプリ', 'ver-test', 'codex');
   }
-  assert.strictEqual((await post2('/api/restart', {})).status, 200); // テストでは実際には起動し直さない
+  assert.strictEqual((await post2('/api/restart', {})).status, 200);
+  assert.equal(restartControl2.committed,true);
+  restartControl2.committed=false; // DRYでは終了しないため、新しい起動の試験状態へ戻す
 });
 
 test('アプリの窓に落とした物：本当の場所で渡す。フォルダ選択。本体はフォルダだけ', async () => {
@@ -765,7 +819,7 @@ if(m>=0){o({type:'turn.failed',error:{message:'{"type":"error","status":400,"err
 o({type:'item.completed',item:{type:'agent_message',text:'OK ARGS['+a.join(' ')+']'}});o({type:'turn.completed'});});
 `, { mode: 0o755 });
   const oldPath = process.env.PATH;
-  process.env.PATH = bin + ':' + oldPath;
+  process.env.PATH = bin + path.delimiter + oldPath;
   const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'model-test.md');
   fs.writeFileSync(tf, '---\nid: model-test\ntitle: m\nstate: 実行中\n---\n');
   const rows = () => chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'model-test');
@@ -796,7 +850,7 @@ o({type:'item.completed',item:{type:'agent_message',text:'OK ARGS['+a.join(' ')+
   } finally { process.env.PATH = oldPath; }
 });
 
-test('作業中の指示：① 取り消してやり直す／② 追加説明（一緒にやる）／③ 終わったら次に。［止める］は待っている指示も取り消す', async () => {
+test('作業中の指示：① 取り消してやり直す／② 追加説明（一緒にやる）／③ 終わったら次に。［止める］は待ち指示を保持して保留する', async () => {
   const bin = path.join(tmp2, 'fakebin3');
   fs.mkdirSync(bin, { recursive: true });
   // 0.6秒かかる Claude（受け取った依頼をそのまま返す）
@@ -807,7 +861,7 @@ setTimeout(()=>{o({type:'assistant',message:{content:[{type:'text',text:'DONE['+
 process.on('SIGTERM',()=>process.exit(143));
 `, { mode: 0o755 });
   const oldPath = process.env.PATH;
-  process.env.PATH = bin + ':' + oldPath;
+  process.env.PATH = bin + path.delimiter + oldPath;
   const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'q-test.md');
   fs.writeFileSync(tf, '---\nid: q-test\ntitle: q\nstate: 実行中\n---\n');
   const rows = () => chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'q-test');
@@ -830,16 +884,16 @@ process.on('SIGTERM',()=>process.exit(143));
     assert.strictEqual(it.status, 200);
     await waitN(4);
     assert.strictEqual(done()[2].error, '止めました');
-    assert.match(done()[3].text, /前の指示「三つ目」を取り消しました[\s\S]*四つ目/);
+    assert.match(done()[3].text, /人が前の指示を取り消しました[\s\S]*四つ目/);
     assert.strictEqual(rows().find(r => r.role === 'user' && r.text === '四つ目').mode, 'redo');
     // ② 追加説明（一緒にやる）：元の指示は続け、説明を合わせる
     await say('七つ目');
     await new Promise(r => setTimeout(r, 150));
     await say('色は青で', 'amend');
     await waitN(6);
-    assert.match(done()[5].text, /今の指示「七つ目」は取り消さずに続けて[\s\S]*色は青で/);
+    assert.match(done()[5].text, /元の依頼は取り消さず[\s\S]*七つ目[\s\S]*色は青で/);
     assert.strictEqual(rows().find(r => r.role === 'user' && r.text === '色は青で').mode, 'amend');
-    // ［止める］は、待っている指示も取り消す
+    // ［止める］は、待っている指示を送信せずに保持して保留する
     await say('五つ目');
     await say('六つ目', 'queue');
     await post2('/api/chat/stop', { project: 'サンプルアプリ', task: 'q-test' });
@@ -847,6 +901,11 @@ process.on('SIGTERM',()=>process.exit(143));
     await new Promise(r => setTimeout(r, 800));
     assert.strictEqual(done().length, 7);
     assert.ok(!rows().some(r => r.text === '六つ目'));
+    const held=require('../server').chats.queue('サンプルアプリ','q-test');
+    assert.equal(held.length,1);assert.equal(held[0].text,'六つ目');assert.equal(held[0].stopHeld,true);
+    // This fixture has proved retention. Clear only its mock queue for later independent tests.
+    require('../server').chats.setQueue('サンプルアプリ','q-test',[]);
+    require('../server').stopControl.resume();
   } finally { process.env.PATH = oldPath; }
 });
 
@@ -858,7 +917,7 @@ let i='';process.stdin.on('data',d=>i+=d);process.stdin.on('end',()=>{const o=x=
 o({type:'system',subtype:'init',session_id:'S-u'});o({type:'assistant',message:{content:[{type:'text',text:'OK'}]}});o({type:'result',is_error:false,result:'',session_id:'S-u'});});
 `, { mode: 0o755 });
   const oldPath = process.env.PATH;
-  process.env.PATH = bin + ':' + oldPath;
+  process.env.PATH = bin + path.delimiter + oldPath;
   const P = 'サンプルアプリ', T = 'unread-test';
   fs.writeFileSync(path.join(ROOT2, 'Product', P, '.ai', 'tasks', `${T}.md`), `---\nid: ${T}\ntitle: 未読\nstate: 実行中\n---\n`);
   const rows = () => chatLib.read(path.join(ROOT2, 'Product', P), T).filter(r => r.role === 'assistant');
@@ -977,7 +1036,7 @@ test('本体が台帳を読めるか答える。止める時は、外からの�
   assert.strictEqual(a.ok, true);
   const r = await fetch(BASE2 + '/api/quit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.strictEqual(r.status, 403); // X-Hub が無い
-  assert.strictEqual((await post2('/api/quit', { reason: 'test' })).status, 200); // 試しの時は止まらない
+  const quit=await post2('/api/quit',{reason:'test'}); assert.strictEqual(quit.status,200,await quit.text()); // 試しの時は止まらない
 });
 
 test('AI の質問を選択肢にする（決まった形・質問の道具のどちらでも）', () => {
@@ -997,7 +1056,7 @@ test('AI の質問を選択肢にする（決まった形・質問の道具の�
 
 test('モデルを最新に整理：今の一覧だけ出し、役割の古い名前を同じ系統の一番新しいモデルにする', () => {
   const rolesLib = require('../lib/roles');
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-tidy-'));
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-tidy-')));
   const f = path.join(d, 'roles.yaml');
   fs.copyFileSync(path.join(TPL, '_hub', 'roles.yaml'), f);
   // 古い設定を持つ利用者の移行を確かめる。配布ひな形の既定値に依存しない。
@@ -1058,7 +1117,7 @@ test('作業用コピーの場所が無い時：取り込むと説明して記�
 
 test('別の AI に作業を渡す（/api/delegate）：同じ作業で動かし、子作業を作らない', async () => {
   const bin = path.join(tmp2, 'fakebin3'); // 上の試験で作った、0.6秒で返事する Claude
-  const oldPath = process.env.PATH; process.env.PATH = bin + ':' + oldPath;
+  const oldPath = process.env.PATH; process.env.PATH = bin + path.delimiter + oldPath;
   try {
     const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'dlg-parent.md');
     fs.mkdirSync(path.dirname(tf), { recursive: true });
@@ -1083,17 +1142,15 @@ test('別の AI に作業を渡す（/api/delegate）：同じ作業で動かし
   } finally { process.env.PATH = oldPath; }
 });
 
-test('ChatGPT：貼る文に作業の中身を入れ、貼った返事を会話に残す', async () => {
-  const tf = path.join(ROOT2, 'Product', 'サンプルアプリ', '.ai', 'tasks', 'gpt-paste.md');
-  fs.mkdirSync(path.dirname(tf), { recursive: true });
-  fs.writeFileSync(tf, '---\nid: gpt-paste\ntitle: 見てもらう\nstate: 実行中\n---\n## 手順\n- [ ] 目印XYZを確かめる\n## やったこと\n');
-  const r = await (await post2('/api/chatgpt/prompt', { project: 'サンプルアプリ', task: 'gpt-paste', text: '急ぎで' })).json();
-  assert.match(r.text, /目印XYZ/); assert.match(r.text, /# 今回の依頼\n急ぎで/); assert.doesNotMatch(r.text, /hub_get_task/);
-  assert.strictEqual((await post2('/api/chatgpt/result', { project: 'サンプルアプリ', task: 'gpt-paste', text: '' })).status, 400);
-  assert.strictEqual((await post2('/api/chatgpt/result', { project: 'サンプルアプリ', task: 'gpt-paste', text: '## 結果\nよい' })).status, 200);
-  const row = chatLib.read(path.join(ROOT2, 'Product', 'サンプルアプリ'), 'gpt-paste').pop();
-  assert.strictEqual(row.role, 'assistant'); assert.strictEqual(row.ai, 'chatgpt'); assert.match(row.text, /よい/);
-  assert.match(fs.readFileSync(tf, 'utf8'), /ChatGPT の返事を受け取った/);
+test('ChatGPTの旧貼付APIは410で、会話と作業の原文を保持する', async () => {
+  const dir=path.join(ROOT2,'Product','サンプルアプリ'),tf=path.join(dir,'.ai/tasks/gpt-paste.md');
+  fs.writeFileSync(tf,'---\nid: gpt-paste\ntitle: 見てもらう\nstate: 実行中\n---\n## 手順\n- [ ] 目印XYZ\n');
+  chatLib.append(dir,'gpt-paste',{role:'assistant',ai:'chatgpt',text:'旧返答を保持'});
+  const before=fs.readFileSync(tf),rows=chatLib.read(dir,'gpt-paste');
+  for(const route of ['/api/chatgpt/prompt','/api/chatgpt/result']) for(const text of ['', '## 結果\nよい']) {
+    assert.equal((await post2(route,{project:'サンプルアプリ',task:'gpt-paste',text})).status,410);
+  }
+  assert.deepEqual(fs.readFileSync(tf),before);assert.deepEqual(chatLib.read(dir,'gpt-paste'),rows);
 });
 
 test('空の作業を片付ける：会話が空の派生作業と子プロジェクトを探し、ゴミ箱へ移す', async () => {
@@ -1132,7 +1189,7 @@ test('子作業：渡す操作は通知だけ、祖先の統合後に成果を�
   const r=await (await post2('/api/task/handup',input)).json();assert.equal(r.ok,true);assert.equal(r.handedUp,true);assert.ok(fs.existsSync(path.join(td,'up-kid.md')));
   assert.equal((await (await post2('/api/task/handup',input)).json()).ok,true);
   const preview=await (await post2('/api/task/integrate/preview',{project:body.project,task:'up-parent'})).json();assert.deepEqual(preview.items[0].blockers,[]);
-  const integrated=await (await post2('/api/task/integrate',{project:body.project,task:'up-parent',token:preview.token,confirm:true,selected:[{...body,files:input.selected}]})).json();assert.equal(integrated.ok,true);assert.ok(!fs.existsSync(path.join(td,'up-kid.md')));
+  const integrated=await (await post2('/api/task/integrate',{project:body.project,task:'up-parent',token:preview.token,confirm:true,selected:[{...body,files:input.selected,disposition:'cleanup',review:{...preview.items[0].review,confirmed:true,residual:'なし',undecided:'なし'}}]})).json();assert.equal(integrated.ok,true,JSON.stringify(integrated));assert.ok(!fs.existsSync(path.join(td,'up-kid.md')));
   const received=await post2('/api/task/handup/preview',body);assert.equal(received.status,409);assert.match((await received.json()).error,/もう受け取って片付けてあります/);
   const rows=chatLib.read(pdir,'up-parent').filter(r=>r.handoff);assert.equal(rows.length,1);assert.match(rows[0].text,/result.txt/);assert.doesNotMatch(rows[0].text,/長い会話/);
   fs.writeFileSync(path.join(td,'up-kid2.md'),'---\nid: up-kid2\ntitle: 未完成\nparent: up-parent\n---\n## 手順\n- [ ] まだ\n');
@@ -1141,7 +1198,7 @@ test('子作業：渡す操作は通知だけ、祖先の統合後に成果を�
 });
 
 test('待っている指示はファイルに残り、再起動しても消えない', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-q-'));
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-q-')));
   try {
     const a = new chatLib.ChatRunner({ dirOf: id => (id === 'P' ? d : '') });
     const it = a.enqueue('P', 'T', { ai: 'claude', model: 'Opus 5.5', effort: '高', text: 'あとで' });
@@ -1264,8 +1321,8 @@ test('a running selected verification blocks new AI launch while state remains r
  assert.equal((await post2('/api/term/start',{project:p.id,task:t.id,ai:'codex'})).status,200);
 });
 
-test('第2版: 後片付け', () => {
-  sessions2.stopAll();
+test('第2版: 後片付け', async () => {
+  await stopFixtureSessions();
   server2.close();
   process.env.PATH = originalPath2;
   fs.rmSync(tmp2, { recursive: true, force: true });

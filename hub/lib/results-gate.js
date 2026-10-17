@@ -31,9 +31,9 @@ class ResultsGate {
     if(this.issues.size>=500)this.issues.clear();
     this.issues.set(key,{hash:t.completionHash,at:Date.now(),issue});return issue;
   }
-  decorate(p,t,all) {
+  decorate(p,t,all,{issue:checked}={}) {
     if (!this.eligible(p,t,all)) return t;
-    const issue = this.issue(p,t,{fresh:false}); if (issue.ok) return t;
+    const issue = checked || this.issue(p,t,{fresh:false}); if (issue.ok) return t;
     const key=this.key(p,t), r=this.records[key], busy=this.inflight.has(key);
     const block=this.blocked(p,t) || this.warning;
     const auto=busy || r?.state==='running' && block==='AIが作業中です'?'running':block?'blocked':r?.hash===t.completionHash?(r.state==='blocked'?'blocked':'failed'):'none';

@@ -5,6 +5,40 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const src=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
 const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 function fixture(){let click;const ctx=vm.createContext({esc,linkify:t=>`PLAIN:${esc(t)}`,document:{addEventListener:(k,cb)=>click=cb},setTimeout(){},copyText:async()=>true});vm.runInContext(src.slice(src.indexOf('// 囲みの中はリンク'),src.indexOf('// コピーできたか')),ctx);return {ctx,click};}
+const bodies = html => [...html.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)].map(m => m[1]
+ .replaceAll('&#13;', '\r').replaceAll('&quot;', '"').replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&'));
+test('引用は説明を除き、1段だけ外した原文を1ボタンでコピーする', async()=>{
+ const f=fixture(),value='　本文 **強調** [リンク](https://example.com/?a=1&b=2) <script>"x"</script>\n> 内側\n>さらに内側\n\n  空白を残す\r\n';
+ const out=f.ctx.richText('送り先の説明\n> 　本文 **強調** [リンク](https://example.com/?a=1&b=2) <script>"x"</script>\n> > 内側\n>>さらに内側\n>\n>   空白を残す\r\n枠外の説明');
+ assert.deepEqual(bodies(out),[value]);assert.equal((out.match(/class="cb-copy quote-copy"/g)||[]).length,1);
+ assert.match(out,/⧉ 引用をコピー/);assert.doesNotMatch(out,/<script>|<strong>|data-url=|data-path=/);
+ let copied;f.ctx.copyText=async x=>{copied=x;return true;};
+ await f.click({target:{closest:()=>({disabled:false,classList:{contains:()=>true},closest:()=>({querySelector:()=>({textContent:bodies(out)[0]})})})}});
+ assert.equal(copied,value);
+});
+test('複数の引用・空行・入れ子・改行なし末尾は別の本文として保持する',()=>{
+ const f=fixture(),out=f.ctx.richText('前\n> 一\n>\n> 二\n\n間\n> 三\n普通の文\n>末尾');
+ assert.deepEqual(bodies(out),['一\n\n二\n','三\n','末尾']);assert.equal((out.match(/quote-copy/g)||[]).length,3);
+ assert.deepEqual(bodies(f.ctx.richText('>\n>>> 入れ子\n>\tタブ\n>  空白')),['\n>> 入れ子\n\tタブ\n 空白']);
+});
+test('生成中の引用にボタンを出さず、完了後だけコピーできる',()=>{
+ const f=fixture(),value='> 途中\n> 続';
+ assert.match(f.ctx.richText(value,true),/書きかけ/);assert.doesNotMatch(f.ctx.richText(value,true),/cb-copy/);
+ assert.match(f.ctx.richText(value),/quote-copy/);assert.deepEqual(bodies(f.ctx.richText(value,true)),bodies(f.ctx.richText(value)));
+});
+test('引用コピーの失敗を成功と表示せず、再操作のラベルを復元する',async()=>{
+ const f=fixture();let reset;f.ctx.setTimeout=cb=>reset=cb;f.ctx.copyText=async()=>false;
+ const b={disabled:false,textContent:'',classList:{contains:()=>true},closest:()=>({querySelector:()=>({textContent:'本文'})})};
+ await f.click({target:{closest:()=>b}});assert.match(b.textContent,/コピーできませんでした/);assert.doesNotMatch(b.textContent,/コピーしました/);
+ reset();assert.equal(b.textContent,'⧉ 引用をコピー');assert.equal(b.disabled,false);
+});
+test('普通の段落と箇条書きは送信文と判定せず、コード枠内の引用記号は外さない',()=>{
+ const f=fixture(),plain='送り先：AI\n本文です a > b\n- > 項目\n1. 本文\n    > インデントの本文';
+ assert.doesNotMatch(f.ctx.richText(plain),/cb-copy|quote-block/);
+ const out=f.ctx.richText('> 引用\n```text\n> コード内\n>> 内側\n```\n> 次の引用');
+ assert.deepEqual(bodies(out),['引用\n','> コード内\n>> 内側\n','次の引用']);
+ assert.equal((out.match(/quote-copy/g)||[]).length,2);assert.equal((out.match(/class="cb-copy"/g)||[]).length,1);
+});
 test('fences preserve exact whitespace, multiline Japanese, HTML and path text without links',()=>{
  const f=fixture(),value='　全角  spaces\n<script>"x"</script>\n/Users/a/file.md\n';const out=f.ctx.richText('before\n```text\n'+value+'```\nafter');assert.ok(out.includes('<code>'+esc(value)+'</code>'));assert.doesNotMatch(out,/<script>|data-path=/);assert.match(out,/cb-copy/);assert.match(out,/PLAIN:before/);assert.match(out,/PLAIN:after/);
 });
@@ -27,9 +61,18 @@ test('paths and URLs outside fences retain normal links, with no links inside',(
 test('CRLF in a fenced block is preserved as a character reference through HTML parsing',()=>{assert.match(fixture().ctx.richText('```text\r\nline\r\n```'),/<code>line&#13;\n<\/code>/);});
 
 function linkedFixture(){
- const ctx=vm.createContext({esc,document:{addEventListener(){}},setTimeout(){}});
+ const ctx=vm.createContext({window:{HubChatHistory:require('../public/chat-history')},esc,fileViewUrl:p=>'/api/file/view?path='+encodeURIComponent(p),document:{addEventListener(){}},setTimeout(){}});
  const start=src.indexOf('const LINK_RE');vm.runInContext(src.slice(start,src.indexOf('// コピーできたか',start)),ctx);return ctx;
 }
+test('ローカルMarkdown画像を会話と表に表示し、コード枠内の原文は保持',()=>{
+ const ctx=linkedFixture(),image='![390pxでの画像](</Users/test/空 白/画像.png>)';
+ for(const html of [ctx.linkify(image),ctx.richText(image),ctx.richText('| 画像 |\n|---|\n| '+image+' |')]) {
+  assert.match(html,/data-path="\/Users\/test\/空 白\/画像.png"/);assert.match(html,/>390pxでの画像<\/span><\/a>/);
+  assert.doesNotMatch(html,/!<a/);assert.match(html,/<img src="\/api\/file\/view\?path=/);
+ }
+ assert.equal(ctx.linkify('普通の ! は残す'),'普通の ! は残す');
+ assert.match(ctx.richText('```text\n'+image+'\n```'),/!\[390pxでの画像\]/);
+});
 test('tables render semantic headers, alignment and padded short rows',()=>{
  const text='前\n| 名前 | 比較 | 数 |\n| :--- | :--: | ---: |\n| 一 | 二 | 12 |\n| 三 |\n\n後';
  const out=linkedFixture().richText(text);

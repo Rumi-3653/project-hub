@@ -16,9 +16,14 @@ const MAX_SESSIONS = 20;
 const MIN_PASS = 8;
 
 // 中継された通信（tailscale serve など）なら外から。Mac の中の画面・アプリはこの印を付けない
-const isRemote = req => ['tailscale-user-login', 'x-forwarded-for', 'x-forwarded-host'].some(h => req.headers[h] !== undefined);
+const isRemote = req => ['tailscale-user-login', 'x-forwarded-for', 'x-forwarded-host', 'forwarded', 'x-real-ip', 'via'].some(h => req.headers[h] !== undefined);
 // 誰からか：Tailscale のアカウント、無ければ中継元の場所
-const whoOf = req => String(req.headers['tailscale-user-login'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || 'unknown').slice(0, 200);
+function whoOf(req) {
+  // Forwarded は先頭の中継元の for= だけを使う（引用付き IPv6 にも対応）。
+  const forwarded = String(req.headers.forwarded || '').split(',')[0].match(/(?:^|;)\s*for=\s*(?:"([^"]*)"|([^;\s]+))/i);
+  return String(req.headers['tailscale-user-login'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    || (forwarded?.[1] || forwarded?.[2] || '').trim() || String(req.headers['x-real-ip'] || '').split(',')[0].trim() || 'unknown').slice(0, 200);
+}
 function cookieOf(req, name = COOKIE) {
   for (const part of String(req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');

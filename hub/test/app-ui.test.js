@@ -6,10 +6,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
+const git = require('../lib/git');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
 
-function app(userAgent = '') {
+function app(userAgent = '', sessionStorage) {
   const elements = new Map();
   const events = new Map();
   const documentListeners = [];
@@ -24,6 +27,7 @@ function app(userAgent = '') {
       scrollTop: 0, scrollHeight: 100, clientHeight: 100,
       dataset: {}, handlers: {}, attributes: {}, addEventListener(name, cb) { this.handlers[name] = cb; },
       setAttribute(name, value) { this.attributes[name] = String(value); },
+      contains(target) { return target === this; },
       querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML() {}, focus() { document.activeElement = this; },
     });
     return elements.get(key);
@@ -34,15 +38,16 @@ function app(userAgent = '') {
   }
   const document = {
     hidden: false, activeElement: null,
-    querySelector: s => s.startsWith('details[open]') ? details.find(d => d.open && (!s.includes(':not(.project-notes)') || !d.classList.contains('project-notes'))) || null : s === '#msg-partial' ? elements.get(s) || null : element(s),
+    querySelector: s => s === '.ideas-dialog[open]' ? null : s.startsWith('details[open]') ? details.find(d => d.open && (!s.includes(':not(.project-notes)') || !d.classList.contains('project-notes'))) || null : s === '#msg-partial' ? elements.get(s) || null : element(s),
     querySelectorAll: () => [],
     addEventListener(name, cb, capture = false) { events.set(name, cb); documentListeners.push({ name, cb, capture }); },
   };
   const context = vm.createContext({
     document, window: {}, navigator: { userAgent }, location: { href: '' },
     localStorage: { getItem: () => null, setItem() {} },
+    sessionStorage,
     fetch: () => new Promise(() => {}), // 起動時の load() は試験用の状態を上書きしない
-    EventSource, URLSearchParams,
+    EventSource, URL, URLSearchParams,
     requestAnimationFrame: cb => cb(),
     setInterval(cb, ms) { const id = ++nextTimer; timers.set(id, { cb, ms }); return id; },
     clearInterval(id) { timers.delete(id); },
@@ -51,6 +56,8 @@ function app(userAgent = '') {
     console, ModelOrder: require('../public/model-order'), ProjectOrder: require('../public/project-order'),
     confirm: () => true,
   });
+  context.window.HubChatHistory = require('../public/chat-history');
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'role-settings.js'), 'utf8'), context);
   vm.runInContext(source, context);
   return { context, document, elements, element, events, documentListeners, timers, timeouts, details, stream: () => stream };
 }
@@ -64,6 +71,564 @@ const project = (state = '実行中') => ({
 const snapshot = (taskState = '実行中', sessions = []) => ({
   root: '/tmp', projects: [project(taskState)], roles: { models: { codex: [], 'claude-code': [] }, roles: [], permissions: {} },
   sessions, chatting: [], terminal: true, efforts: [], cliFlags: {}, version: '1', latest: '1',
+});
+
+test('summary-only tasks preserve progress segments, next step and finished filtering',()=>{
+ const a=app();a.context.data=snapshot();
+ vm.runInContext(`state=data;const st=state.projects[0].tasks[0];delete st.steps;st.stepSummary={total:3,done:2,next:{text:'next',done:false},marks:'101',version:'v1'};`,a.context);
+ assert.equal(vm.runInContext('progressOf(st).done',a.context),2);assert.equal(vm.runInContext('progressOf(st).all',a.context),3);
+ const html=vm.runInContext('progressBar(st)',a.context);assert.match(html,/<i class="on"><\/i><i class=""><\/i><i class="on"><\/i>/);assert.match(html,/2 \/ 3/);
+ assert.match(vm.runInContext('taskRow(state.projects[0],st,false)',a.context),/次：next/);
+ const order=require('../public/project-order');
+ assert.equal(order.finished({stepSummary:{total:3,done:2}}),false);assert.equal(order.finished({stepSummary:{total:3,done:3}}),true);assert.equal(order.finished({stepSummary:{total:0,done:0}}),false);
+});
+test('step details load once for the open version; late navigation responses cannot replace current steps',async()=>{
+ const a=app(),box=a.element('[data-step-list]');box.dataset={p:'p',t:'t'};a.context.data=snapshot();
+ const pending=[];a.context.stepApi=url=>new Promise(resolve=>pending.push({url,resolve}));
+ vm.runInContext(`state=data;view={kind:'work',project:'p',task:'t'};delete state.projects[0].tasks[0].steps;state.projects[0].tasks[0].stepSummary={total:1,done:0,next:{text:'one'},marks:'0',version:'v1'};api=stepApi;syncTaskSteps();syncTaskSteps();`,a.context);
+ assert.equal(pending.length,1);assert.match(pending[0].url,/^\/api\/task\/steps\?project=p&task=t$/);
+ pending[0].resolve({version:'v1',steps:[{text:'<first>',done:false}]});await new Promise(r=>setImmediate(r));
+ assert.match(box.innerHTML,/&lt;first&gt;/);assert.match(box.innerHTML,/data-i="0"/);assert.equal(box.dataset.version,'v1');
+ vm.runInContext('syncTaskSteps()',a.context);assert.equal(pending.length,1);
+ vm.runInContext(`state.projects[0].tasks[0].stepSummary.version='v2';syncTaskSteps();view.task='other';`,a.context);
+ pending[1].resolve({version:'v2',steps:[{text:'stale',done:true}]});await new Promise(r=>setImmediate(r));assert.doesNotMatch(box.innerHTML,/stale/);
+ vm.runInContext(`view.task='t';syncTaskSteps();`,a.context);assert.equal(pending.length,3);
+ pending[2].resolve({version:'v2',steps:[{text:'current',done:true}]});await new Promise(r=>setImmediate(r));assert.match(box.innerHTML,/current/);assert.match(box.innerHTML,/checked/);
+});
+
+function disclosureUI() {
+  const a=app(),folds=[];
+  a.document.querySelectorAll=s=>s==='details[open]'?folds.filter(d=>d.open):[];
+  a.context.getComputedStyle=el=>({visibility:el.visibility||'visible'});
+  const work={dataset:{p:'p',t:'t'}};
+  const fold=(dataset={},parent=null)=>{
+    const d={open:true,isConnected:true,dataset,id:'',tagName:'DETAILS',parentElement:parent,classList:{contains:()=>false},
+      getClientRects(){for(let n=this;n;n=n.parentElement)if(n.hidden)return [];return [{}];},querySelector(){return null;},
+      closest:s=>s==='.work'?work:null,contains(target){for(let n=target;n;n=n.parent)if(n===d)return true;return false;},parent};
+    folds.push(d);return d;
+  };
+  const fire=(type,extra={})=>{for(const l of a.documentListeners.filter(l=>l.name===type&&l.capture===true&&/disclosurePress|dismissDisclosures/.test(l.cb.toString())))l.cb({detail:1,clientX:10,clientY:10,pointerId:1,...extra});};
+  return {...a,fold,folds,fire};
+}
+test('disclosures R1: opening a closed group preserves unseen notices and their remembered open state',()=>{
+  const a=disclosureUI(),group=a.fold({workFold:'alerts'}),notice=a.fold({workFold:'transfer'},group);
+  group.open=false;a.context.rememberDisclosure(notice);
+  a.fire('click',{target:{parent:group}});group.open=true; // Native summary action follows the capture listener.
+  assert.equal(notice.open,true);assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'transfer',false),'open');
+  const input={parent:notice,value:'kept draft'};a.fire('click',{target:input});
+  assert.equal(group.open,true);assert.equal(notice.open,true);assert.equal(input.value,'kept draft');
+});
+test('disclosures R1: outside closure leaves hidden disclosures and their memories unchanged',()=>{
+  const a=disclosureUI(),wrapper={hidden:true},hidden=a.fold({workFold:'hidden'},wrapper),invisible=a.fold({workFold:'invisible'});
+  invisible.visibility='hidden';a.context.rememberDisclosure(hidden);a.context.rememberDisclosure(invisible);
+  a.fire('click',{target:{}});
+  for(const [name,el] of [['hidden',hidden],['invisible',invisible]]){
+    assert.equal(el.open,true);assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},name,false),'open');
+  }
+  wrapper.hidden=false;a.fire('click',{target:{}});assert.equal(hidden.open,false);
+  assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'hidden',true),'');
+});
+test('disclosures R1: capture visibility once so visible parent and child close together but a hidden branch stays open',()=>{
+  const a=disclosureUI(),parent=a.fold({workFold:'parent'}),child=a.fold({workFold:'child'},parent),branch=a.fold({},parent),unseen=a.fold({workFold:'unseen'},branch);
+  branch.open=false;a.context.rememberDisclosure(unseen);a.fire('click',{target:{}});
+  assert.equal(parent.open,false);assert.equal(child.open,false);assert.equal(unseen.open,true);
+  assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'parent',true),'');
+  assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'child',true),'');
+  assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'unseen',false),'open');
+});
+test('disclosures: every structural details including dynamic and nested folds closes outside without changing inputs or the action',()=>{
+  const a=disclosureUI(),parent=a.fold({workFold:'transfer'}),child=a.fold({},parent),sibling=a.fold({workFold:'settings'}),future=a.fold({unexpected:'dynamic'});
+  const input={parent:child,value:'draft',checked:true};
+  a.fire('click',{target:input});assert.equal(parent.open,true);assert.equal(child.open,true);assert.equal(sibling.open,false);assert.equal(future.open,false);
+  const link={parent};a.fire('click',{target:link,detail:0});assert.equal(parent.open,true);assert.equal(child.open,false);
+  const outside={},event={target:outside,preventDefault:()=>assert.fail('outside action must run'),stopPropagation:()=>assert.fail('outside action must bubble')};
+  a.fire('click',event);assert.equal(parent.open,false);assert.equal(input.value,'draft');assert.equal(input.checked,true);
+  const later=a.fold();a.fire('click',event);assert.equal(later.open,false);
+});
+test('disclosures: drag away and back, pointer cancellation and large release movement stay open; the next tap and keyboard action close',()=>{
+  const a=disclosureUI(),d=a.fold(),target={};
+  a.fire('pointerdown');a.fire('pointermove',{clientX:30});a.fire('pointermove');a.fire('click',{target});assert.equal(d.open,true);
+  a.fire('pointerdown');a.fire('pointercancel');a.fire('click',{target});assert.equal(d.open,true);
+  a.fire('pointerdown');a.fire('click',{target,clientY:40});assert.equal(d.open,true);
+  a.fire('pointerdown');a.fire('click',{target});assert.equal(d.open,false);
+  d.open=true;a.fire('pointerdown');a.fire('pointercancel');a.fire('click',{target,detail:0});assert.equal(d.open,false);
+});
+test('disclosures: outside closure synchronously updates task, project and settings memories before any redraw',()=>{
+  const a=disclosureUI(),task=a.fold({workFold:'transfer'}),settings=a.fold({aiFold:'mcp'}),notes=a.fold({p:'project'}),web=a.fold(),version=a.fold(),steps=a.fold();
+  notes.classList.contains=n=>n==='project-notes';steps.classList.contains=n=>n==='steps';web.id='webchat-details';version.id='verd';
+  a.context.rememberDisclosure(settings);a.context.rememberDisclosure(notes);
+  a.fire('click',{target:{}});
+  assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'transfer',true),'');assert.equal(a.context.workFoldAttr({id:'p'},{id:'other'},'transfer',true),'open');
+  assert.equal(vm.runInContext('aiSettingsOpen.has("mcp")||projectNotesOpen.has("project")||webchatDetailsOpen||verOpen||stepsOpen',a.context),false);
+  assert.equal(task.open,false);assert.equal(settings.open,false);
+});
+test('disclosures: freetalk summary remains closed for the same summary after rendering, while a new summary can open',()=>{
+  const a=disclosureUI(),p={id:'freetalk'},t={id:'topic',freetalkHistory:{draft:'kept summary',summaryId:'s1'}};
+  const d=a.fold({workFold:'freetalk-summary-s1'});d.closest=()=>({dataset:{p:p.id,t:t.id}});
+  assert.match(a.context.freetalkHistoryHtml(p,t),/data-work-fold="freetalk-summary-s1" open/);
+  a.fire('click',{target:{}});const html=a.context.freetalkHistoryHtml(p,t);assert.doesNotMatch(html,/<details class="freetalk-summary"[^>]*\bopen\b/);assert.match(html,/kept summary/);
+  t.freetalkHistory.summaryId='s2';assert.match(a.context.freetalkHistoryHtml(p,t),/data-work-fold="freetalk-summary-s2" open/);
+});
+
+test('引っ越し設定: 基本欄の説明と保存操作、バックアップ選択、進行中の再送防止', async () => {
+  const a = app(); vm.runInContext('state=' + JSON.stringify(snapshot()) + ';view={kind:"settings"}', a.context);
+  a.element('#ai-use-settings').contains = () => false; // Complete the DOM fixture for this settings render.
+  a.context.renderSettings(); const html = a.element('#main').innerHTML;
+  assert.match(html, /<h2>引っ越し<\/h2>/); assert.match(html, /ProjectHub-Move/);
+  assert.match(html, /AIのログイン情報と利用コードは移しません/);
+  const calls = []; let mode = 'none';
+  a.context.api = async (url, body, headers) => { calls.push({url,body,headers}); if (url.endsWith('/export')) mode = 'exporting'; return { mode, progress: 12 }; };
+  await a.context.loadMoveSettings(); assert.equal(calls[0].headers['X-Hub'], '1');
+  a.element('#move-backups').checked = true; await a.element('#move-export').onclick();
+  assert.equal(calls.filter(c => c.url.endsWith('/export')).length, 1);
+  assert.equal(calls.find(c => c.url.endsWith('/export')).body.includeBackups, true);
+  assert.equal(a.element('#move-export').disabled, true);
+  assert.match(a.element('#move-status').innerHTML, /作成中/);
+  assert.ok([...a.timeouts.values()].some(t => t.ms === 1000));
+});
+test('引っ越し設定: エラーと対象外の場所は文字として表示し、読み込み済みデータの片付けは確認後だけ', async () => {
+  const a = app(), html = a.context.moveSettingsHtml({ mode: 'failed', error: '<script>bad()</script>', notIncluded: [{path:'<img src=x>',reason:'outside'}], attention:[{path:'repo',reason:'review'}] });
+  assert.doesNotMatch(html, /<script>|<img src=x>/); assert.match(html, /&lt;script&gt;/); assert.match(html, /含めなかったもの/);
+  const calls = []; a.context.api = async (url,body) => { calls.push({url,body}); return {mode:'imported',bundle:'x.hubmove'}; };
+  await a.context.loadMoveSettings(); a.context.confirm = () => false;
+  await a.element('#move-trash').handlers.click(); assert.equal(calls.some(c => c.url.endsWith('/trash')), false);
+  a.context.confirm = () => true; await a.element('#move-trash').handlers.click();
+  assert.equal(calls.find(c => c.url.endsWith('/trash')).body.bundle, 'x.hubmove');
+  assert.equal(calls.find(c => c.url.endsWith('/trash')).body.confirm, true);
+});
+
+test('License settings hide maker activation and escape issuer status without retaining a code', () => {
+  const a = app(), s = snapshot(); s.license = { edition: 'public', reason: '<img src=x onerror=bad()>' };
+  vm.runInContext('state=' + JSON.stringify(s) + ';view={kind:"settings"}', a.context);
+  a.context.renderSettings();
+  const html = a.element('#main').innerHTML;
+  assert.match(html, /id="license-code" type="password" autocomplete="off"/);
+  assert.match(html, /&lt;img src=x onerror=bad\(\)&gt;/); assert.doesNotMatch(html, /<img src=x/);
+  vm.runInContext('state.license={edition:"owner"}', a.context); a.context.renderSettings();
+  assert.match(a.element('#main').innerHTML, /製作者版：鍵不要・全機能・期限なし/);
+  assert.doesNotMatch(a.element('#main').innerHTML, /id="license-form"|id="license-code"/);
+});
+
+test('candidate trial dates show local start/end and remaining days; pending and master show no invented dates', () => {
+  const a = app(), s = snapshot();
+  a.element('#ai-use-settings').contains = () => false; // DOM fixture: no focused descendant.
+  s.license = { edition: 'public', reason: '無料体験中', trial: { startsAt: 1800000000, expiry: 1802592000, remainingDays: 30 } };
+  vm.runInContext('state=' + JSON.stringify(s) + ';view={kind:"settings"}', a.context); a.context.renderSettings();
+  const html = a.element('#main').innerHTML;
+  assert.match(html, /data-trial-dates/); assert.match(html, /残り 30 日/);
+  assert.ok(html.includes(new Date(1800000000000).toLocaleString('ja-JP')));
+  assert.ok(html.includes(new Date(1802592000000).toLocaleString('ja-JP')));
+  vm.runInContext('state.license.trial={state:"pending",expiry:null}', a.context); a.context.renderSettings();
+  assert.doesNotMatch(a.element('#main').innerHTML, /data-trial-dates|1970/);
+  vm.runInContext('state.license={edition:"owner"}', a.context); a.context.renderSettings();
+  assert.doesNotMatch(a.element('#main').innerHTML, /data-trial-dates/);
+});
+
+test('License activation clears input before transport, coalesces submits and permits a safe retry', async () => {
+  const a = app(), input = { value: 'TEST_ONLY_CODE' }, button = { disabled: false }, notice = { textContent: '' };
+  const form = { id: 'license-form', querySelector: selector => ({ '#license-code': input, '#license-notice': notice, button })[selector] };
+  const event = { target: form, preventDefault() {} }, calls = [];
+  const listener = a.documentListeners.find(x => x.name === 'submit' && x.cb.toString().includes('license-form'));
+  let complete;
+  a.context.api = (route, body) => { assert.equal(input.value, ''); assert.equal(button.disabled, true); calls.push({ route, code: body.code }); return new Promise(resolve => { complete = resolve; }); };
+  a.context.renderSettings = () => {}; a.context.toast = () => {};
+  const pending = listener.cb(event); await listener.cb(event);
+  assert.deepEqual(calls, [{ route: '/api/license/activate', code: 'TEST_ONLY_CODE' }]);
+  complete({ ok: true, status: { edition: 'public' } }); await pending;
+  assert.equal(button.disabled, false); assert.equal(input.value, '');
+  input.value = 'TEST_ONLY_NEW_CODE'; a.context.api = async () => { throw Error('通信できません'); };
+  await listener.cb(event); assert.equal(input.value, ''); assert.equal(button.disabled, false);
+  assert.equal(notice.textContent, '通信できません');
+});
+
+function discussionView(status = null) {
+  return { candidates: [], previous: null, session: status && { id: 'discussion-test', status, reasons: [],
+    slots: [{kind:'initial',round:0,ai:'codex',label:'Test',status:'done',text:'保存した意見'}],
+    progress: {total:5,completed:status==='done'?5:1,percent:status==='done'?100:20,current:null} } };
+}
+function discussionUI(status = null) {
+  const a = app(), data = snapshot(), calls = [];
+  vm.runInContext('state='+JSON.stringify(data), a.context);
+  const panel = a.element('#discussion-settings'); panel.hidden = true;
+  panel.querySelector = selector => ({ value: selector === '[data-discussion-rounds]' ? '1' : 'codex|test' });
+  const history = a.element('#discussion-history'), saved = a.element('[data-discussion-history]');
+  history.querySelector = () => saved;
+  saved.querySelector = () => ({ value: 'codex|test', options: [] });
+  let response = discussionView(status);
+  a.context.api = async (route, body) => { calls.push({route,body}); return response; };
+  const bind = () => a.context.bindDiscussion(data.projects[0], data.projects[0].tasks[0]);
+  return {...a, calls, panel, bind, update:bind(), response:value=>{response=value;},
+    polls:()=>{const timer=a.timers.get(vm.runInContext('discussionPollTimer',a.context)); return timer?[timer]:[];},
+    flush:()=>new Promise(resolve=>setImmediate(resolve)),
+    action:kind=>(kind==='stop'?a.element('#discussion-progress'):panel).handlers.click({target:{closest:selector=>selector===(kind==='stop'?'[data-discussion-stop]':'[data-discussion-summary]')?{dataset:{discussionSummary:'discussion-test'}}:null}}),
+  };
+}
+test('discussion polls only waiting/running, resumes on events and stops for every terminal state', async () => {
+  const a = discussionUI(); await a.flush();
+  assert.equal(a.calls.length,1); assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true);
+  for (const status of ['waiting','running']) {
+    a.response(discussionView(status)); a.update(discussionView(status));
+    assert.equal(a.polls().length,1); assert.equal(a.element('#discussion-progress').hidden,false); const before=a.calls.length;
+    await a.polls()[0].cb(); await a.flush(); assert.equal(a.calls.length,before+1);
+  }
+  for (const status of ['done','stopped','failed',null]) {
+    a.update(discussionView('running')); assert.equal(a.polls().length,1);
+    a.update(discussionView(status)); assert.equal(a.polls().length,0);
+    assert.equal(a.element('#discussion-progress').hidden,true); assert.equal(a.element('#discussion-progress').innerHTML,'');
+    assert.equal(a.element('#chat-send').disabled,false); assert.equal(a.element('#discussion-toggle').disabled,false);
+    assert.equal(a.panel.hidden,true);
+  }
+});
+test('discussion start/manual summary resume polling immediately and stop refresh cancels it without events', async () => {
+  const a=discussionUI(); await a.flush(); a.response(discussionView('waiting'));
+  await a.panel.handlers.click({target:{id:'discussion-start'}});
+  assert.equal(a.calls.at(-1).route,'/api/discussion/start'); assert.equal(a.polls().length,1); assert.equal(a.panel.hidden,true);
+  a.response(discussionView('stopped')); await a.action('stop');
+  assert.equal(a.calls.at(-2).route,'/api/chat/stop'); assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true);
+  await a.element('#discussion-toggle').handlers.click();
+  assert.equal(a.panel.hidden,false); assert.equal(a.element('#discussion-progress').hidden,true);
+  assert.match(a.element('[data-discussion-history]').innerHTML,/停止[\s\S]*この意見をまとめる/);
+  a.response(discussionView('waiting')); await a.action('summary');
+  assert.equal(a.calls.at(-2).route,'/api/discussion/summary'); assert.equal(a.polls().length,1); assert.equal(a.panel.hidden,true);
+  a.response(discussionView('done')); await a.polls()[0].cb(); await a.flush(); assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true);
+});
+test('discussion reads fresh state on opening/reopening and old requests cannot undo newer events or navigation', async () => {
+  const a=discussionUI(); await a.flush();
+  a.response(discussionView('failed')); await a.element('#discussion-toggle').handlers.click();
+  assert.equal(a.calls.length,2); assert.equal(a.element('#discussion-progress').hidden,true); assert.match(a.element('[data-discussion-history]').innerHTML,/失敗/);
+  a.response(discussionView('running')); a.update=a.bind(); await a.flush(); assert.equal(a.polls().length,1);
+  let finish; a.context.api=()=>new Promise(resolve=>{finish=resolve;});
+  a.polls()[0].cb(); a.update(discussionView('done')); finish(discussionView('running')); await a.flush();
+  assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true); assert.match(a.element('[data-discussion-history]').innerHTML,/100%/);
+  const oldUpdate=a.bind(); a.context.closePanes(); a.elements.delete('#discussion-progress');
+  a.context.api=async()=>discussionView('waiting'); a.bind(); await a.flush();
+  oldUpdate(discussionView('stopped')); finish(discussionView('failed')); await a.flush();
+  assert.equal(a.polls().length,1); assert.match(a.element('#discussion-progress').innerHTML,/待ち/);
+  a.context.closePanes(); assert.equal(a.polls().length,0);
+});
+test('discussion stream events control polling even when a chat opened without a discussion', async () => {
+  const a=conversationApp(), stream=a.stream();
+  const polling=()=>a.timers.has(vm.runInContext('discussionPollTimer',a.context));
+  assert.equal(polling(),false);
+  stream.onmessage({data:JSON.stringify({type:'discussion',...discussionView('running')})});
+  assert.equal(polling(),true);
+  stream.onmessage({data:JSON.stringify({type:'discussion',...discussionView('done')})});
+  assert.equal(polling(),false);
+  assert.equal(a.element('#discussion-progress').hidden,true); assert.equal(a.element('#discussion-progress').innerHTML,'');
+});
+test('discussion start ignores a read that began before submission even when events are unavailable', async () => {
+  const a=discussionUI(); await a.flush();
+  let finishRead, finishStart;
+  a.context.api=(route)=>new Promise(resolve=>{if(route==='/api/discussion/start')finishStart=resolve;else finishRead=resolve;});
+  const update=a.bind();
+  const starting=a.panel.handlers.click({target:{id:'discussion-start'}});
+  finishRead(discussionView()); await a.flush(); finishStart(discussionView('waiting')); await starting;
+  assert.equal(a.polls().length,1); assert.match(a.element('#discussion-progress').innerHTML,/待ち/);
+  update(discussionView('done')); assert.equal(a.polls().length,0);
+});
+
+for (const locale of ['ja','zh-TW']) test('Agy real model choices remain selectable after default removal, keep missing selection and escape metadata: '+locale, () => {
+  const a=app(), data=snapshot(), model={id:'gemini-current',label:'Current Gemini <img src=x>'};
+  data.agyAvailable=true; data.agyModels=[model];data.agyModelsState='ready';data.roles.models.agy=[model.label,'Gemini 3.1 Pro (High)'];data.cliFlags.agy={[model.label]:model.id};data.efforts=['高'];
+  const p=data.projects[0],t=p.tasks[0];t.owner='agy';t.model='Gemini 3.1 Pro (High)';
+  a.context.UI=require('./ui-locale-fixture')(locale);vm.runInContext('state='+JSON.stringify(data),a.context);
+  const html=a.context.chatHtml(p,t), spec=a.context.specSelect(p,t,'agy',false), list=a.context.agyModelsHtml();
+  assert.match(html,/value="agy\|Gemini 3.1 Pro \(High\)"[^>]*selected disabled/);
+  const option=html.match(/<option[^>]*value="agy\|Current Gemini[^>]*>[^<]*<\/option>/)[0];
+  assert.doesNotMatch(option,/disabled|selected|gemini-current/);assert.match(option,/&lt;img/);
+  assert.match(spec,/data-ai="agy"/);assert.match(spec,/value="Current Gemini/);assert.match(list,/<code>gemini-current<\/code>/);assert.doesNotMatch(list,/<img/);
+  t.model='';assert.equal(a.context.chatPick(p,t).model,'');assert.match(a.context.chatHtml(p,t),/value="agy\|"[^>]*selected disabled/);
+  assert.equal(a.context.modelRequest('agy',model.label),model.id);
+  const readyKey=a.context.mainKey();vm.runInContext('state.agyModelsState="failed";state.agyAvailable=false',a.context);
+  assert.notEqual(a.context.mainKey(),readyKey);
+  const roles=JSON.stringify(data.roles.roles);a.context.adoptAgyCatalog({agyCatalog:{models:[],state:'empty',available:false}});assert.equal(JSON.stringify(data.roles.roles),roles);
+});
+
+test('Agy labels keep every thinking tier and route while omitting only duplicate IDs',()=>{
+  const a=app(),s=snapshot(),models=[
+    ['gemini-3.8-flash-high','Gemini 3.8 Flash (High)'],['gemini-3.8-flash-medium','Gemini 3.8 Flash (Medium)'],['gemini-3.8-flash-low','Gemini 3.8 Flash (Low)'],
+    ['claude-sonnet-4-6','Claude Sonnet 4.6 (Thinking)'],['claude-opus-4-6-thinking','Claude Opus 4.6 (Thinking)'],['gpt-oss-120b-medium','GPT-OSS 120B (Medium)'],
+  ].map(([id,label])=>({id,label}));
+  s.agyAvailable=true;s.agyModels=models;s.roles.models.agy=models.map(r=>r.label);s.cliFlags.agy=Object.fromEntries(models.map(r=>[r.label,r.id]));
+  vm.runInContext('state='+JSON.stringify(s),a.context);
+  const before=vm.runInContext('JSON.stringify([state.roles,state.cliFlags,state.agyModels])',a.context);
+  for(const row of models){
+    assert.equal(a.context.shortModelLabel('agy',row.label),row.label);
+    assert.equal(a.context.modelOptionLabel('agy',row.id),row.label);
+    assert.equal(a.context.modelRequest('agy',row.label),row.id);
+    const html=a.context.chatModelOption('agy',row.label,'Agy CLI・'+row.label);
+    assert.ok(html.endsWith('>Agy CLI・'+row.label+'</option>'));
+    assert.ok(html.includes('value="agy|'+row.label+'"'));assert.ok(!html.includes(row.id));
+    assert.ok(a.context.roleModelOptions('agy',row.label).includes('value="'+row.label+'" selected'));
+  }
+  assert.equal(a.context.shortModelLabel('agy','saved-unknown'), 'saved-unknown');
+  assert.equal(a.context.modelRequest('agy','saved-unknown'), 'saved-unknown');
+  assert.equal(a.context.modelOptionLabel('claude','Opus 5.5'),'Opus 5.5');
+  assert.equal(vm.runInContext('JSON.stringify([state.roles,state.cliFlags,state.agyModels])',a.context),before);
+});
+
+test('Agy composer sends the selected observed ID and blocks an unselected placeholder',async()=>{
+  const a=historyUI(), model={id:'gemini-current',label:'Current Gemini'}, calls=[];
+  vm.runInContext('state.agyAvailable=true;state.agyModels='+JSON.stringify([model])+';state.roles.models.agy=["Current Gemini"]',a.context);
+  a.context.api=async(route,body)=>{calls.push({route,body});return {ok:true,model:model.label};};
+  a.type('manual request');a.element('#chat-ai').value='agy|';a.element('#chat-ai').selectedOptions=[{disabled:true}];
+  await a.element('#composer').handlers.submit({preventDefault(){}});assert.equal(calls.length,0);
+  a.element('#chat-ai').value='agy|Current Gemini';a.element('#chat-ai').selectedOptions=[{disabled:false}];
+  await a.element('#composer').handlers.submit({preventDefault(){}});
+  assert.equal(calls[0].route,'/api/chat/send');assert.equal(calls[0].body.model,model.id);
+});
+
+test('Agy model refresh sends the protected read header and updates only the observed catalogue', async () => {
+  const a=app(),s=snapshot(),row={id:'gemini-current',label:'Current Gemini'};
+  vm.runInContext('state='+JSON.stringify(s),a.context);
+  a.context.drawAccountSettings=()=>{};a.context.refreshAiToolCatalog=async()=>{};a.context.toast=()=>{};
+  let calls=0;
+  a.context.fetch=async(path,options)=>{
+    calls++;assert.equal(path,'/api/accounts?status=1&ai=agy');assert.equal(options.headers['X-Hub'],'1');
+    return {ok:true,status:200,json:async()=>({accounts:[{ai:'agy',id:'default',status:'logged-in'}],agyCatalog:{models:[row],state:'ready',available:true}})};
+  };
+  const button={disabled:false};
+  const listener=a.documentListeners.find(x=>x.name==='click'&&x.cb.toString().includes('[data-agy-model-refresh]'));
+  await listener.cb({target:{closest:()=>button}});
+  assert.equal(calls,1);assert.equal(a.context.modelRequest('agy',row.label),row.id);
+  assert.equal(vm.runInContext('state.agyModelsState',a.context),'ready');
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(state.roles.roles)',a.context)),s.roles.roles);
+});
+
+for (const locale of ['ja', 'zh-TW']) test('Skills settings distinguish detected files from recorded usage and escape file metadata: ' + locale, async () => {
+  const a = app(); a.context.UI = require('./ui-locale-fixture')(locale);
+  const malicious = '<script>alert(1)</script>';
+  const result = { ais: { claude: { found: true, items: [{ name: malicious, description: '<img src=x onerror=bad()>', source: 'user' }] },
+    codex: { found: true, items: [{ name: 'imagegen', description: '', source: 'system' }], limited: true },
+    agy: { found: false, items: [] }, grok: { found: false, items: [] } } };
+  vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings",project:"p"}', a.context);
+  a.context.fixtureSkills = result;
+  vm.runInContext('skillsResult=fixtureSkills', a.context);
+  a.context.api = async route => route.startsWith('/api/skills') ? result : new Promise(() => {});
+  a.context.renderSettings();
+  await new Promise(resolve => setImmediate(resolve)); // VMとホスト間の初回読み込みを終えてから再確認する。
+  const html = a.element('#main').innerHTML;
+  assert.match(html, /data-tab="ai"><h2>(スキル|技能)<\/h2>/);
+  const card = html.slice(html.indexOf('<h2>' + (locale === 'ja' ? 'スキル' : '技能') + '</h2>'), html.indexOf('id="skills-check"'));
+  assert.match(card, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(card, /&lt;img src=x onerror=bad\(\)&gt;/);
+  assert.doesNotMatch(card, /<script>|<img/);
+  assert.match(card, locale === 'ja' ? /付属/ : /隨附/);
+  assert.match(card, locale === 'ja' ? /使えないとは限りません/ : /不代表無法使用/);
+  assert.match(card, locale === 'ja' ? /追加アカウント/ : /額外帳號/);
+  assert.match(card, locale === 'ja' ? /使ったスキル/ : /使用過的技能/);
+  assert.match(card, locale === 'ja' ? /一部のスキルは表示していません/ : /部分技能未列出/);
+  const calls = [];
+  a.context.api = async route => { calls.push(route); return result; };
+  await a.context.loadSkills(true);
+  assert.equal(calls.at(-1), '/api/skills?fresh=1');
+  assert.equal(a.element('#skills-check').disabled, false);
+  a.context.api = async () => { throw Error('<b>failure</b>'); };
+  await a.context.loadSkills(true);
+  assert.match(a.element('#skills-box').innerHTML, /&lt;b&gt;failure&lt;\/b&gt;/);
+  assert.doesNotMatch(a.element('#skills-box').innerHTML, /<b>failure/);
+});
+
+test('Skills loading preserves open AI sections, rejects duplicate requests and ignores a response after leaving settings', async () => {
+  const a = app(); vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view={kind:"settings"}', a.context);
+  const details = [{ open: true, dataset: { skillsAi: 'codex' } }, { open: false, dataset: { skillsAi: 'claude' } }];
+  a.element('#skills-box').querySelectorAll = () => details;
+  let resolve, calls = 0; a.context.api = () => { calls++; return new Promise(done => { resolve = done; }); };
+  const pending = a.context.loadSkills();
+  await a.context.loadSkills(); assert.equal(calls, 1); assert.equal(a.element('#skills-check').disabled, true);
+  resolve({ ais: Object.fromEntries(['claude', 'codex', 'agy', 'grok'].map(ai => [ai, { found: false, items: [] }])) });
+  await pending; assert.equal(details[0].open, true); assert.equal(details[1].open, false);
+  const before = a.element('#skills-box').innerHTML, next = a.context.loadSkills(true);
+  vm.runInContext('view.kind="project"', a.context); resolve({ ais: {} }); await next;
+  assert.equal(a.element('#skills-box').innerHTML, before);
+});
+
+function webchatSettingsApp(values = {}) {
+  const a = app();
+  a.context.fixture = { ...snapshot(), webchat: { enabled: false, location: '', model: '', thinking: '', busy: false, ...values } };
+  vm.runInContext('state=fixture', a.context);
+  const notice = a.element('#webchat-settings-notice'), status = a.element('#webchat-login-status');
+  const controls = ['login', 'logout'].map(action => ({ dataset: { webchat: action }, disabled: false }));
+  const fields = ['enabled', 'location', 'model', 'thinking'].map(key => a.element('#webchat-' + key));
+  Object.assign(fields[0], { checked: values.enabled ?? false });
+  fields.slice(1).forEach((field, i) => { field.value = values[['location', 'model', 'thinking'][i]] || ''; });
+  const box = a.element('#webchat-box');
+  box.querySelector = s => s === '#webchat-settings-notice' ? notice : s === '#webchat-login-status' ? status : null;
+  box.querySelectorAll = () => [...fields, ...controls];
+  const click = a.documentListeners.find(x => x.cb.toString().includes("closest?.('[data-webchat]')")).cb;
+  const messages = []; a.context.toast = text => messages.push(text);
+  return { ...a, fields, controls, box, notice, status, messages, click: action => click({ target: { closest: () => controls.find(b => b.dataset.webchat === action) } }) };
+}
+function webchatSettingsUpdates(a) {
+  for (const name of ['syncChatPhoneLabels', 'syncAccountPickers', 'showVersion', 'updateTurnCounts', 'renderTree', 'drawPhoneLabels', 'drawModelOrder', 'syncRoleModelOrder', 'drawInitialPick']) a.context[name] = () => {};
+  a.context.window.HubMobile = { badges() {} };
+  vm.runInContext('view={kind:"settings"}; renderedTreeKey=treeKey();', a.context);
+  return busy => ({ ...snapshot(), webchat: { enabled: true, location: '/installed/folder', model: 'Pro', thinking: 'Extended', check: { loggedIn: true }, busy } });
+}
+test('Chat settings have one auth button, collapsed editable details and no repetitive instructions', () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended' });
+  for (const loggedIn of [true, false, 'unknown', undefined]) {
+    a.context.fixtureCheck = loggedIn === undefined ? null : { loggedIn, modelsError: 'webchat_remote_model_menu_unavailable' };
+    vm.runInContext('state.webchat.check=fixtureCheck', a.context);
+    const html = vm.runInContext('webchatSettingsHtml(state.webchat)', a.context);
+    assert.equal([...html.matchAll(/<button\b/g)].length, 1);
+    assert.match(html, new RegExp('data-webchat="' + (loggedIn === true ? 'logout' : 'login') + '"'));
+    assert.match(html, /id="webchat-details" data-ai-fold="webchat" ><summary>設定/);
+    assert.doesNotMatch(html, /data-webchat="(?:save|status|models)"|最初は無効|一覧は未取得|選んで保存|ログインを確認しました/);
+    assert.doesNotMatch(html, /モデル一覧を取得できません/);
+    assert.match(html, /value="Existing" selected/); assert.match(html, /value="Extended" selected/);
+    assert.match(html, /id="webchat-settings-notice"[^>]*hidden/);
+  }
+});
+test('idle polling updates the one auth action and status without rebuilding unsaved detail fields', async () => {
+  const a = webchatSettingsApp({ location: '/installed', model: 'Existing' }), next = webchatSettingsUpdates(a);
+  const auth = { dataset: { webchat: 'login' }, disabled: false, textContent: 'ログイン' };
+  a.box.querySelector = s => s === '[data-webchat]' ? auth : s === '#webchat-login-status' ? a.status : s === '#webchat-settings-notice' ? a.notice : null;
+  a.fields[1].value = '/typing'; a.box.innerHTML = 'retained form';
+  a.context.fetchState = async () => next(false); await a.context.pollState();
+  assert.equal(auth.dataset.webchat, 'logout'); assert.equal(auth.textContent, 'ログアウト'); assert.equal(a.status.textContent, 'ログイン済み');
+  assert.equal(a.fields[1].value, '/typing'); assert.equal(a.box.innerHTML, 'retained form');
+  a.context.fetchState = async () => ({ ...next(false), webchat: { ...next(false).webchat, check: { loggedIn: 'unknown' } } }); await a.context.pollState();
+  assert.equal(auth.dataset.webchat, 'login'); assert.equal(a.status.textContent, 'ログイン状態を判定できません');
+});
+test('login validates the real path and performs one combined save/auth request without model discovery', async () => {
+  const invalid = webchatSettingsApp({ enabled: true }); invalid.context.api = () => assert.fail('missing path must not call backend');
+  await invalid.click('login'); assert.match(invalid.notice.textContent, /場所が空欄/);
+  const a = webchatSettingsApp({ location: '/installed', model: 'Existing', thinking: 'Extended' });
+  const calls = []; a.context.api = async (url, body) => { calls.push({ url, body }); return { ...body, enabled: true, busy: false, check: { loggedIn: true } }; };
+  await a.click('login');
+  assert.deepEqual(calls.map(c => c.url), ['/api/webchat/login']);
+  assert.equal(calls[0].body.model, 'Existing'); assert.equal(calls[0].body.thinking, 'Extended');
+  assert.match(a.box.innerHTML, /data-webchat="logout"/); assert.match(a.box.innerHTML, /id="webchat-enabled" checked/);
+  assert.equal(a.notice.textContent, ''); assert.equal(vm.runInContext('webchatReady()', a.context), true);
+  assert.equal(a.messages.length, 0);
+});
+test('autosave serializes rapid edits and keeps the newest draft across a redraw and stale polling', async () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended' });
+  const next = webchatSettingsUpdates(a), calls = []; let resolve;
+  a.context.api = (url, body) => { calls.push({ url, body }); return new Promise(r => { resolve = r; }); };
+  let finishPoll; a.context.fetchState = () => new Promise(r => { finishPoll = r; }); const stale = a.context.pollState();
+  a.fields[1].value = '/first'; const first = a.context.saveWebchatSettings(); await new Promise(r => setImmediate(r));
+  a.fields[1].value = '/second'; const second = a.context.saveWebchatSettings();
+  assert.equal(calls.length, 1); assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/second"/);
+  resolve({ ...calls[0].body, busy: false }); await first; await new Promise(r => setImmediate(r));
+  assert.equal(calls.length, 2); assert.equal(calls[1].body.location, '/second');
+  resolve({ ...calls[1].body, busy: false }); await second;
+  finishPoll(next(true)); await stale;
+  assert.equal(vm.runInContext('state.webchat.location', a.context), '/second');
+  assert.equal(vm.runInContext('webchatSettingsDraft', a.context), null); assert.equal(a.notice.textContent, '');
+  assert.equal(a.fields[2].value, 'Existing'); assert.equal(a.fields[3].value, 'Extended');
+});
+test('failed autosave retains unsaved fields and displays failure rather than a success message', async () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed' }); let calls = 0;
+  a.fields[1].value = '/corrected'; a.context.api = async () => { calls++; throw Error('webchat_busy'); };
+  await a.context.saveWebchatSettings(); assert.equal(calls, 1);
+  assert.match(a.notice.textContent, /保存できませんでした/); assert.equal(a.notice.hidden, false);
+  assert.equal(vm.runInContext('state.webchat.location', a.context), '/installed');
+  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/corrected"/);
+  a.fields[1].value = '/valid'; a.context.api = async (url, body) => ({ ...body, busy: false });
+  await a.context.saveWebchatSettings(); assert.equal(a.notice.textContent, '');
+  assert.equal(vm.runInContext('state.webchat.location', a.context), '/valid');
+});
+test('typing before blur survives panel replacement and an older save cannot erase the draft', async () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing' });
+  const input = a.documentListeners.find(x => x.name === 'input' && x.cb.toString().includes('webchat-location')).cb;
+  let resolve; a.context.api = (url, body) => new Promise(r => { resolve = () => r({ ...body, busy: false }); });
+  const saving = a.context.saveWebchatSettings(); await new Promise(r => setImmediate(r));
+  a.fields[1].value = '/still-typing'; input({ target: { id: 'webchat-location' } });
+  resolve(); await saving;
+  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/still-typing"/);
+  assert.equal(vm.runInContext('state.webchat.location', a.context), '/installed');
+  assert.equal(a.notice.textContent, '未保存');
+});
+test('auth waits for queued autosave, blocks duplicate clicks and ignores poll snapshots until completion', async () => {
+  const a = webchatSettingsApp({ location: '/installed', model: 'Existing' }), next = webchatSettingsUpdates(a);
+  const calls = []; let saveResolve, authResolve;
+  a.context.api = (url, body) => { calls.push({ url, body }); return new Promise(r => { if (url === '/api/webchat') saveResolve = r; else authResolve = r; }); };
+  a.fields[1].value = '/edited'; const saving = a.context.saveWebchatSettings(); await new Promise(r => setImmediate(r));
+  const auth = a.context.operateWebchatSettings('login'); await a.context.operateWebchatSettings('login');
+  assert.ok(a.fields.every(c => c.disabled)); assert.equal(calls.length, 1);
+  a.context.fetchState = async () => next(true); await a.context.pollState();
+  assert.equal(vm.runInContext('state.webchat.location', a.context), '/installed');
+  saveResolve({ ...calls[0].body, busy: false }); await saving; await new Promise(r => setImmediate(r));
+  assert.equal(calls.length, 2); assert.equal(calls[1].url, '/api/webchat/login'); assert.equal(calls[1].body.location, '/edited');
+  authResolve({ ...calls[1].body, enabled: true, busy: false, check: { loggedIn: true } }); await auth;
+  assert.ok(a.fields.every(c => !c.disabled)); assert.match(a.box.innerHTML, /data-webchat="logout"/);
+});
+test('logout confirms once, uses the saved profile and does not clear model/thinking', async () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended', check: { loggedIn: true } });
+  let confirms = 0; a.context.confirm = () => { confirms++; return true; };
+  a.fields[1].value = '/unsaved'; const calls = [];
+  a.context.api = async (url, body) => { calls.push({ url, body }); return { ...a.context.fixture.webchat, enabled: false, check: { loggedIn: false } }; };
+  await a.click('logout'); assert.equal(confirms, 1);
+  assert.deepEqual(calls.map(c => c.url), ['/api/webchat/logout']); assert.equal(calls[0].body.confirm, true);
+  assert.equal(Object.hasOwn(calls[0].body, 'location'), false);
+  assert.match(a.box.innerHTML, /未ログイン/); assert.match(a.box.innerHTML, /data-webchat="login"/);
+  assert.match(a.box.innerHTML, /value="Existing" selected/); assert.equal(vm.runInContext('webchatReady()', a.context), false);
+  a.context.confirm = () => false; a.context.api = () => assert.fail('cancel must not authenticate'); await a.click('logout');
+});
+test('auth errors refresh the recorded state once without repeating auth or losing the draft', async () => {
+  const a = webchatSettingsApp({ location: '/installed', model: 'Existing' });
+  a.fields[1].value = '/edited'; const calls = [];
+  a.context.api = async url => { calls.push(url); if (url.endsWith('/login')) throw Error('webchat_not_installed'); return { enabled: false, location: '/edited', model: 'Existing', thinking: '', check: { loggedIn: 'unknown', statusError: 'webchat_not_installed' } }; };
+  await a.click('login');
+  assert.deepEqual(calls, ['/api/webchat/login', '/api/webchat']); assert.match(a.notice.textContent, /実行ファイルがありません/);
+  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/edited"/);
+  assert.equal(vm.runInContext('state.webchat.enabled', a.context), false); assert.ok(a.fields.every(c => !c.disabled));
+});
+test('unknown, human verification and execution are precise and never render login success', async () => {
+  const a = webchatSettingsApp({ location: '/installed' });
+  for (const check of [{ loggedIn: 'unknown' }, { loggedIn: 'unknown', statusError: 'webchat_remote_challenge_required' }]) {
+    a.context.api = async () => ({ enabled: false, location: '/installed', busy: false, model: '', thinking: '', check });
+    await a.click('login'); assert.doesNotMatch(a.box.innerHTML, /ログイン済み|data-webchat="logout"/);
+    assert.equal(a.status.textContent, 'ログイン状態を判定できません');
+    if (check.statusError) assert.match(a.notice.textContent, /人間確認/);
+  }
+  vm.runInContext('state.webchat.busy=true', a.context);
+  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /実行中/);
+  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /data-webchat="login" disabled/);
+});
+test('initial settings display reads existing login once, never saves or lists models, and later loads do not repeat a failed check', async () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed' }); const calls = [];
+  let r = { ...a.context.fixture.webchat, check: null };
+  a.context.api = async url => { calls.push(url); if (url.endsWith('/status')) r = { ...r, check: { loggedIn: 'unknown', statusError: 'webchat_remote_challenge_required' } }; return r; };
+  await a.context.loadWebchat(); assert.deepEqual(calls, ['/api/webchat', '/api/webchat/status']);
+  await a.context.loadWebchat(); assert.deepEqual(calls, ['/api/webchat', '/api/webchat/status', '/api/webchat']);
+  assert.match(a.notice.textContent, /人間確認/);
+});
+test('optional model discovery happens only on model/thinking focus, once per saved location, and keeps explicit values', async () => {
+  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended', check: { loggedIn: true } });
+  const focus = a.documentListeners.find(x => x.name === 'focusin' && x.cb.toString().includes('webchat-model')).cb;
+  const calls = []; a.context.api = async url => { calls.push(url); return { ...a.context.fixture.webchat, check: { loggedIn: true, modelsChecked: true, models: [{ label: 'Other' }], thinking: [], modelsError: 'webchat_remote_model_menu_unavailable' } }; };
+  await focus({ target: { id: 'webchat-location' } }); assert.equal(calls.length, 0);
+  await focus({ target: { id: 'webchat-model' } }); await focus({ target: { id: 'webchat-thinking' } });
+  assert.deepEqual(calls, ['/api/webchat/models']); assert.match(a.box.innerHTML, /value="Existing" selected/);
+  assert.match(a.notice.textContent, /モデル一覧を取得できません/);
+});
+
+test('webchat settings synchronize already adopted idle on a 304 poll without redrawing the form', async () => {
+  const a = webchatSettingsApp({ location: '/unsaved/folder' }); const next = webchatSettingsUpdates(a);
+  a.context.fixture = next(false); vm.runInContext('state=fixture;', a.context);
+  [...a.fields, ...a.controls].forEach(c => { c.disabled = true; });
+  a.context.fetchState = async () => null; await a.context.pollState();
+  assert.ok([...a.fields, ...a.controls].every(c => !c.disabled)); assert.equal(a.fields[1].value, '/unsaved/folder');
+});
+
+test('自動ChatをGPT子の既定にし、旧依頼とrequest別の処理済み表示を保持する', () => {
+  const a = app(); a.context.fixture = snapshot();
+  vm.runInContext('state=fixture; view={kind:"work",project:"p",task:"t"}; state.projects[0].tasks.push({id:"gpt",title:"GPT：Task",gptChild:true,parent:"t",owner:"chatgpt"});', a.context);
+  assert.equal(vm.runInContext('chatPick(state.projects[0],state.projects[0].tasks[1]).model', a.context), 'auto');
+  const controls = vm.runInContext('gptChildLink("p","gpt")', a.context);
+  assert.match(controls,/GPT子を開く/);assert.match(controls,/data-t="gpt"/);
+  assert.doesNotMatch(controls,/data-copy|合図|覚えさせる文/);
+  assert.match(vm.runInContext('msgHtml({role:"user",to:"gptchat",request:"r",text:"依頼"})', a.context), /data-gpt-request="r"/);
+  assert.match(vm.runInContext('msgHtml({role:"assistant",ai:"chatgpt-chat",request:"r",text:"返事"})', a.context), /data-gpt-report="r"/);
+  assert.match(vm.runInContext('msgHtml({role:"user",from:"gptchat-report",childTask:"gpt",text:"通知"})', a.context), /GPT子を開く/);
+  const heading = { textContent: '' }, requestRow = { dataset: { gptRequest: 'r' }, querySelector: () => heading };
+  const box = { querySelectorAll: selector => selector === '[data-gpt-request]' ? [requestRow] : [] };
+  a.context.refreshRequestStatus(box); assert.equal(heading.textContent, 'ChatGPT（Chat）への依頼（未処理）');
+  box.querySelectorAll = selector => selector === '[data-gpt-request]' ? [requestRow] : selector === '[data-gpt-report]' ? [{ dataset: { gptReport: 'r' } }] : [];
+  a.context.refreshRequestStatus(box); assert.equal(heading.textContent, 'ChatGPT（Chat）への依頼（処理済み）');
 });
 
 test('一覧の描き直し前に整理の所属を判定し、利用状況を閉じても実際の画面移動を続ける', () => {
@@ -431,10 +996,21 @@ test('Agy is manually selectable with High fixed, without changing the default C
   assert.doesNotMatch(html, /value="agy\|[^\"]+"[^>]*selected/);
   s.projects[0].tasks[0].owner = 'agy';
   const selected = a.context.chatHtml(s.projects[0], s.projects[0].tasks[0]);
-  assert.match(selected, /id="chat-effort"[^>]*disabled/);
+  assert.match(selected, /id="chat-effort"[^>]*hidden[^>]*disabled/);
   assert.equal(a.context.ownerOf('agy').ic, 'G');
   vm.runInContext('state.agyAvailable = false', a.context);
   assert.match(a.context.chatHtml(s.projects[0], s.projects[0].tasks[0]), /value="agy\|Gemini 3.1 Pro \(High\)"[^>]*disabled/);
+});
+
+test('メモ全文は開く時に取得し同じhashでは再取得せず、変更時は古い全文を表示しない', async () => {
+  const a=app(),p=project();Object.assign(p,{notesSummary:'先頭',notesBytes:176000,notesHash:'first'});
+  a.context.fixture=p;a.context.fixtureState=snapshot();vm.runInContext('state=fixtureState;state.projects=[fixture];view={kind:"project",project:"p"};renderOverview(fixture)',a.context);
+  assert.match(a.element('#main').innerHTML,/先頭/);
+  const text={textContent:''},detail=a.element('.project-notes');detail.dataset.p='p';detail.querySelector=()=>text;
+  let calls=0;a.context.api=async()=>{calls++;return {hash:p.notesHash,notes:'末尾まで全文\n<原文>'+p.notesHash};};
+  await a.context.loadProjectNotes('p');await a.context.loadProjectNotes('p');assert.equal(calls,1);assert.match(text.textContent,/末尾まで全文\n<原文>first/);
+  p.notesHash='second';p.notesSummary='新しい先頭';assert.equal(vm.runInContext('projectNotesText(fixture)',a.context),'新しい先頭');
+  await a.context.loadProjectNotes('p');assert.equal(calls,2);assert.match(text.textContent,/<原文>second/);
 });
 
 test('説明・メモは初期状態で閉じ、原文の改行とエスケープを保つ', () => {
@@ -600,38 +1176,40 @@ test('部分応答を連続受信しても作業中タイマーは1本、本文�
   assert.equal(partial.mb.innerHTML, 'answer 11');
   a.stream().onmessage({ data: JSON.stringify({ type:'partial', ai:'codex', text:'<script>bad</script>' }) });
   assert.equal(partial.mb.innerHTML, '&lt;script&gt;bad&lt;/script&gt;');
+  a.stream().onmessage({ data: JSON.stringify({ type:'partial', ai:'codex', text:'> 送信用の途中\n> 続き' }) });
+  assert.match(partial.mb.innerHTML,/書きかけ/); assert.doesNotMatch(partial.mb.innerHTML,/quote-copy/);
+  assert.match(a.context.msgHtml({role:'assistant',ai:'codex',text:'> 完了した本文'}),/quote-copy/);
   assert.equal([...a.timers.values()].filter(t => t.ms === 1000).length, 1);
   assert.equal(stateEl.writes, 1);
   a.context.closePanes();
   assert.equal([...a.timers.values()].filter(t => t.ms === 1000).length, 0);
 });
 
-test('AI更新カードに現在版・導入方法・2つの操作を表示する', () => {
+test('AI更新はログイン済みの一覧と一括ボタンにまとめる', () => {
   const a = app();
-  vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings",project:"p",task:null}; aiTools = { codex: {installed:true,version:"0.159.0",method:"standalone",models:[{id:"gpt-6.1-sol",label:"GPT-6.1-Sol"}]}, claude: {installed:true,version:"2.1.284",method:"homebrew-cask",updating:true,modelRefreshAvailable:false,models:[]} }; renderSettings()', a.context);
+  vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings",project:"p",task:null}; aiTools = { codex: {eligible:true,installed:true,version:"0.159.0",method:"standalone",modelsStatus:"changed",models:[{id:"gpt-6.1-sol",label:"GPT-6.1-Sol"}]}, claude: {eligible:false,installed:true,status:"logged-out",version:"2.1.284",models:[]} }; renderSettings()', a.context);
   assert.match(a.element('#main').innerHTML, /AI の更新/);
   const html = a.element('#ai-tools').innerHTML;
   assert.match(html, /Codex/);
   assert.match(html, /0\.159\.0/);
   assert.match(html, /単独インストール/);
-  assert.match(html, /2\.1\.284/);
-  assert.match(html, /Homebrew/);
-  assert.match(html, /更新を確認/);
-  assert.doesNotMatch(html, /data-ai-update/);
-  assert.match(html, /モデル一覧を再取得/);
+  assert.doesNotMatch(html, /2\.1\.284/);
+  assert.match(html, /未ログイン/);
+  assert.match(html, /data-ai-update-all/);
+  assert.match(html, /data-ai-check=/); assert.match(html,/data-ai-update=/); assert.doesNotMatch(html,/data-ai-model-refresh=/);
+  assert.match(html, /確認日/);
+  assert.match(html, /変更あり/);
   assert.match(html, /GPT-6\.1-Sol/);
-  assert.match(html, /gpt-6\.1-sol/);
-  assert.match(html, /更新中です/);
-  assert.match(html, /再取得にはまだ対応していません/);
 });
 
-test('稼働中は確認ボタンを使え、適用だけ理由付きで止める', () => {
+test('稼働中は一括更新を理由付きで止め、更新候補は残す', () => {
   const a = app(), s = snapshot(); s.chatting = [{project:'p',task:'t',ai:'codex'}];
-  vm.runInContext('state = '+JSON.stringify(s)+'; aiTools = {codex:{installed:true,updateCheck:{ok:true,available:true,applicable:true,latestVersion:"0.160.0",checkedAt:"2026-10-05T00:00:00Z"}}}; drawAiTools()',a.context);
+  vm.runInContext('state = '+JSON.stringify(s)+'; aiTools = {codex:{eligible:true,installed:true,version:"0.159.0",busyCount:1,updateCheck:{ok:true,available:true,applicable:true,latestVersion:"0.160.0",checkedAt:"2026-10-05T00:00:00Z"}}}; drawAiTools()',a.context);
   const html = a.element('#ai-tools').innerHTML;
-  assert.match(html,/data-ai-check="codex" >更新を確認/);
-  assert.match(html,/data-ai-update="codex" disabled/);
-  assert.match(html,/適用は動いている AI 1 件/);
+  assert.doesNotMatch(html,/data-ai-update-all disabled/); assert.match(html,/data-ai-update="codex" disabled/);
+  assert.match(html,/稼働中のCLIは飛ばし/);
+  assert.match(html,/→ 0\.160\.0/);
+  assert.match(html,/data-ai-check="codex" >/);
 });
 
 test('CLI 更新だけ成功した時はモデル一覧の失敗理由を残す', () => {
@@ -644,7 +1222,7 @@ test('CLI 更新だけ成功した時はモデル一覧の失敗理由を残す'
   assert.match(a.context.aiToolResultText('models', { ok: true, added: 1, source: 'claude-cache', unchanged: false }), /再取得しました（追加 1 件）/);
 });
 
-test('別画面で始まった更新の終了を確認し、モデルを読み直して監視を止める', async () => {
+test('別画面の更新終了でモデルを読み直し、日次結果の保持状態は60秒ごとに読む', async () => {
   const a = app();
   const fresh = snapshot(); fresh.roles.models.codex = ['GPT-6.1-Sol'];
   let checks = 0, stateReads = 0;
@@ -665,6 +1243,10 @@ test('別画面で始まった更新の終了を確認し、モデルを読み�
   assert.equal(stateReads, 1);
   assert.equal(vm.runInContext('state.roles.models.codex.includes("GPT-6.1-Sol")', a.context), true);
   assert.equal([...a.timeouts.values()].filter(t => t.ms === 3000).length, 0);
+  const [idleId, idle] = [...a.timeouts.entries()].find(([, t]) => t.ms === 60000) || [];
+  assert.ok(idle); a.timeouts.delete(idleId); idle.cb();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(checks, 3); assert.equal(stateReads, 1);
 });
 
 test('AI更新後は新しいモデルを取り込み、保存前の役割編集を維持する', async () => {
@@ -696,7 +1278,7 @@ test('設定にAIアカウントとCodex加速の操作・注意を同時に表�
   vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings",project:"p"}', a.context);
   a.context.renderSettings();
   const html = a.element('#main').innerHTML;
-  assert.match(html, /<h2>AIアカウント<\/h2><div id="ai-accounts"/);
+  assert.match(html, /<h2>AIの利用設定<\/h2><div id="ai-accounts"/);
   assert.match(html, /<h2>Codex の加速（Fast）<\/h2>/);
   assert.match(html, /class="danger"><strong>速度約1\.5倍・利用枠の消耗2\.5倍/);
   assert.match(a.element('#ai-accounts').innerHTML, /data-account-action="add"/);
@@ -910,7 +1492,7 @@ test('利用できなくなった既存モデルを明示し、新しい候補�
   const chat = a.context.chatHtml(p, t);
   assert.match(work, /旧モデル（現在の指定・利用不可）/);
   assert.match(work, /GPT-6\.1-Sol/);
-  assert.match(chat, /旧モデル（利用できません。選び直してください）/);
+  assert.match(chat, /旧モデル（利用不可。選び直してください）/);
   assert.match(chat, /GPT-6\.1-Sol/);
 });
 
@@ -949,6 +1531,8 @@ test('除外中は取り込みと予告を隠し、戻す操作と保管中表�
   const included = render(false);
   assert.match(included, /data-act="merge"/);
   assert.match(included, /取り込み対象から外す/);
+  assert.match(included, /data-act="merge"[^>]*hidden disabled/);
+  assert.match(included, /data-act="mergeexclude"[^>]*hidden/);
   assert.equal(previews, 1);
   const excluded = render(true);
   assert.doesNotMatch(excluded, /data-act="merge"|data-act="mergeexclude"/);
@@ -957,6 +1541,236 @@ test('除外中は取り込みと予告を隠し、戻す操作と保管中表�
   assert.equal(previews, 1);
   render(false);
   assert.equal(previews, 2);
+});
+
+test('差分取得は正式な取り込み案内を消さず、ボタンと案内の所有者へ一度渡す', async () => {
+  const a=app();vm.runInContext('view={kind:"work",project:"p",task:"t"}',a.context);
+  const merge=a.element('[data-act="merge"]'),exclude=a.element('[data-act="mergeexclude"]');
+  a.element('[data-main-preview]').remove=()=>assert.fail('must not remove formal scope');
+  merge.insertAdjacentHTML=()=>assert.fail('must not insert compact badge');
+  let count=0; a.context.prepareOneclickMain=async(p,t,b)=>{assert.equal(p,'p');assert.equal(t,'t');assert.equal(b,merge);count++;};
+  for(const files of [0,3,0]){a.context.api=async()=>({files});await a.context.loadPreview('p','t');assert.equal(exclude.hidden,files===0);}
+  assert.equal(count,3);assert.equal(merge.hidden,false);assert.equal(merge.disabled,false);
+});
+
+test('別の作業へ移動した後の差分結果と取得失敗は取り込み・除外の表示を変えない', async () => {
+  const a = app();
+  vm.runInContext('view = {kind:"work",project:"p",task:"t"}', a.context);
+  const merge = a.element('[data-act="merge"]'), exclude = a.element('[data-act="mergeexclude"]');
+  let resolve;
+  a.context.api = () => new Promise(done => { resolve = done; });
+  const pending = a.context.loadPreview('p', 't');
+  vm.runInContext('view.task = "other"', a.context);
+  resolve({ noChanges: true, files: 0 }); await pending;
+  assert.equal(merge.hidden, false); assert.equal(exclude.hidden, false);
+  vm.runInContext('view.task = "t"', a.context);
+  a.context.api = async () => { throw new Error('取得失敗'); };
+  await a.context.loadPreview('p', 't');
+  assert.equal(merge.hidden, false); assert.equal(exclude.hidden, false);
+});
+
+test('同じ作業の古い差分応答は、新しい変更なし判定を上書きしない', async () => {
+  const a = app();
+  vm.runInContext('view = {kind:"work",project:"p",task:"t"}', a.context);
+  const merge = a.element('[data-act="merge"]'), exclude = a.element('[data-act="mergeexclude"]');
+  a.element('[data-main-preview]').remove = () => {};
+  let resolve;
+  a.context.api = () => new Promise(done => { resolve = done; });
+  const pending = a.context.loadPreview('p', 't');
+  a.context.api = async () => ({ files: 0, noChanges: false, mainDirty: true });
+  await a.context.loadPreview('p', 't');
+  resolve({ files: 3, added: 4, removed: 0 }); await pending;
+  assert.equal(merge.hidden, false); assert.equal(exclude.hidden, true);
+});
+
+test('同じ作業を再描画した後には、古いDOMへの応答を適用しない', async () => {
+  const a = app();
+  vm.runInContext('view = {kind:"work",project:"p",task:"t"}', a.context);
+  const old = a.element('[data-act="merge"]');
+  let resolve;
+  a.context.api = () => new Promise(done => { resolve = done; });
+  const pending = a.context.loadPreview('p', 't');
+  a.elements.delete('[data-act="merge"]');
+  const current = a.element('[data-act="merge"]'); current.hidden = true;
+  resolve({ files: 3, added: 4, removed: 0 }); await pending;
+  assert.equal(current.hidden, true); assert.equal(old.disabled, false);
+});
+
+test('画面を作り直さない定期取得でも取り込み表示の変更量を更新する', async () => {
+  const a = app(), s = snapshot(); s.projects[0].tasks[0].copy = true;
+  vm.runInContext('state = '+JSON.stringify(s)+'; view = {kind:"work",project:"p",task:"t"}', a.context);
+  a.context.render();
+  let previews = 0, renders = 0;
+  a.context.loadPreview = (p,t) => { assert.equal(p,'p'); assert.equal(t,'t'); previews++; };
+  a.context.render = () => { renders++; };
+  vm.runInContext('fetchState = async () => null', a.context);
+  await a.context.pollState();
+  assert.equal(renders, 0); assert.equal(previews, 1);
+});
+
+// 手作りのnoChanges応答だけでは安全判定と表示仕様の取り違えを見逃す。
+// 実Gitのpreviewをそのまま実装UIへ渡し、HTMLのhidden属性・予告の有無を観測する。
+function gitPreviewApp(t) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'hub-preview-ui-'));
+  t.after(() => git.toTrash(root, path.join(fs.realpathSync(os.tmpdir()), 'hub-preview-ui-trash')));
+  const main = path.join(root, 'main'), workRoot = path.join(root, 'Work');
+  fs.mkdirSync(main);
+  const sh = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_AUTHOR_NAME: 'Preview UI test', GIT_AUTHOR_EMAIL: 'preview@localhost', GIT_COMMITTER_NAME: 'Preview UI test', GIT_COMMITTER_EMAIL: 'preview@localhost' },
+  }).trim();
+  sh(main, 'init', '-q');
+  fs.writeFileSync(path.join(main, 'a.txt'), 'one\n');
+  sh(main, 'add', '-A'); sh(main, 'commit', '-qm', 'base');
+  const copy = git.prepare({ base: main, workRoot, taskId: 'copy' }).dir;
+  const preview = () => git.preview({ dir: copy, workRoot });
+  const a = app(), data = snapshot('完了'); data.projects[0].tasks[0].copy = true;
+  a.context.fixture = data;
+  vm.runInContext('state=fixture; view={kind:"work",project:"p",task:"t"}', a.context);
+
+  // 既存VMのDOMに、renderWorkが出した実際のbutton属性と予告の挿入/削除を接続する。
+  // hiddenの期待値はpreviewのnoChangesから算出しない。
+  let html = '';
+  const query = a.document.querySelector;
+  a.document.querySelector = selector => /^\[data-(?:act="merge(?:exclude)?"|main-preview)\]$/.test(selector)
+    ? a.elements.get(selector) || null : query(selector);
+  Object.defineProperty(a.element('#main'), 'innerHTML', {
+    get: () => html,
+    set(value) {
+      html = value; a.elements.delete('[data-main-preview]');
+      for (const action of ['merge', 'mergeexclude']) {
+        const selector = `[data-act="${action}"]`;
+        a.elements.delete(selector);
+        const tag = html.match(new RegExp(`<button\\b[^>]*data-act="${action}"[^>]*>`))?.[0];
+        if (!tag) continue;
+        const button = a.element(selector);
+        button.hidden = /\shidden(?=\s|>)/.test(tag);
+        button.disabled = /\sdisabled(?=\s|>)/.test(tag);
+        button.insertAdjacentHTML = (position, notice) => {
+          assert.fail('lightweight preview must not insert a badge');
+          a.elements.set('[data-main-preview]', { innerHTML: notice, remove() { a.elements.delete('[data-main-preview]'); } });
+        };
+      }
+    },
+  });
+  const requests = [];
+  a.context.api = route => {
+    assert.equal(route, '/api/task/preview?project=p&task=t');
+    const result = preview(); // API相当の結果は要求時の実Gitから取得し、値を書き換えない。
+    return new Promise(resolve => requests.push({ result, resolve }));
+  };
+  const loadPreview = a.context.loadPreview;
+  a.context.loadPreview = (pid, tid) => {
+    const pending = loadPreview(pid, tid);
+    requests.at(-1).pending = pending;
+    return pending;
+  };
+  const reply = async (request = requests.at(-1)) => { request.resolve(request.result); await request.pending; };
+  const controls = hidden => {
+    // This fixture loads app.js only. Formal controls belong to task-history.js.
+    assert.equal(a.element('[data-act="merge"]').hidden, true);
+    assert.equal(a.element('[data-act="merge"]').disabled, true);
+    assert.equal(a.element('[data-act="mergeexclude"]').hidden, hidden);
+    assert.equal(a.elements.has('[data-main-preview]'), false);
+  };
+  const render = () => a.context.renderWork();
+  const refresh = () => a.context.loadPreview('p', 't');
+  return { ...a, root, main, copy, workRoot, sh, preview, requests, reply, controls, render, refresh };
+}
+
+test('実Git preview→除外操作: 本体dirtyでも0件は初期・取得後とも非表示、差分復帰と再消去を追従する', async t => {
+  const a = gitPreviewApp(t);
+  fs.writeFileSync(path.join(a.main, 'a.txt'), 'main unsaved\n');
+  a.render(); a.controls(true);
+  assert.equal(a.requests[0].result.files, 0);
+  assert.equal(a.requests[0].result.mainDirty, true);
+  assert.equal(a.requests[0].result.noChanges, false);
+  await a.reply(); a.controls(true);
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'copy changed\n');
+  let pending = a.refresh();
+  assert.equal(a.requests.at(-1).result.files, 1);
+  await a.reply(); await pending; a.controls(false);
+  assert.equal(a.requests.at(-1).result.files,1);
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'one\n');
+  pending = a.refresh(); await a.reply(); await pending; a.controls(true);
+  const head = a.sh(a.main, 'rev-parse', 'HEAD');
+  const merge = git.merge({ dir: a.copy, workRoot: a.workRoot, sourceHead: a.preview().sourceHead, cleanup: false });
+  assert.equal(merge.ok, false); assert.match(merge.error, /成果を渡す前/);
+  assert.equal(a.sh(a.main, 'rev-parse', 'HEAD'), head);
+  assert.equal(fs.readFileSync(path.join(a.main, 'a.txt'), 'utf8'), 'main unsaved\n');
+});
+
+test('実Git preview→除外操作: 同じtreeの未受領・分岐履歴で安全noChanges=falseでも除外操作を隠す', async t => {
+  const a = gitPreviewApp(t);
+  a.sh(a.main, 'commit', '--allow-empty', '-qm', 'main history');
+  a.sh(a.copy, 'commit', '--allow-empty', '-qm', 'unreceived copy history');
+  const mainHead = a.sh(a.main, 'rev-parse', 'HEAD'), copyHead = a.sh(a.copy, 'rev-parse', 'HEAD');
+  assert.equal(a.sh(a.main, 'rev-parse', 'HEAD^{tree}'), a.sh(a.copy, 'rev-parse', 'HEAD^{tree}'));
+  assert.equal(git.isAncestor(a.copy, mainHead), false); assert.equal(git.isAncestor(a.main, copyHead), false);
+  a.render();
+  const result = a.requests[0].result;
+  assert.equal(result.files, 0); assert.equal(result.conflict, false); assert.equal(result.noChanges, false);
+  assert.equal(result.mainDirty, false); assert.equal(result.sourceDirty, false);
+  await a.reply(); a.controls(true);
+  assert.equal(a.sh(a.main, 'rev-parse', 'HEAD'), mainHead); assert.equal(a.sh(a.copy, 'rev-parse', 'HEAD'), copyHead);
+});
+
+test('実Git preview→除外操作: 保存済み競合は除外操作を表示し、取り込みは拒否する', async t => {
+  const a = gitPreviewApp(t);
+  for (const [dir, text] of [[a.main, 'main'], [a.copy, 'copy']]) {
+    fs.writeFileSync(path.join(dir, 'a.txt'), text + '\n');
+    a.sh(dir, 'add', '-A'); a.sh(dir, 'commit', '-qm', text);
+  }
+  a.render(); a.controls(true);
+  assert.equal(a.requests[0].result.files, 1); assert.equal(a.requests[0].result.conflict, true);
+  await a.reply(); a.controls(false);
+  assert.equal(a.elements.has('[data-main-preview]'),false); // no second renderer
+  const head = a.sh(a.main, 'rev-parse', 'HEAD');
+  const merge = git.merge({ dir: a.copy, workRoot: a.workRoot, cleanup: false });
+  assert.equal(merge.ok, false); assert.equal(merge.conflict, true);
+  assert.equal(a.sh(a.main, 'rev-parse', 'HEAD'), head); assert.equal(a.sh(a.main, 'status', '--porcelain'), '');
+});
+
+test('実Git preview→除外操作: 応答逆転は新しい0件・差分復帰の両方向を上書きしない', async t => {
+  const a = gitPreviewApp(t);
+  fs.writeFileSync(path.join(a.main, 'a.txt'), 'main unsaved\n');
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'copy changed\n');
+  a.render(); const oldChanges = a.requests.at(-1);
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'one\n');
+  let pending = a.refresh(); const newEmpty = a.requests.at(-1);
+  assert.equal(oldChanges.result.files, 1); assert.equal(newEmpty.result.files, 0); assert.equal(newEmpty.result.noChanges, false);
+  await a.reply(newEmpty); await pending; a.controls(true);
+  await a.reply(oldChanges); a.controls(true);
+  const oldPending = a.refresh(), oldEmpty = a.requests.at(-1);
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'copy changed again\n');
+  pending = a.refresh(); await a.reply(); await pending; a.controls(false);
+  const notice = a.elements.get('[data-main-preview]');
+  await a.reply(oldEmpty); await oldPending; a.controls(false);
+  assert.equal(a.elements.get('[data-main-preview]'), notice);
+});
+
+test('実Git preview→除外操作: 同じ作業の再描画で古いDOMの差分応答を無視する', async t => {
+  const a = gitPreviewApp(t);
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'copy changed\n');
+  a.render(); const old = a.requests.at(-1), oldButton = a.element('[data-act="merge"]');
+  fs.writeFileSync(path.join(a.main, 'a.txt'), 'main unsaved\n');
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'one\n');
+  a.render(); const current = a.element('[data-act="merge"]');
+  assert.notEqual(current, oldButton); assert.equal(old.result.files, 1); assert.equal(a.requests.at(-1).result.files, 0);
+  await a.reply(old); a.controls(true); assert.equal(oldButton.hidden, true);
+  await a.reply(); a.controls(true);
+});
+
+test('実Git preview→除外操作: 定期取得は再描画せず実Gitの差分復帰を表示する', async t => {
+  const a = gitPreviewApp(t);
+  a.context.render(); await a.reply(); a.controls(true);
+  const button = a.element('[data-act="merge"]');
+  fs.writeFileSync(path.join(a.copy, 'a.txt'), 'copy changed\n');
+  let renders = 0; a.context.render = () => { renders++; };
+  vm.runInContext('fetchState = async () => null', a.context);
+  await a.context.pollState();
+  assert.equal(renders, 0); assert.equal(a.requests.length, 2); assert.equal(a.requests.at(-1).result.files, 1);
+  await a.reply(); a.controls(false); assert.equal(a.element('[data-act="merge"]'), button);
 });
 
 test('除外確認のキャンセルは変更せず、確定と再登録は明示booleanを送る', async () => {
@@ -995,7 +1809,7 @@ test('保存のない始める欄はSol・高、前回選択とローカル下�
   assert.deepEqual(JSON.parse(JSON.stringify(fresh)), { text: '', images: [], ai: 'codex', model: 'GPT-6.1-Sol', effort: '高' });
   const html = a.context.quickControls({ id: 'fresh' });
   assert.match(html, /value="codex" selected/);
-  assert.match(html, /<option selected>GPT-6.1-Sol<\/option>/);
+  assert.match(html, /<option[^>]*selected>GPT-6.1-Sol<\/option>/);
   assert.match(html, /<option selected>高<\/option>/);
   const prior = a.context.quickDraft({ id: 'prior', startSpec: saved });
   assert.equal(prior.ai, 'claude'); assert.equal(prior.model, 'Fable 5.1'); assert.equal(prior.effort, '極高');
@@ -1069,7 +1883,129 @@ function conversationApp() {
   a.context.openChat(data.projects[0], data.projects[0].tasks[0]);
   return a;
 }
+function freetalkConversation() {
+  const a=conversationApp();
+  vm.runInContext('state.projects[0].id="freetalk";state.projects[0].kind="freetalk";state.projects[0].tasks[0].freetalkHistory={generation:1};view={kind:"work",project:"freetalk",task:"t"};openChat(proj("freetalk"),taskOf(proj("freetalk"),"t"));',a.context);
+  return a;
+}
+test('freetalkはスマホの選択・drop・ネイティブ貼付を話題uploadへ統一し、文書も選べる',async()=>{
+ const a=freetalkConversation(),calls=[];a.context.matchMedia=()=>({matches:true});
+ a.element('#chat-files').click=()=>{};a.element('#chat-attach').handlers.click();assert.match(a.element('#chat-files').accept,/\.pdf.*\.pptx.*\.key/);
+ a.context.fetch=async(url,options)=>{calls.push({url:String(url),options});return {ok:true,json:async()=>({id:'pdf',name:'doc.pdf',kind:'file',path:'/copies/doc.pdf',referencePaths:['/copies/doc.pdf','/copies/.derived/text.txt'],status:'partial',message:'一部のみ',generation:1})};};
+ await a.context.sendFiles([{name:'doc.pdf',type:'application/pdf'}],'');assert.match(calls[0].url,/\/api\/task\/upload\?project=freetalk&task=t&name=doc.pdf&generation=1/);
+ assert.match(a.element('#chat-images').innerHTML,/一部のみ/);const text=a.context.chatSendText('確認',a.context.chatImages('freetalk','t'));assert.match(text,/\.derived\/text.txt/);assert.match(text,/一部のみ/);
+ a.context.api=async(route,body)=>{assert.equal(route,'/api/task/attach');assert.equal(body.generation,1);assert.equal(body.project,'freetalk');return {attachments:[{id:'key',name:'deck.key',kind:'file',status:'unsupported',message:'PDFかPPTX',path:'/copies/deck.key',referencePaths:['/copies/deck.key'],generation:1}]};};
+ await a.context.window.hubNativePaste(['/original/deck.key']);assert.match(a.element('#chat-images').innerHTML,/本文を参照できません/);assert.match(a.context.chatSendText('',a.context.chatImages('freetalk','t')),/PDFかPPTX/);assert.doesNotMatch(a.context.chatSendText('',a.context.chatImages('freetalk','t')),/\/original/);
+});
+test('freetalk添付中はクリア・続行・削除・掃除が無効、古い世代の遅延応答は表示しない',async()=>{
+ const a=freetalkConversation(),buttons=['freetalkclear','freetalkcontinue','freetalkdelete','freetalkclean'].map(action=>({dataset:{act:action,t:'t'},disabled:false}));
+ a.context.api=async()=>({generation:2});
+ a.document.querySelectorAll=selector=>selector==='[data-act^="freetalk"]'?buttons:[];let finish;
+ a.context.fetch=()=>new Promise(resolve=>finish=resolve);const pending=a.context.addChatImage('freetalk','t',{name:'photo.png'});
+ assert.ok(buttons.every(b=>b.disabled));assert.equal(a.element('#chat-image-state').hidden,false);
+ vm.runInContext('globalThis.HubChatGenerations=new Map([["freetalk\\0t",2]])',a.context);
+ finish({ok:true,json:async()=>({id:'old',name:'photo.png',path:'/copies/photo.png',generation:1})});await pending;
+ assert.equal(a.context.chatImages('freetalk','t').length,0);assert.ok(buttons.every(b=>!b.disabled));assert.equal(a.element('#chat-image-state').hidden,true);
+});
+test('freetalk添付完了後に最新の確認revisionとbusy解除を画面へ取得する',async()=>{
+ const a=freetalkConversation(),routes=[];
+ a.context.api=async(route)=>{routes.push(route);return route==='/api/task/attach'?{attachments:[{id:'copy',name:'copy.txt',generation:1,kind:'file',path:'/copy/copy.txt'}]}:{generation:1,revision:'after-upload',reason:''};};
+ await a.context.addChatImage('freetalk','t','/original/copy.txt',true);assert.deepEqual(routes,['/api/task/attach','/api/freetalk/status?project=freetalk&task=t']);assert.equal(vm.runInContext('taskOf(proj("freetalk"),"t").freetalkHistory.revision',a.context),'after-upload');
+});
+test('freetalkの送信は抽出物と非対応注記、添付IDと世代を保持する',async()=>{
+ const a=freetalkConversation();let send,request;
+ a.context.chatImages('freetalk','t').push({id:'key',name:'deck.key',kind:'file',path:'/copy/deck.key',referencePaths:['/copy/deck.key','/copy/preview.png'],message:'Keynoteの本文は読めません。PDFかPPTXに書き出して添付してください',generation:1});
+ a.context.bindAskAnswers=(_box,cb)=>send=cb;vm.runInContext('openChat(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+ a.context.api=async(_route,body)=>{request=body;return {ok:true,queued:true,queue:1};};a.context.load=async()=>{};
+ assert.equal(await send(),true);assert.deepEqual(Array.from(request.images),['key']);assert.equal(request.generation,1);assert.match(request.text,/\/copy\/preview.png/);assert.match(request.text,/本文は読めません/);
+});
+test('freetalkの一括添付は途中で世代が変わったら残りを新会話へ追加しない',async()=>{
+ const a=freetalkConversation();let finish,calls=0;a.context.syncFreetalkHistory=async()=>{};
+ a.context.fetch=()=>{calls++;return new Promise(resolve=>finish=resolve);};
+ const pending=a.context.sendFiles([{name:'one.txt'},{name:'two.txt'}],'');assert.equal(calls,1);
+ vm.runInContext('state.projects[0].tasks[0].freetalkHistory.generation=2',a.context);
+ finish({ok:true,json:async()=>({id:'old',name:'one.txt',generation:1})});await pending;assert.equal(calls,1);assert.equal(a.context.chatImages('freetalk','t').length,0);
+});
 const attached = (id = 'first') => ({ id, name: id + '.png', url: '/api/start/image?id=' + id, path: '/local/' + id + '.png' });
+
+test('会話の＋は送信しないファイル選択ボタンで、captureと固定acceptを持たない', () => {
+  const a = conversationApp(), p = project(), html = a.context.chatHtml(p, p.tasks[0]);
+  assert.match(html, /<button[^>]*id="chat-attach"[^>]*type="button"[^>]*aria-label="ファイルを追加"[^>]*>＋<\/button>/);
+  const input = html.match(/<input[^>]*id="chat-files"[^>]*>/)?.[0];
+  assert.ok(input); assert.match(input, /type="file"/); assert.match(input, /multiple hidden/);
+  assert.doesNotMatch(input, /\b(?:accept|capture)\b/);
+  assert.ok(html.indexOf('id="chat-attach"') < html.indexOf('id="chat-ai"'));
+  assert.match(html, /［＋］で選ぶ/);
+});
+
+test('＋は押した時の画面幅で写真／全ファイルを選び、選択値を空にして同期的に開く', () => {
+  const a = conversationApp(), input = a.element('#chat-files'); let phone = true, clicks = 0;
+  a.context.matchMedia = query => { assert.equal(query, '(max-width:720px)'); return {matches:phone}; };
+  input.click = () => { clicks++; assert.equal(input.value, ''); assert.equal(input.accept, phone ? 'image/*' : ''); };
+  for (const mode of [true, false, true]) {
+    phone = mode; input.value = '以前の選択'; a.element('#chat-attach').handlers.click();
+  }
+  assert.equal(clicks, 3);
+});
+
+test('＋で選んだ写真はサムネイル、一般ファイルも添付表示になり、選択値と本文を保護する', async () => {
+  const a = conversationApp(), input = a.element('#chat-files'), calls = [];
+  a.element('#chat-in').value = '確認して';
+  a.context.fetch = async (url, options) => {
+    calls.push({url:String(url), options});
+    return {ok:true,json:async()=>String(url).startsWith('/api/start/image?') ? attached() : {path:'/local/note.txt'}};
+  };
+  input.files = [{name:'first.png',type:'image/png'}, {name:'note.txt',type:'text/plain'}]; input.value = '選択';
+  await input.handlers.change();
+  assert.equal(input.value, '');
+  assert.match(a.element('#chat-images').innerHTML, /first.png/);
+  assert.equal(a.element('#chat-in').value, '確認して');
+  assert.match(a.element('#chat-images').innerHTML, /note.txt/);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].url.startsWith('/api/start/image?project=p&name=first.png'));
+  assert.ok(calls[1].url.startsWith('/api/task/upload?project=p&task=t&ai=&name=note.txt'));
+  assert.equal(calls[0].options.body, input.files[0]); assert.equal(calls[1].options.body, input.files[1]);
+  assert.equal(calls[0].options.headers['X-Hub'], '1');
+});
+
+test('＋の選択中にプロジェクト・作業・画面・モード・入力要素が変わったら添付しない', async () => {
+  for (const change of [
+    'view = {kind:"work",project:"q",task:"t"}',
+    'view = {kind:"work",project:"p",task:"other"}',
+    'view = {kind:"project",project:"p"}',
+    'workMode = () => "term"',
+    'replace-input',
+  ]) {
+    const a = conversationApp(), input = a.element('#chat-files'); let uploads = 0;
+    a.context.fetch = async () => { uploads++; return {ok:true,json:async()=>attached()}; };
+    input.files = [{name:'first.png',type:'image/png'}]; input.value = '選択';
+    if (change === 'replace-input') { a.elements.delete('#chat-files'); a.element('#chat-files'); }
+    else vm.runInContext(change, a.context);
+    await input.handlers.change();
+    assert.equal(input.value, ''); assert.equal(uploads, 0, change);
+    assert.equal(a.context.chatImages('p','t').length, 0); assert.equal(a.context.chatImages('q','t').length, 0);
+  }
+});
+
+test('＋の取消・同じ写真の再選択と×取消に対応し、追加中は送信を待つ', async () => {
+  const a = conversationApp(), input = a.element('#chat-files'); let finish, uploads = 0, sends = 0;
+  a.element('#chat-in').value = '本文';
+  a.context.fetch = () => { uploads++; return new Promise(resolve => { finish = resolve; }); };
+  a.context.api = async () => { sends++; return {queued:true,queue:1}; };
+  input.files = []; input.value = ''; await input.handlers.change();
+  assert.equal(uploads, 0); assert.equal(a.element('#chat-in').value, '本文');
+  const file = {name:'first.png',type:'image/png'};
+  for (let i = 0; i < 2; i++) {
+    input.files = [file]; input.value = '選択'; const pending = input.handlers.change();
+    assert.equal(input.value, ''); assert.equal(a.element('#chat-image-state').hidden, false);
+    a.element('#composer').handlers.submit({preventDefault(){}}); assert.equal(sends, 0);
+    finish({ok:true,json:async()=>attached()}); await pending;
+    assert.equal(a.element('#chat-image-state').hidden, true); assert.equal(a.context.chatImages('p','t').length, 1);
+    a.element('#chat-images').handlers.click({target:{closest:()=>({dataset:{chatRemove:'first'}})}});
+    assert.equal(a.context.chatImages('p','t').length, 0);
+  }
+  assert.equal(uploads, 2); assert.equal(a.element('#chat-in').value, '本文');
+});
 
 test('会話の画像ドロップとMac貼り付けは本文を保ち、サムネイルと×を表示する', async () => {
   const a = conversationApp();
@@ -1097,7 +2033,7 @@ test('会話の添付は同名の作業でもプロジェクト別に分かれ�
   assert.match(a.context.chatHtml(p,p.tasks[0]), /first.png/);
 });
 
-test('画像の一部失敗・画面切替中でも成功分を元の会話へ残し、非画像は本文へ入れる', async () => {
+test('画像の一部失敗・画面切替中でも成功分を元の会話へ残し、非画像も添付で保持する', async () => {
   const a = conversationApp(), targets = [];
   a.element('#chat-in').value = '本文';
   a.context.fetch = async url => {
@@ -1109,9 +2045,11 @@ test('画像の一部失敗・画面切替中でも成功分を元の会話へ�
   };
   vm.runInContext('chatDraft[chatAttachmentKey("p","t")] = "本文"', a.context);
   await a.context.sendFiles([{name:'bad.png',type:'image/png'},{name:'first.png',type:'image/png'},{name:'note.txt',type:'text/plain'}], '');
-  assert.equal(a.context.chatImages('p','t').length, 1);
+  assert.equal(a.context.chatImages('p','t').length, 2);
   assert.equal(a.context.chatImages('q','t').length, 0);
-  assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context), '本文\n/local/note.txt\n');
+  assert.equal(a.context.chatImages('p','t')[1].path, '/local/note.txt');
+  assert.equal(a.context.chatImages('p','t')[1].kind, 'file');
+  assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context), '本文');
   assert.equal(a.element('#chat-in').value, '本文', '切替先の入力を変えない');
   assert.ok(targets.every(x=> x.includes('project=p')));
 });
@@ -1139,6 +2077,37 @@ test('送信失敗なら本文と画像を保持し、画像だけでも送信�
   assert.deepEqual(Array.from(a.context.chatImages('p','t'),x=>x.id), ['later']);
 });
 
+test('送信直後に入力欄を空にし、受付待ちの新しい下書きを成功後も保つ', async () => {
+  const a = conversationApp(); let finish;
+  a.element('#chat-in').value = '送る本文';
+  a.context.api = async () => new Promise(resolve => { finish = resolve; });
+  a.element('#composer').handlers.submit({preventDefault(){}});
+  assert.equal(a.element('#chat-in').value, '');
+  assert.equal(a.element('#chat-send').disabled, true);
+  assert.equal(a.element('#chat-send').textContent, '送っています…');
+  a.element('#chat-in').value = '次の下書き'; a.element('#chat-in').handlers.input();
+  finish({queued:true,queue:1}); await new Promise(setImmediate);
+  assert.equal(a.element('#chat-in').value, '次の下書き');
+  assert.equal(a.element('#chat-send').disabled, false);
+});
+
+test('受付失敗なら別の会話を変えず原稿を復元し、新しい下書きも残す', async () => {
+  for (const switched of [false, true]) {
+    const a = conversationApp(); let fail;
+    a.element('#chat-in').value = '送る本文';
+    a.context.api = async () => new Promise((resolve,reject) => { fail = reject; });
+    a.element('#composer').handlers.submit({preventDefault(){}});
+    a.element('#chat-in').value = '次の下書き'; a.element('#chat-in').handlers.input();
+    if (switched) {
+      vm.runInContext('view.task="other"',a.context);
+      a.element('#chat-in').value = '別の会話の本文';
+    }
+    fail(Error('受付失敗')); await new Promise(setImmediate);
+    assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context), '送る本文\n\n次の下書き');
+    assert.equal(a.element('#chat-in').value, switched ? '別の会話の本文' : '送る本文\n\n次の下書き');
+  }
+});
+
 test('画像追加中の送信を待ち、完了後に画像付きで送れる', async () => {
   const a = conversationApp(); let finish, calls = 0;
   a.element('#chat-in').value = '依頼';
@@ -1156,10 +2125,10 @@ test('送信待ちで会話を描き直しても二重送信せず、成功後�
   const a = conversationApp(); let finish, calls = 0;
   a.element('#chat-in').value = '送る本文';
   a.context.chatImages('p','t').push(attached());
-  a.context.api = async () => { calls++; return new Promise(resolve=>finish=resolve); };
+  a.context.api = async route => { if(route.startsWith('/api/discussion?'))return discussionView(); calls++; return new Promise(resolve=>finish=resolve); };
   a.element('#composer').handlers.submit({preventDefault(){}});
   a.context.closePanes();
-  a.elements.delete('#chat-in'); a.element('#chat-in').value = '送る本文';
+  a.elements.delete('#chat-in'); a.element('#chat-in').value = vm.runInContext('chatDraft[chatAttachmentKey("p","t")]', a.context);
   a.context.openChat(project(),project().tasks[0]);
   a.element('#composer').handlers.submit({preventDefault(){}});
   assert.equal(calls, 1);
@@ -1168,7 +2137,113 @@ test('送信待ちで会話を描き直しても二重送信せず、成功後�
   assert.equal(a.context.chatImages('p','t').length, 0);
 });
 
-test('Macの画像以外はサーバーが受理した場所を本文に追加し、本文を保持する', async () => {
+test('受付済み409は失敗のまま受付証拠を渡し、本文と送った添付を戻さず待機理由を表示する', async () => {
+  const a = conversationApp(); let sends = 0;
+  a.context.fetch = async route => {
+    assert.equal(route, '/api/chat/send'); sends++;
+    return {ok:false,status:409,json:async()=>({error:'終了・保存を確認できません',queued:true,id:'accepted-test'})};
+  };
+  await assert.rejects(a.context.api('/api/chat/send', {}), error =>
+    error.status === 409 && error.queued === true && error.id === 'accepted-test');
+  sends = 0;
+  a.element('#chat-in').value = '受付済みの本文'; a.context.chatImages('p','t').push(attached());
+  a.element('#chat-amend').handlers.click();
+  assert.equal(a.element('#chat-in').value, '');
+  await new Promise(setImmediate);
+  assert.equal(a.element('#chat-in').value, '');
+  assert.equal(a.context.chatImages('p','t').length, 0);
+  assert.equal(sends, 1);
+  assert.match(a.element('#toast').textContent, /受け付けました.*終了・保存を確認できません/);
+  assert.equal(vm.runInContext('chatBusy', a.context), null, '受付をAI開始扱いしない');
+});
+
+test('受付済み409の遅延中に入力した同文・添付を同会話再描画や会話切替でも保持する', async t => {
+  for (const change of ['same', 'redraw', 'switch']) await t.test(change, async () => {
+    const a = conversationApp(); let finish, sends = 0;
+    a.context.fetch = (route, options) => {
+      assert.equal(route, '/api/chat/send'); sends++;
+      assert.match(JSON.parse(options.body).text, /受付済みの本文/);
+      return new Promise(resolve => { finish = resolve; });
+    };
+    a.element('#chat-in').value = '受付済みの本文'; a.context.chatImages('p','t').push(attached());
+    a.element('#chat-redo').handlers.click();
+    a.element('#chat-in').value = '受付済みの本文'; a.element('#chat-in').handlers.input();
+    a.context.chatImages('p','t').push(attached('later'));
+    if (change === 'redraw') {
+      a.context.closePanes(); a.elements.delete('#chat-in');
+      a.element('#chat-in').value = vm.runInContext('chatDraft[chatAttachmentKey("p","t")]', a.context);
+      a.context.openChat(project(),project().tasks[0]);
+      a.element('#composer').handlers.submit({preventDefault(){}});
+    } else if (change === 'switch') {
+      vm.runInContext('view.task="other"', a.context);
+      a.element('#chat-in').value = '別会話の本文'; a.context.chatImages('p','other').push(attached('other'));
+    }
+    finish({ok:false,status:409,json:async()=>({error:'停止の保存待ち',queued:true,id:'accepted-test'})});
+    await new Promise(setImmediate);
+    assert.equal(sends, 1, '再送も待ち指示の開始もしない');
+    assert.equal(a.element('#chat-in').value, change === 'switch' ? '別会話の本文' : '受付済みの本文');
+    assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]', a.context), '受付済みの本文');
+    assert.deepEqual(Array.from(a.context.chatImages('p','t'), x=>x.id), ['later']);
+    if (change === 'switch') assert.deepEqual(Array.from(a.context.chatImages('p','other'), x=>x.id), ['other']);
+  });
+});
+
+test('受付証拠なし409・不正な証拠・通信不明は原文と添付を保持し自動再送しない', async t => {
+  for (const [label, status, body] of [
+    ['not-accepted',409,{error:'未受付'}], ['missing-id',409,{error:'照合不能',queued:true}],
+    ['empty-id',409,{queued:true,id:' '}], ['string-flag',409,{queued:'true',id:'unproven'}],
+    ['other-status',500,{error:'結果不明',queued:true,id:'unproven'}], ['network',0,null]
+  ]) await t.test(label, async () => {
+    const a = conversationApp(); let finish, fail, sends = 0;
+    a.context.fetch = route => {
+      assert.equal(route, '/api/chat/send'); sends++;
+      return new Promise((resolve,reject) => { finish=resolve; fail=reject; });
+    };
+    a.element('#chat-in').value = '未確認の原文'; a.context.chatImages('p','t').push(attached());
+    a.element('#chat-amend').handlers.click();
+    a.element('#chat-in').value = '新しい下書き'; a.element('#chat-in').handlers.input();
+    a.context.chatImages('p','t').push(attached('later'));
+    if (status) finish({ok:false,status,json:async()=>body}); else fail(Error('通信結果不明'));
+    await new Promise(setImmediate);
+    assert.equal(a.element('#chat-in').value, '未確認の原文\n\n新しい下書き');
+    assert.deepEqual(Array.from(a.context.chatImages('p','t'), x=>x.id), ['first','later']);
+    assert.equal(sends, 1);
+  });
+});
+
+test('通常200の受付後に表示更新が失敗しても送った添付を戻さず新しい下書きを保持する', async () => {
+  const a = conversationApp(); let finish;
+  a.context.fetch = async () => new Promise(resolve => { finish=resolve; });
+  a.context.acceptedWorkAnswer = async()=>{throw Error('表示更新失敗');};
+  a.element('#chat-in').value = '受付済み'; a.context.chatImages('p','t').push(attached());
+  a.element('#composer').handlers.submit({preventDefault(){}});
+  a.element('#chat-in').value = '次の下書き'; a.element('#chat-in').handlers.input();
+  a.context.chatImages('p','t').push(attached('later'));
+  finish({ok:true,status:200,json:async()=>({ok:true,queued:true,id:'accepted-test',queue:1})});
+  await new Promise(setImmediate);
+  assert.equal(a.element('#chat-in').value, '次の下書き');
+  assert.deepEqual(Array.from(a.context.chatImages('p','t'),x=>x.id), ['later']);
+  assert.equal(a.element('#toast').textContent, '表示更新失敗');
+});
+
+test('受付済み409でも質問の回答済みを推測せず入力欄・別の質問を保護する', async () => {
+  const a = conversationApp();
+  vm.runInContext('proj("p").tasks[0].question="確認する質問"', a.context);
+  a.element('#chat-in').value = '回答とは別の下書き'; a.context.chatImages('p','t').push(attached());
+  a.context.fetch = async route => {
+    if (route !== '/api/chat/send') return new Promise(()=>{});
+    vm.runInContext('proj("p").tasks[0].question="新しい質問"', a.context);
+    return {ok:false,status:409,json:async()=>({error:'停止の保存待ち',queued:true,id:'answer-test'})};
+  };
+  // 受付待ちの表示更新が通信完了を待たないようにする。質問照合は実関数を通す。
+  a.context.load = async()=>{};
+  assert.equal(await vm.runInContext('sendWorkAnswer.send("質問への回答")', a.context), true);
+  assert.equal(a.element('#chat-in').value, '回答とは別の下書き');
+  assert.equal(a.context.chatImages('p','t').length, 1);
+  assert.equal(vm.runInContext('proj("p").tasks[0].question', a.context), '新しい質問');
+});
+
+test('Macの画像以外はサーバーが受理した場所を添付表示に保存し、本文を保持する', async () => {
   const a = conversationApp();
   a.element('#chat-in').value = '確認して';
   a.context.api = async (route, body) => {
@@ -1177,8 +2252,10 @@ test('Macの画像以外はサーバーが受理した場所を本文に追加�
     return {paths:['/local/note.txt']};
   };
   await a.context.window.hubNativeDrop(['/local/note.txt']);
-  assert.equal(a.element('#chat-in').value, '確認して\n/local/note.txt\n');
-  assert.equal(a.context.chatImages('p','t').length, 0);
+  assert.equal(a.element('#chat-in').value, '確認して');
+  assert.equal(a.context.chatImages('p','t').length, 1);
+  assert.equal(a.context.chatImages('p','t')[0].path, '/local/note.txt');
+  assert.match(a.element('#chat-images').innerHTML, /note.txt/);
 });
 
 test('ターミナルの添付が全件失敗したら成功表示でエラーを消さない', async () => {
@@ -1221,15 +2298,17 @@ test('作業一覧は4点だけを表示し、AI情報・手順数・種別・�
   assert.match(a.context.progressBar(t), /class="prog /);
 });
 
-test('状態札は質問・入力待ち・保存状態・完了確認・稼働の優先順で最大1つ出す', () => {
+test('状態札は質問・正式停止・保存状態・完了確認・稼働の優先順で最大1つ出す', () => {
   const a = app(), s = snapshot('未着手'), p = s.projects[0];
   const cases = [
     { extra: { question: '<質問>', state: '上限で停止', completionPending: true }, quiet: 61, expected: '返事待ち' },
-    { extra: { state: '上限で停止', completionPending: true }, quiet: 61, expected: '入力待ち' },
+    { extra: { state: '上限で停止', completionPending: true }, quiet: 61, expected: '上限で停止' },
     { extra: { state: '返事待ち', completionPending: true }, quiet: 0, expected: '返事待ち' },
     { extra: { state: '上限で停止', completionPending: true }, quiet: 0, expected: '上限で停止' },
-    { extra: { completionPending: true }, quiet: 0, expected: '完了確認' },
+    { extra: { completionPending: true }, quiet: 0, expected: '作業中' },
+    { extra: { completionPending: true }, expected: '完了' },
     { extra: {}, quiet: 59, expected: '作業中' },
+    { extra: {}, quiet: 3600, expected: '作業中' },
     { extra: {}, chat: true, expected: '作業中' },
     { extra: { state: '実行中' }, expected: '' },
     { extra: {}, quiet: 61, running: false, expected: '' },
@@ -1244,7 +2323,7 @@ test('状態札は質問・入力待ち・保存状態・完了確認・稼働�
     const badges = [...html.matchAll(/class="pill task-status [^"]+">([^<]+)<\/span>/g)].map(x => x[1]);
     assert.deepEqual(badges, c.expected ? [c.expected] : [], JSON.stringify(c));
     if (t.question) assert.match(html, /あなたへの質問：&lt;質問&gt;/);
-    else if (c.expected === '入力待ち') assert.match(html, /Codex が入力を待っています（1分）/);
+    else assert.doesNotMatch(html, /入力を待っています/);
   }
 });
 
@@ -1256,7 +2335,7 @@ test('一覧の完了確認は行内操作だけで、質問とreplyタブの保
     const html = a.context.taskRow(p, t, false, tab);
     assert.match(html, /<div class="tact"><button[^>]*data-act="taskcomplete"/);
     assert.match(html, /data-act="taskcontinue"[^>]*>まだ続ける<\/button>/);
-    assert.match(html, /task-status needs">完了確認<\/span>/);
+    assert.match(html, /task-status confirm">完了<\/span>/);
     assert.equal((html.match(/<button\b/g) || []).length, 3);
     assert.doesNotMatch(html, /class="pend|class="wq|やったこと|一覧には出さない詳細/);
   }
@@ -1298,7 +2377,7 @@ test('pending completion remains visible and a completed task does not stamp its
   p.tasks[0].completionPending = true; p.phases = [{name:'Build',state:'進行中'}];
   vm.runInContext('state = ' + JSON.stringify(s), a.context);
   a.context.renderOverview(p);
-  assert.match(a.element('#main').innerHTML, /task-status needs">完了確認<\/span>/);
+  assert.match(a.element('#main').innerHTML, /task-status confirm">完了<\/span>/);
   assert.match(a.element('#main').innerHTML, /まだ続ける/);
   assert.doesNotMatch(a.element('#main').innerHTML, /完了した作業（1）/);
   p.tasks[0].state = '完了'; p.tasks[0].completionPending = false;
@@ -1309,13 +2388,27 @@ test('cancel completion never calls API and approval sends the shown content has
  const a=app(),s=snapshot('完了確認待ち');s.projects[0].tasks[0].completionHash='shown';
  vm.runInContext('state = '+JSON.stringify(s),a.context);
  let calls=[];a.context.api=async(route,body)=>{calls.push({route,body});return {};};a.context.load=async()=>{};
- a.context.confirm=()=>false;await a.context.act({dataset:{act:'taskcomplete',p:'p',t:'t'}});assert.equal(calls.length,0);
- a.context.confirm=()=>true;await a.context.act({dataset:{act:'taskcomplete',p:'p',t:'t'}});
- assert.equal(calls[0].route,'/api/task/completion');assert.equal(calls[0].body.expectedHash,'shown');assert.equal(calls[0].body.confirm,true);
+ // ［完了に移す］は確認画面を開くだけ。完了の送信は確認画面の［完了に移す］で、表示時の内容ハッシュを使う。
+ const opened=[];a.context.showCompletion=(...args)=>{opened.push(args);};
+ await a.context.act({dataset:{act:'taskcomplete',p:'p',t:'t'}});assert.equal(calls.length,0);assert.deepEqual(opened,[['p','t','shown']]);
+ const sheet=fs.readFileSync(path.join(__dirname,'../public/task-history.js'),'utf8');
+ assert.match(sheet,/api\('\/api\/task\/completion',\{project:d\.project,task:d\.task,action:'approve',confirm:true,expectedHash:d\.expectedHash\}\)/);
+});
+
+test('片付けは完了済み作業の再開ボタンの隣から開き、完了の送信をしない',async()=>{
+ const a=app(),s=snapshot();a.context.fixture=s;vm.runInContext('state=fixture',a.context);
+ for(const state of ['未着手','実行中','返事待ち','完了確認待ち']){
+  s.projects[0].tasks[0].state=state;assert.doesNotMatch(a.context.completionButtons(s.projects[0],s.projects[0].tasks[0]),/data-act="tasktidy"/);
+ }
+ const t=s.projects[0].tasks[0];t.state='完了';const html=a.context.completionButtons(s.projects[0],t);
+ assert.match(html,/data-act="taskcontinue"[^>]*>再開する<\/button><button class="btn plain sm" data-act="tasktidy" data-p="p" data-t="t"[^>]*>片付け…<\/button>/);
+ const opened=[];a.context.showTidy=async(...args)=>opened.push(args);a.context.api=()=>assert.fail('片付けの入口は完了承認を送らない');
+ await a.context.act({dataset:{act:'tasktidy',p:'p',t:'t'}});assert.deepEqual(opened,[['p','t']]);
+ a.context.showTidy=async()=>{throw Error('preview failed');};let notice;a.context.toast=text=>notice=text;await a.context.act({dataset:{act:'tasktidy',p:'p',t:'t'}});assert.equal(notice,'preview failed');
 });
 
 
-test('通知：返事待ちと完了確認の名前・数を左と上でそろえる', () => {
+test('通知：返事待ちと完了の名前・数を左と上でそろえる', () => {
   const a = app(), s = snapshot(), p = s.projects[0];
   p.tasks[0].completionPending = true; p.tasks[0].parent = '';
   s.unread = [{ project:'p', task:'gone' }];
@@ -1323,16 +2416,16 @@ test('通知：返事待ちと完了確認の名前・数を左と上でそろ�
   vm.runInContext('open.add("p")',a.context);
   a.context.render();
   assert.equal(a.element('#turn-n').textContent, '返事待ち 0');
-  assert.equal(a.element('#turn-done-n').textContent, '完了確認 1');
+  assert.equal(a.element('#turn-done-n').textContent, '完了 1');
   const tree = a.element('#list').innerHTML;
-  assert.match(tree, />完了確認 1</);
-  assert.match(tree, />完了確認</);
+  assert.match(tree, />完了 1</);
+  assert.match(tree, />完了</);
   assert.doesNotMatch(tree, />未読/);
   assert.doesNotMatch(tree, />返事待ち/);
   assert.equal(a.context.taskLight(p,p.tasks[0],false,false).tip.includes('返事'),false);
   a.context.renderTurn([{p,t:p.tasks[0]}]);
   assert.match(a.element('#main').innerHTML, /返事待ち（0）/);
-  assert.match(a.element('#main').innerHTML, /完了確認（1）/);
+  assert.match(a.element('#main').innerHTML, /完了（1）/);
 });
 
 test('通知：質問と完了報告が重なったら返事待ちに一度だけ数える', () => {
@@ -1341,9 +2434,9 @@ test('通知：質問と完了報告が重なったら返事待ちに一度だ�
   vm.runInContext('state = ' + JSON.stringify(s) + '; view = {kind:"project",project:"p",task:null}', a.context);
   a.context.render();
   assert.equal(a.element('#turn-n').textContent,'返事待ち 1');
-  assert.equal(a.element('#turn-done-n').textContent,'完了確認 0');
+  assert.equal(a.element('#turn-done-n').textContent,'完了 0');
   assert.match(a.element('#list').innerHTML, />返事待ち 1</);
-  assert.doesNotMatch(a.element('#list').innerHTML, />完了確認/);
+  assert.doesNotMatch(a.element('#list').innerHTML, />完了/);
 });
 
 test('通知：未読だけの更新で木も再描画し、完了済みでも読む対象を残す', () => {
@@ -1361,19 +2454,54 @@ test('通知：未読だけの更新で木も再描画し、完了済みでも�
   assert.doesNotMatch(a.context.projectNode(p,0), /data-t="t"[^>]*type="button"/);
 });
 
-test('通知：上限停止とターミナル入力待ちも返事待ちとして一致する', () => {
+test('通知：正式上限停止を保持し、ターミナルの無出力を返事待ちに数えない', () => {
   const a = app(), s = snapshot('上限で停止');
   s.projects[0].tasks.push({...s.projects[0].tasks[0],id:'terminal',state:'実行中'});
   s.sessions = [{project:'p',task:'terminal',ai:'claude',running:true,quiet:61}];
   vm.runInContext('state = ' + JSON.stringify(s) + '; view = {kind:"project",project:"p",task:null}', a.context);
   a.context.render();
-  assert.equal(a.element('#turn-n').textContent,'返事待ち 2');
-  assert.equal(a.element('#turn-done-n').textContent,'完了確認 0');
-  assert.match(a.element('#list').innerHTML, />返事待ち 2</);
+  assert.equal(a.element('#turn-n').textContent,'返事待ち 1');
+  assert.equal(a.element('#turn-done-n').textContent,'完了 0');
+  assert.match(a.element('#list').innerHTML, />返事待ち 1</);
 });
 
 
-test('通知：変化なしの定期取得でも返事待ち・完了確認の文字を保持する', async () => {
+for (const locale of ['ja', 'zh-TW']) test('質問なし無出力：会話併存・長時間・再読込でも件数/木/あなたの番/状態札は返事を要求しない '+locale, () => {
+  const a = app(), s = snapshot();
+  a.context.UI = require('./ui-locale-fixture')(locale);
+  for (const chat of [false, true]) for (const quiet of [0, 20, 59, 60, 3600, 86400]) {
+    s.sessions = [{project:'p',task:'t',ai:'codex',running:true,quiet}];
+    s.chatting = chat ? [{project:'p',task:'t',ai:'claude'}] : [];
+    vm.runInContext('state='+JSON.stringify(s)+';view={kind:"turn"}',a.context);
+    a.context.render();
+    assert.equal(Boolean(vm.runInContext('REPLY(state.projects[0],state.projects[0].tasks[0])',a.context)),false);
+    assert.equal(a.element('#turn-n').textContent,a.context.UI.template`返事待ち ${0}`);
+    assert.equal(a.element('#turn-work-n').textContent,a.context.UI.template`作業中 ${1}`);
+    assert.equal(a.element('#turn-done-n').textContent,a.context.UI.template`完了 ${0}`);
+    assert.doesNotMatch(a.element('#main').innerHTML,/data-act="answered"/);
+    assert.doesNotMatch(a.context.taskRow(s.projects[0],s.projects[0].tasks[0]),/入力待ち|輸入等待/);
+    assert.match(a.context.statusText(s.sessions[0]),/pst busy/);
+    assert.equal(a.context.taskLight(s.projects[0],s.projects[0].tasks[0],true).cls,'pl-work');
+    assert.match(a.element('#list').innerHTML,/pl-work/);
+    const key=a.context.treeKey();s.sessions[0].quiet++;
+    vm.runInContext('state='+JSON.stringify(s),a.context);assert.equal(a.context.treeKey(),key);
+  }
+});
+for (const locale of ['ja', 'zh-TW']) test('正式な質問・選択・承認・上限停止・完了確認は無出力や会話併存でも保持 '+locale, () => {
+  const a=app();a.context.UI=require('./ui-locale-fixture')(locale);
+  for(const extra of [{question:'選んでください'},{question:'承認してください'},{state:'返事待ち'},{state:'上限で停止'},{resultsPending:true},{completionPending:true}]){
+    const s=snapshot('実行中',[{project:'p',task:'t',ai:'codex',running:true,quiet:3600}]);Object.assign(s.projects[0].tasks[0],extra);s.chatting=[{project:'p',task:'t',ai:'codex'}];
+    vm.runInContext('state='+JSON.stringify(s)+';view={kind:"turn"}',a.context);a.context.render();
+    const confirm=Boolean(extra.completionPending);
+    assert.equal(Boolean(vm.runInContext('REPLY(state.projects[0],state.projects[0].tasks[0])',a.context)),!confirm);
+    assert.equal(Boolean(vm.runInContext('CONFIRM(state.projects[0],state.projects[0].tasks[0])',a.context)),false);
+    assert.equal(a.element('#turn-n').textContent,a.context.UI.template`返事待ち ${confirm?0:1}`);
+    if(extra.question)assert.equal(a.context.taskLight(s.projects[0],s.projects[0].tasks[0],true).cls,'wait');
+    assert.equal(vm.runInContext('JSON.stringify(state)',a.context),JSON.stringify(s));
+  }
+});
+
+test('通知：変化なしの定期取得でも返事待ち・完了の文字を保持する', async () => {
   const a = app(), s = snapshot();
   s.projects[0].tasks[0].completionPending = true;
   vm.runInContext('state = ' + JSON.stringify(s) + '; view = {kind:"project",project:"p",task:null}', a.context);
@@ -1384,11 +2512,11 @@ test('通知：変化なしの定期取得でも返事待ち・完了確認の�
   await a.context.pollState();
   assert.equal(renders, 0);
   assert.equal(a.element('#turn-n').textContent, '返事待ち 0');
-  assert.equal(a.element('#turn-done-n').textContent, '完了確認 1');
-  assert.equal(a.element('#turn').attributes['aria-label'], 'あなたの番：返事待ち 0件、完了確認 1件');
+  assert.equal(a.element('#turn-done-n').textContent, '完了 1');
+  assert.equal(a.element('#turn').attributes['aria-label'], 'あなたの番：返事待ち 0件、作業中 0件、完了 1件');
 });
 
-test('通知：設定・入力・詳しくを開いたまま定期取得しても両方の件数と説明を更新する', async () => {
+test('通知：設定・入力・詳しくを開いたまま定期取得しても3区分の件数と説明を更新する', async () => {
   for (const held of ['settings', 'input', 'details']) {
     const a = app(), first = snapshot();
     first.projects[0].tasks[0].completionPending = true;
@@ -1407,16 +2535,144 @@ test('通知：設定・入力・詳しくを開いたまま定期取得して�
     vm.runInContext('fetchState = async () => (' + JSON.stringify(changed) + ')', a.context);
     await a.context.pollState();
     assert.equal(a.element('#turn-n').textContent, '返事待ち 1', held);
-    assert.equal(a.element('#turn-done-n').textContent, '完了確認 0', held);
-    assert.equal(a.element('#turn').attributes['aria-label'], 'あなたの番：返事待ち 1件、完了確認 0件', held);
+    assert.equal(a.element('#turn-done-n').textContent, '完了 0', held);
+    assert.equal(a.element('#turn').attributes['aria-label'], 'あなたの番：返事待ち 1件、作業中 0件、完了 0件', held);
     vm.runInContext('fetchState = async () => (' + JSON.stringify(snapshot()) + ')', a.context);
     await a.context.pollState();
     assert.equal(a.element('#turn-n').textContent, '返事待ち 0', held);
-    assert.equal(a.element('#turn-done-n').textContent, '完了確認 0', held);
-    assert.equal(a.element('#turn').attributes['aria-label'], 'あなたの番：返事待ち 0件、完了確認 0件', held);
+    assert.equal(a.element('#turn-done-n').textContent, '完了 0', held);
+    assert.equal(a.element('#turn').attributes['aria-label'], 'あなたの番：返事待ち 0件、作業中 0件、完了 0件', held);
     assert.equal(renders, 0, held);
     assert.equal(a.element('#main').innerHTML, main, held);
   }
+});
+
+test('通知：稼働・順番待ち・成果整理と完了報告を3区分へ一度だけ数える', () => {
+  const a = app(), s = snapshot('未着手'), p = s.projects[0], base = p.tasks[0];
+  p.tasks = [
+    {...base, id:'reply', title:'返事', question:'選ぶ', completionPending:true, chatQueueCount:2},
+    {...base, id:'terminal', title:'端末'}, {...base, id:'chat', title:'会話'},
+    {...base, id:'queued', title:'順番', chatQueueCount:3},
+    {...base, id:'results', title:'整理', resultsPending:{auto:'running'}},
+    {...base, id:'background', title:'背景'}, {...base, id:'web', title:'自動Chat'},
+    {...base, id:'done', title:'完了報告', completionPending:true},
+    {...base, id:'blocked', title:'待ち停止', chatQueueCount:1, chatQueueBlocked:true},
+    {...base, id:'approved', title:'承認済', state:'完了'}, {...base, id:'idle', title:'未稼働', state:'実行中'}
+  ];
+  s.sessions = [{project:'p',task:'terminal',ai:'codex',running:true,quiet:59}];
+  s.chatting = [{project:'p',task:'chat',ai:'claude'}, {project:'p',task:'reply',ai:'codex'}];
+  s.background = [{project:'p',task:'background'}, {project:'p',task:null}, {project:'other',task:'idle'}];
+  s.webchat = {jobs:[{project:'p',task:'web',parent:'idle',state:'queued'}, {project:'p',task:'idle',state:'done'}]};
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"turn",project:"p"};open.add("p")',a.context);
+  a.context.render();
+  assert.equal(a.element('#turn-n').textContent,'返事待ち 2');
+  assert.equal(a.element('#turn-work-n').textContent,'作業中 6');
+  assert.equal(a.element('#turn-done-n').textContent,'完了 1');
+  assert.match(a.element('#list').innerHTML,/>返事待ち 2<.*>作業中 6<.*>完了 1</s);
+  const tabs = a.element('#main').innerHTML;
+  assert.match(tabs,/data-turn-tab="reply".*返事待ち（2）.*data-turn-tab="work".*作業中（6）.*data-turn-tab="done".*完了（1）/s);
+  assert.equal(a.context.taskLight(p,p.tasks[0],true,false).cls,'wait');
+  for (const tab of ['work','done']) {
+    vm.runInContext('turnTab='+JSON.stringify(tab)+';render()',a.context);
+    const html=a.element('#main').innerHTML;
+    assert.equal((html.match(/class="trow /g)||[]).length,tab==='work'?6:1);
+    assert.doesNotMatch(html,/data-act="answered"/);
+    if(tab==='work')assert.doesNotMatch(html,/data-act="taskcomplete"|data-act="taskcontinue"|data-act="resultsorganize"/);
+    else assert.match(html,/data-act="taskcomplete".*data-act="taskcontinue"/s);
+  }
+  assert.deepEqual(p.tasks.map(t=>t.state),s.projects[0].tasks.map(t=>t.state));
+  assert.equal(vm.runInContext('state.projects[0].tasks.find(t=>t.id==="done").state',a.context),'未着手');
+});
+
+test('停止保留表示：実行中の台帳と未処理指示を保持し一覧・作業・上部件数は保留を示す', () => {
+  const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];
+  Object.assign(t,{chatQueueCount:1,chatQueueHeld:true,chatQueueBlocked:true,completionPending:true});
+  const original=JSON.stringify(t);
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"turn",project:"p"};open.add("p")',a.context);
+  a.context.render();
+  assert.equal(a.element('#turn-n').textContent,'返事待ち 1');
+  assert.equal(a.element('#turn-work-n').textContent,'作業中 0');
+  assert.equal(a.element('#turn-done-n').textContent,'完了 0');
+  assert.match(a.element('#list').innerHTML,/notice-reply/);assert.doesNotMatch(a.element('#list').innerHTML,/notice-work|pl-work/);
+  assert.match(a.element('#main').innerHTML,/停止保留/);assert.doesNotMatch(a.element('#main').innerHTML,/data-act="answered"|data-act="taskcomplete"/);
+  assert.equal(a.context.taskLight(p,t,false).cls,'wait');assert.match(a.context.taskLight(p,t,false).tip,/保留/);
+  assert.equal(vm.runInContext('WORKING(state.projects[0],state.projects[0].tasks[0])',a.context),false);
+  vm.runInContext('view={kind:"work",project:"p",task:"t"};renderWork()',a.context);
+  assert.match(a.element('#main').innerHTML,/停止前の指示は保留中です。自動では始まりません/);
+  assert.match(a.context.completionButtons(p,t),/未処理の指示/);
+  assert.doesNotMatch(a.context.completionButtons(p,t),/taskcomplete|taskcontinue/);
+  assert.equal(vm.runInContext('JSON.stringify(state.projects[0].tasks[0])',a.context),original);
+});
+
+test('停止保留表示：実稼働との併存を隠さず返事優先の一分類を維持する',()=>{
+  for(const activity of ['chatting','sessions','background','webchat','results']){
+    const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];
+    Object.assign(t,{chatQueueCount:2,chatQueueHeld:true,chatQueueBlocked:true});
+    if(activity==='webchat')s.webchat={jobs:[{project:'p',task:'t',state:'tools'}]};
+    else if(activity==='results')t.resultsPending={auto:'running'};
+    else s[activity]=[{project:'p',task:'t',ai:'codex',running:true}];
+    vm.runInContext('state='+JSON.stringify(s),a.context);a.context.updateTurnCounts();
+    assert.equal(vm.runInContext('WORKING(state.projects[0],state.projects[0].tasks[0])',a.context),true,activity);
+    assert.match(a.context.taskLight(p,t,true).tip,/作業中.*保留/);
+    assert.equal(a.element('#turn-n').textContent,'返事待ち 1',activity);assert.equal(a.element('#turn-work-n').textContent,'作業中 0',activity);
+    assert.match(a.context.taskRow(p,t,true,'reply'),activity==='results'?/成果整理/:/作業中・指示保留/);
+  }
+});
+
+test('停止保留表示：通常順番待ち・エラー・上限は区別し解除だけでは旧指示を作業中にしない',async()=>{
+  const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];
+  for(const [fields,kind,working] of [
+    [{chatQueueCount:1,chatQueueBlocked:false,chatQueueHeld:false},'work',true],
+    [{chatQueueCount:1,chatQueueBlocked:true,chatQueueHeld:false},'reply',false],
+    [{chatQueueCount:1,chatQueueBlocked:true,chatQueueHeld:false,state:'上限で停止'},'reply',false],
+    [{chatQueueCount:1,chatQueueBlocked:true,chatQueueHeld:true},'reply',false],
+    [{chatQueueCount:0,chatQueueBlocked:false,chatQueueHeld:false},'',false],
+  ]){
+    Object.assign(t,{state:'実行中'},fields);vm.runInContext('state='+JSON.stringify(s),a.context);
+    assert.equal(vm.runInContext('notificationKind(state.projects[0],state.projects[0].tasks[0])',a.context),kind);
+    assert.equal(vm.runInContext('WORKING(state.projects[0],state.projects[0].tasks[0])',a.context),working);
+  }
+  Object.assign(t,{chatQueueCount:1,chatQueueBlocked:true,chatQueueHeld:true});
+  for(const stopControl of [{all:true,tasks:[]},{all:false,tasks:[]},{all:false,tasks:[{project:'p',task:'t',autoHeld:true}]}]){
+    s.stopControl=stopControl;vm.runInContext('fetchState=async()=>('+JSON.stringify(s)+')',a.context);await a.context.pollState();
+    assert.equal(a.element('#turn-work-n').textContent,'作業中 0');assert.equal(a.element('#turn-n').textContent,'返事待ち 1');
+  }
+});
+
+test('通知：無出力は作業中を保持し、実質問・終了・完了報告へ移っても複数AIで重複しない', () => {
+  const a=app(),s=snapshot('実行中'),t=s.projects[0].tasks[0];
+  s.sessions=[{project:'p',task:'t',ai:'codex',running:true,quiet:59},{project:'p',task:'t',ai:'claude',running:true,quiet:0}];
+  s.chatting=[{project:'p',task:'t',ai:'codex'}];t.completionPending=true;
+  for (const [change,expected] of [
+    ['', ['返事待ち 0','作業中 1','完了 0']],
+    ['state.sessions[0].quiet=3600', ['返事待ち 0','作業中 1','完了 0']],
+    ['state.projects[0].tasks[0].question="選んでください"', ['返事待ち 1','作業中 0','完了 0']],
+    ['state.projects[0].tasks[0].question=""', ['返事待ち 0','作業中 1','完了 0']],
+    ['state.sessions.forEach(s=>s.running=false);state.chatting=[]', ['返事待ち 0','作業中 0','完了 1']],
+    ['state.projects[0].tasks[0].completionPending=false', ['返事待ち 0','作業中 0','完了 0']],
+  ]) {
+    if(!change)vm.runInContext('state='+JSON.stringify(s),a.context);
+    else vm.runInContext(change,a.context);
+    a.context.updateTurnCounts();
+    assert.deepEqual(['#turn-n','#turn-work-n','#turn-done-n'].map(k=>a.element(k).textContent),expected);
+  }
+});
+
+test('通知：入力保持中の定期取得でも作業中件数を更新し、背景と自動Chatだけの変更で再描画できる', async () => {
+  const a=app(),s=snapshot('未着手');
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"turn",project:"p"}',a.context);a.context.render();
+  const tree=a.context.treeKey(),main=a.context.mainKey(),html=a.element('#main').innerHTML;
+  s.background=[{project:'p',task:'t'}];
+  a.document.activeElement={tagName:'TEXTAREA'};
+  vm.runInContext('fetchState=async()=>('+JSON.stringify(s)+')',a.context);await a.context.pollState();
+  assert.equal(a.element('#turn-work-n').textContent,'作業中 1');
+  assert.equal(a.element('#main').innerHTML,html);
+  assert.notEqual(a.context.treeKey(),tree);assert.notEqual(a.context.mainKey(),main);
+  const backgroundTree=a.context.treeKey();
+  vm.runInContext('state.background=[];state.webchat={jobs:[{project:"p",task:"t",state:"tools"}]}',a.context);
+  assert.notEqual(a.context.treeKey(),backgroundTree);
+  a.document.activeElement=null;vm.runInContext('turnTab="work";render()',a.context);
+  assert.match(a.element('#main').innerHTML,/task-status busy">作業中/);
 });
 
 test('long task steps have an explicit close control without changing steps or task state',()=>{
@@ -1501,7 +2757,7 @@ test('上下の回答は同じ送信枠を使い、受付までの連打を1回�
 // 実サーバーが起動失敗時に配信する SSE と 409 を画面処理へ通す。
 test('実spawn失敗のSSE後も上下から再操作でき、fake CLI修復後の再送は1回だけ受け付ける',async()=>{
  const os=require('node:os');
- const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'hub-answer-r1-')),root=path.join(tmp,'root'),dir=path.join(root,'Product','p'),bin=path.join(tmp,'bin');
+ const tmp=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'hub-answer-r1-')),root=path.join(tmp,'root'),dir=path.join(root,'Product','p'),bin=path.join(tmp,'bin');
  fs.mkdirSync(path.join(root,'_hub'),{recursive:true});fs.copyFileSync(path.join(__dirname,'../../docs/project-hub/templates/_hub/roles.yaml'),path.join(root,'_hub/roles.yaml'));fs.mkdirSync(path.join(dir,'.ai/tasks'),{recursive:true});fs.mkdirSync(bin);
  fs.writeFileSync(path.join(dir,'PROJECT.md'),'---\nname: p\nstatus: 進行中\nphases: []\nfolders: {}\nrelated: []\n---\n');
  const question='選んでください',taskFile=path.join(dir,'.ai/tasks/t.md');fs.writeFileSync(taskFile,`---\nid: t\ntitle: R1\nowner: codex\nmodel: GPT-6.1-Sol\nworkspaceMode: direct\nstate: 返事待ち\nquestion: ${question}\n---\n`);
@@ -1510,7 +2766,7 @@ test('実spawn失敗のSSE後も上下から再操作でき、fake CLI修復後�
  const env={PATH:bin+':/usr/bin:/bin',HUB_ROOT:root,HUB_PORT:'0',HUB_DRY_RUN:'1',HUB_AI_HOME:path.join(tmp,'home'),HUB_TRASH:path.join(tmp,'trash')},previous={};for(const k of Object.keys(env)){previous[k]=process.env[k];process.env[k]=env[k];}
  const serverModule=require.resolve('../server');let server,reader,abort;const events=[];
  try{
-  delete require.cache[serverModule];({server}=require('../server'));await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));process.env.HUB_PORT=String(port);delete require.cache[serverModule];({server}=require('../server'));await new Promise(r=>server.listen(port,'127.0.0.1',r));const base=`http://127.0.0.1:${port}`;
+  require.cache[serverModule]?.exports.stopControl.cleanExit();delete require.cache[serverModule];({server}=require('../server'));await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));process.env.HUB_PORT=String(port);require.cache[serverModule]?.exports.stopControl.cleanExit();delete require.cache[serverModule];({server}=require('../server'));await new Promise(r=>server.listen(port,'127.0.0.1',r));const base=`http://127.0.0.1:${port}`;
   const a=app(),s=snapshot('返事待ち');s.projects[0].tasks[0].question=question;vm.runInContext('state='+JSON.stringify(s)+';view={kind:"work",project:"p",task:"t"}',a.context);
   const asks=[{question,options:['A','B'],multi:false}],askKey=JSON.stringify(['p','t',asks]);const set=new Set(['ask']),status={textContent:''},option={disabled:false,value:'A'},free={disabled:false,value:'残す補足'},button={disabled:false,textContent:''};
   const ask={dataset:{askKey},classList:{contains:x=>set.has(x),add:(...xs)=>xs.forEach(x=>set.add(x)),toggle:(x,on)=>on?set.add(x):set.delete(x)},querySelector:s=>s==='.ask-status'?status:button,querySelectorAll:()=>[option,free,button]};
@@ -1559,38 +2815,126 @@ test('GitHub creation appears only without any origin, and unavailable gh has a 
   vm.runInContext('state.github = {ready:false,error:"ログインしてください"}', a.context);
   a.context.renderOverview(project()); assert.match(a.element('#main').innerHTML, /data-github-create="p"[^>]*disabled[^>]*title="ログインしてください"/);
 });
-test('settings contains GitHub card after remote and before ChatGPT', () => {
+test('settings keeps connections separate from ChatGPT login', () => {
   const a = app(); vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings",project:"p"}', a.context);
   a.context.renderSettings(); const html = a.element('#main').innerHTML;
-  assert.ok(html.indexOf('id="remote-box"') < html.indexOf('id="github-box"')); assert.ok(html.indexOf('id="github-box"') < html.indexOf('<h2>ChatGPT</h2>'));
+  assert.ok(html.indexOf('id="remote-box"') < html.indexOf('id="github-box"'));
+  assert.doesNotMatch(html, /<h2>ChatGPT<\/h2>/);
+  assert.match(html, /data-tab="ai"[^>]*><h2>AIの利用設定<\/h2>/);
+  assert.match(a.element('#ai-accounts').innerHTML, /id="chatgpt-box"/);
+});
+const languageFixture = () => ({ active: 'ja', saved: 'ja', restartNeeded: false, fallback: false, version: '4.108.0', packs: [
+  { id: 'zh-TW', name: '繁體中文 <img>', source: 'installed', verifiedWith: '4.107.1', usable: true, assets: {} },
+  { id: 'fr-FR', name: 'French', source: 'installed', verifiedWith: '4.108.0', usable: false, reason: 'この版では選べない言語です', assets: {} },
+] });
+function languageApp() {
+  const a = app(); a.context.fixture = snapshot(); a.context.languageFixture = languageFixture();
+  vm.runInContext('state=fixture;view={kind:"settings"};languageSettings=languageFixture;renderSettings()', a.context);
+  const click = a.documentListeners.find(row => row.cb.toString().includes("closest?.('[data-language]')")).cb;
+  return { ...a, click: (action, id) => click({ target: { closest: () => ({ dataset: { language: action, packId: id } }) } }) };
+}
+test('language card shows Japanese standard, installed packs, version mismatch and escaped names', () => {
+  const a = languageApp(), html = a.element('#main').innerHTML;
+  assert.match(html, /<h2>言語<\/h2>/); assert.match(html, /value="ja" selected>日本語（標準）/);
+  assert.match(html, /繁體中文 &lt;img&gt;/); assert.doesNotMatch(html, /繁體中文 <img>/);
+  assert.match(html, /v4.107.1 で確認/); assert.match(html, /一部が日本語/);
+  assert.match(html, /data-language="remove" data-pack-id="fr-FR"/);
+  assert.doesNotMatch(html, /<option value="fr-FR"/); assert.match(html, /言語パックを追加…/);
+});
+test('language draft survives settings refresh; save persists the choice and explains restart/native menus', async () => {
+  const a = languageApp(); a.element('#language-choice').value = 'zh-TW';
+  const change = a.documentListeners.find(row => row.cb.toString().includes("event.target.id === 'language-choice'")).cb;
+  change({ target: { id: 'language-choice', value: 'zh-TW' } });
+  a.context.renderSettings(); assert.match(a.element('#main').innerHTML, /value="zh-TW" selected/);
+  const calls = []; a.context.api = async (route, body) => { calls.push([route, body]); return { ...languageFixture(), saved: 'zh-TW', restartNeeded: true }; };
+  await a.click('save'); assert.deepEqual(calls.map(([route, body]) => [route, JSON.parse(JSON.stringify(body))]), [['/api/language', { language: 'zh-TW' }]]);
+  const html = a.element('#language-box').innerHTML;
+  assert.match(html, /保存しました/); assert.match(html, /アプリを開き直した時/); assert.match(html, /今すぐ再起動/);
+});
+test('language import uses a folder picker and cancellation never submits an import', async () => {
+  for (const chosen of ['', '/expanded pack']) {
+    const a = languageApp(), calls = [];
+    a.context.api = async (route, body) => { calls.push([route, body]); return route === '/api/pick-folder' ? { path: chosen } : languageFixture(); };
+    await a.click('import'); assert.equal(calls[0][0], '/api/pick-folder'); assert.match(calls[0][1].prompt, /展開した言語パック/);
+    assert.equal(calls.length, chosen ? 2 : 1);
+    if (chosen) { assert.equal(calls[1][0], '/api/langpacks/import'); assert.equal(calls[1][1].dir, chosen); }
+    assert.doesNotMatch(a.element('#language-box').innerHTML, /data-language="import" disabled/);
+  }
+});
+test('language removal returns to Japanese; fallback and import errors are visible', async () => {
+  const a = languageApp(); const calls = [];
+  a.context.api = async (route, body) => { calls.push([route, body]); return { ...languageFixture(), packs: [], saved: 'ja' }; };
+  await a.click('remove', 'zh-TW'); assert.equal(calls[0][0], '/api/langpacks/remove'); assert.equal(calls[0][1].id, 'zh-TW');
+  assert.match(a.element('#language-box').innerHTML, /日本語（標準）/);
+  a.context.api = async () => { throw Error('Invalid pack'); }; await a.click('save');
+  assert.match(a.element('#language-box').innerHTML, /Invalid pack/);
+  a.context.fixture = { ...languageFixture(), fallback: true };
+  vm.runInContext('languageSettings=fixture;drawLanguageSettings()', a.context);
+  assert.match(a.element('#language-box').innerHTML, /選んだ言語パックが読めないため/);
+});
+test('busy restart uses the existing endpoint and never stops AI or reloads', async () => {
+  const a = languageApp(), calls = []; let reloads = 0;
+  a.context.location.reload = () => reloads++;
+  a.context.api = async route => { calls.push(route); const error = Error('AIの作業が終わるまで更新できません。'); error.status = 409; throw error; };
+  await a.click('restart'); assert.deepEqual(calls, ['/api/restart']); assert.equal(reloads, 0);
+  assert.match(a.element('#language-box').innerHTML, /AIの作業が終わるまで/);
+});
+test('language restart waits for the selected language to become active before reload', async () => {
+  const a = languageApp(), calls = []; let reloads = 0, polls = 0;
+  a.context.location.reload = () => reloads++;
+  a.context.setTimeout = callback => { callback(); return 1; };
+  a.context.api = async route => { calls.push(route); return route === '/api/restart' ? { ok: true } : { restartNeeded: ++polls < 2 }; };
+  await a.click('restart'); assert.equal(reloads, 1);
+  assert.deepEqual(calls, ['/api/restart', '/api/langpacks', '/api/langpacks']);
+});
+test('an older language load cannot overwrite a completed save; remote settings explain local-only access', async () => {
+  const a = languageApp(); let finish;
+  a.context.api = () => new Promise(resolve => { finish = resolve; });
+  const old = a.context.loadLanguageSettings();
+  a.element('#language-choice').value = 'zh-TW';
+  a.context.api = async () => ({ ...languageFixture(), saved: 'zh-TW', restartNeeded: true });
+  await a.click('save'); finish(languageFixture()); await old;
+  assert.match(a.element('#language-box').innerHTML, /value="zh-TW" selected/);
+  a.context.api = async () => { const error = Error('forbidden'); error.status = 403; throw error; };
+  await a.context.loadLanguageSettings(); assert.match(a.element('#language-box').textContent, /このパソコンから/);
 });
 
-test('ChatGPT login settings use the native app and update only status without replacing drafts', () => {
-  const a = app('ProjectHubApp/1');
-  vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings"}; rolesDraft = []', a.context);
-  a.context.renderSettings();
-  const html = a.element('#main').innerHTML;
-  assert.match(html, /href="hubapp:\/\/gpt\?login=1">ChatGPT にログイン/);
-  assert.equal(a.context.location.href, 'hubapp://gpt?status=1');
-  const status = a.element('#gpt-login-status');
-  a.context.window.hubGptLogin(true); assert.equal(status.textContent, 'ログイン済み');
-  a.context.window.hubGptLogin(false); assert.equal(status.textContent, 'まだ');
-  a.context.window.hubGptLogin('private-data'); assert.equal(status.textContent, 'まだ');
-  assert.equal(a.element('#main').innerHTML, html);
-  assert.equal(vm.runInContext('rolesDraft.length', a.context), 0);
-  a.document.querySelector = () => null;
-  assert.doesNotThrow(() => a.context.window.hubGptLogin(true));
+test('ChatGPT設定からログインと認可を撤去し、MCP許可と未保存の設定を保持する', () => {
+ for (const ua of ['', 'ProjectHubApp/1']) {
+  const a=app(ua);vm.runInContext('state='+JSON.stringify(snapshot())+';view={kind:"settings"};rolesDraft=[]',a.context);
+  a.context.renderSettings();const html=a.element('#ai-accounts').innerHTML;
+  assert.match(html,/<summary>MCP /);assert.match(html,/id="chatgpt-box"/);
+  assert.doesNotMatch(html,/data-plan-action|chatgpt-plan-box|Web版ログイン|gpt-login-status|gpt\?login|Continue with ChatGPT/);
+  assert.equal(a.context.location.href,'');assert.equal(a.context.window.hubGptLogin,undefined);
+  assert.equal(vm.runInContext('rolesDraft.length',a.context),0);
+ }
 });
 
-test('ChatGPT login settings outside the app explain availability without native navigation', () => {
+test('ChatGPT work permission ignores stale reads and preserves the saving choice on account redraw', async () => {
   const a = app();
   vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings"}', a.context);
-  a.context.renderSettings();
-  assert.match(a.element('#main').innerHTML, /事前ログインはアプリで使えます/);
-  assert.doesNotMatch(a.element('#main').innerHTML, /hubapp:\/\/gpt\?login=1|id="gpt-login-status"/);
-  assert.equal(a.context.location.href, '');
-  a.context.window.hubGptLogin(true);
-  assert.equal(a.element('#gpt-login-status').textContent, '');
+  const reads = []; let finishSave;
+  a.context.api = (route, body) => {
+    assert.equal(route, '/api/chatgpt');
+    if (body) { assert.equal(body.work, true); return new Promise(resolve => { finishSave = resolve; }); }
+    return new Promise(resolve => reads.push(resolve));
+  };
+  const oldRead = a.context.loadChatgpt(), latestRead = a.context.loadChatgpt();
+  reads[1]({work:false}); await latestRead;
+  reads[0]({work:true}); await oldRead;
+  assert.doesNotMatch(a.element('#chatgpt-box').innerHTML, /checked/);
+  const checkbox = a.element('#chatgpt-work'); checkbox.id = 'chatgpt-work'; checkbox.checked = true;
+  const change = a.documentListeners.find(x => x.name === 'change' && x.cb.toString().includes("e.target.id !== 'chatgpt-work'"));
+  const saving = change.cb({target:checkbox}); assert.equal(checkbox.disabled, true);
+  a.context.drawAccountSettings();
+  const redrawRead = a.context.loadChatgpt();
+  reads[2]({work:false}); reads[3]({work:false}); await redrawRead;
+  assert.match(a.element('#chatgpt-box').innerHTML, /checked disabled/);
+  finishSave({work:true}); await saving;
+  const savedRead = a.context.loadChatgpt();
+  reads[4]({work:true}); reads[5]({work:true}); await savedRead;
+  assert.match(a.element('#chatgpt-box').innerHTML, /checked/);
+  assert.doesNotMatch(a.element('#chatgpt-box').innerHTML, /disabled|chatgpt-register|config.toml/);
 });
 
 for (const [before, after] of [
@@ -1658,7 +3002,9 @@ test('初期AI設定カードの即保存・失敗戻し・入力優先・利用
   const prior = a.context.quickDraft({ id: 'prior', startSpec: { ai: 'codex', model: 'Astra', effort: '極高' } });
   vm.runInContext('state.projects.push({id: "prior", startSpec: {ai: "codex", model: "Astra", effort: "極高"}})', a.context);
   await a.events.get('change')({ target: { dataset: { initial: 'ai' }, value: 'claude' } });
-  assert.deepEqual(calls[0], { route: '/api/models/initial', body: { ai: 'claude', model: 'Opus 5.5', effort: '高' } });
+  const initialSaves = calls.filter(call => call.route === '/api/models/initial');
+  assert.equal(initialSaves.length, 1);
+  assert.deepEqual(initialSaves[0], { route: '/api/models/initial', body: { ai: 'claude', model: 'Opus 5.5', effort: '高' } });
   assert.equal(a.context.quickDraft(data.projects[0]).ai, 'claude');
   assert.equal(a.context.quickDraft({ id: 'typing' }).text, 'まだ保存していない指示');
   assert.equal(a.context.quickDraft({ id: 'saved' }), saved);
@@ -1710,21 +3056,21 @@ test('スマホAI一覧は指定の短い名前、PCは従来名、表示名変�
   const html = () => a.context.chatHtml(s.projects[0], s.projects[0].tasks[0]);
   const option = (markup, value) => markup.match(new RegExp('<option value="' + value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*>([^<]*)</option>'))[1];
   let h = html();
-  for (const [key, text] of [['claude|Opus 5.5', 'Opus 5.5'], ['codex|GPT-6.1-Sol', '6.1-Sol'], ['agy|Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro'], ['chatgpt|app', 'ChatGPT']]) assert.equal(option(h, key), text);
+  for (const [key, text] of [['claude|Opus 5.5', 'Opus 5.5'], ['codex|GPT-6.1-Sol', '6.1-Sol'], ['agy|Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro (High)'], ['chatgpt|auto', 'Chat／Pro']]) assert.equal(option(h, key), text);
   assert.match(h, /value="codex\|GPT-6.1-Sol"[^>]*selected/);
   const before = vm.runInContext('JSON.stringify([state.roles,state.cliFlags,state.projects,chatPick(state.projects[0],state.projects[0].tasks[0])])', a.context);
-  vm.runInContext('state.phoneLabels={labels:"short",names:{"codex|GPT-6.1-Sol":"私のソル","chatgpt|app":"貼る <文>"}}', a.context);
-  assert.equal(option(html(), 'codex|GPT-6.1-Sol'), '私のソル'); assert.equal(option(html(), 'chatgpt|app'), '貼る &lt;文&gt;');
+  vm.runInContext('state.phoneLabels={labels:"short",names:{"codex|GPT-6.1-Sol":"私のソル","chatgpt|auto":"貼る <文>"}}', a.context);
+  assert.equal(option(html(), 'codex|GPT-6.1-Sol'), '私のソル'); assert.equal(option(html(), 'chatgpt|auto'), '貼る &lt;文&gt;');
   a.context.matchMedia = () => ({ matches: false });
   assert.equal(option(html(), 'codex|GPT-6.1-Sol'), 'Codex・GPT-6.1-Sol');
-  assert.equal(option(html(), 'chatgpt|app'), 'ChatGPT（アプリで作業。送ると貼る文をコピー）');
+  assert.equal(option(html(), 'chatgpt|auto'), 'ChatGPT（Chat／Pro）');
   a.context.matchMedia = () => ({ matches: true }); vm.runInContext('state.phoneLabels.labels="full"', a.context);
   assert.equal(option(html(), 'codex|GPT-6.1-Sol'), 'Codex・GPT-6.1-Sol');
   assert.equal(vm.runInContext('JSON.stringify([state.roles,state.cliFlags,state.projects,chatPick(state.projects[0],state.projects[0].tasks[0])])', a.context), before);
   vm.runInContext('state.phoneLabels.labels="short";state.cliFlags.codex={"GPT-6.1-Sol":""}', a.context);
   assert.equal(option(html(), 'codex|GPT-6.1-Sol'), '私のソル（既定）');
   s.projects[0].tasks[0].model = 'GPT-lost'; vm.runInContext('state.projects[0].tasks[0].model="GPT-lost"', a.context);
-  assert.equal(option(html(), 'codex|GPT-lost'), 'lost（利用できません。選び直してください）');
+  assert.equal(option(html(), 'codex|GPT-lost'), 'lost（利用不可。選び直してください）');
 });
 
 test('スマホ設定カードの保存/失敗と遅いpoll、他端末更新も入力を作り直さない', async () => {
@@ -1764,7 +3110,7 @@ test('スマホ設定カードの保存/失敗と遅いpoll、他端末更新も
 
 // 保存のたびにカードを置換していないことと、移動先のフォーカスを検証するDOM。
 function phoneCard(a, s) {
-  const box = a.element('#phone-labels'), keys = [...a.context.orderedModels(), 'chatgpt|app'];
+  const box = a.element('#phone-labels'), keys = [...a.context.orderedModels(), 'chatgpt|auto'];
   const inputs = keys.map(key => ({ dataset: { phoneName: key }, value: s.phoneLabels.names[key] || '', disabled: false }));
   const radios = ['short', 'full'].map(mode => ({ dataset: { phoneMode: mode }, checked: mode === s.phoneLabels.labels, disabled: false }));
   const status = { textContent: '' }; let replacements = 0;
@@ -1777,6 +3123,7 @@ function phoneCard(a, s) {
 
 test('名前保存中の欄移動・追加入力・連続保存でDOMと移動先フォーカスを保つ', async () => {
   const a = app(), s = snapshot(), calls = [], waits = [];
+  const input = a.documentListeners.find(x => x.name === 'input' && x.cb.toString().includes('phoneLabelDrafts')).cb;
   s.roles.models = { codex: ['GPT-6.1-Sol'] }; s.phoneLabels = { labels: 'short', names: {} };
   vm.runInContext('state=' + JSON.stringify(s) + ';view={kind:"settings",project:"p"}', a.context);
   const card = phoneCard(a, s), [first, second] = card.inputs;
@@ -1788,17 +3135,17 @@ test('名前保存中の欄移動・追加入力・連続保存でDOMと移動�
   first.value = '保存する名前';
   const saving = a.context.savePhoneLabels({ key: first.dataset.phoneName, name: first.value });
   a.document.activeElement = second; second.value = '次の欄の入力';
-  a.events.get('input')({ target: second });
+  input({ target: second });
   await a.context.savePhoneLabels({ key: second.dataset.phoneName, name: second.value });
   // 保存途中で編集元にも追加入力した場合、古い応答で消してはいけない。
-  a.document.activeElement = first; first.value = 'まだ未確定の追加入力'; a.events.get('input')({ target: first });
+  a.document.activeElement = first; first.value = 'まだ未確定の追加入力'; input({ target: first });
   waits.shift()(); await new Promise(setImmediate);
   assert.equal(calls.length, 2); assert.equal(first.value, 'まだ未確定の追加入力');
   a.document.activeElement = second; waits.shift()(); await saving;
   assert.equal(a.document.activeElement, second); assert.equal(second.value, '次の欄の入力');
   assert.equal(first.value, 'まだ未確定の追加入力'); assert.equal(card.replacements(), 0);
   assert.ok(card.inputs.every(el => !el.disabled));
-  assert.equal(vm.runInContext('state.phoneLabels.names["chatgpt|app"]', a.context), '次の欄の入力');
+  assert.equal(vm.runInContext('state.phoneLabels.names["chatgpt|auto"]', a.context), '次の欄の入力');
 });
 
 test('名前保存中のradioを順に保存し、失敗しても入力を残して自動再試行しない', async () => {
@@ -1890,7 +3237,7 @@ test('複数項目の失敗は個別に解除し、mode失敗も無関係な名�
   await a.context.savePhoneLabels({ key: chatgpt.dataset.phoneName, name: 'チャット' });
   await a.context.savePhoneLabels({ labels: 'full' });
   assert.match(card.status.textContent, /6\.1-Sol の名前は未保存/);
-  assert.match(card.status.textContent, /ChatGPT の名前は未保存/);
+  assert.match(card.status.textContent, /Chat／Pro の名前は未保存/);
   assert.match(card.status.textContent, /表示方法は未保存/);
   const stored = JSON.parse(JSON.stringify(s.phoneLabels));
   let release; const hold = new Promise(resolve => { release = resolve; });
@@ -1903,11 +3250,11 @@ test('複数項目の失敗は個別に解除し、mode失敗も無関係な名�
   assert.match(card.status.textContent, /保存中.*6\.1-Sol の名前は未保存/);
   release(); await saving;
   assert.doesNotMatch(card.status.textContent, /6\.1-Sol の名前は未保存/);
-  assert.match(card.status.textContent, /ChatGPT の名前は未保存/);
+  assert.match(card.status.textContent, /Chat／Pro の名前は未保存/);
   assert.match(card.status.textContent, /表示方法は未保存/);
   await a.context.savePhoneLabels({ labels: 'full' });
   assert.doesNotMatch(card.status.textContent, /表示方法は未保存/);
-  assert.match(card.status.textContent, /ChatGPT の名前は未保存/);
+  assert.match(card.status.textContent, /Chat／Pro の名前は未保存/);
   await a.context.savePhoneLabels({ labels: 'short' });
   await a.context.savePhoneLabels({ key: chatgpt.dataset.phoneName, name: '修正チャット' });
   assert.equal(card.status.textContent, 'スマホの表示を保存しました');
@@ -1933,7 +3280,7 @@ test('通知refreshTree先行と304/null後も表示名を同期し、blur後も
   a.context.matchMedia = () => ({ matches: false }); await a.context.pollState(); assert.equal(option.textContent, 'Codex・GPT-6.1-Sol');
 });
 
-test('役割AIは追加アカウントを含むログイン状態で制限し、Gemini固定とChatGPT行を表示する', () => {
+test('役割AIは追加アカウントを含むログイン状態で制限し、Geminiのモデル選択とChatGPT行を表示する', () => {
   const a = app(), data = snapshot(); data.agyAvailable = true;
   data.roles.models = {codex:['GPT-6.1-Sol'], 'claude-code':['Opus 5.5'], agy:['Gemini 3.1 Pro (High)']};
   data.roles.roles = [{name:'調査',main:{ai:'agy',model:'Gemini 3.1 Pro (High)',effort:'高'},backup:{ai:'codex',model:'GPT-6.1-Sol',effort:'MAX'}}];
@@ -1945,11 +3292,27 @@ test('役割AIは追加アカウントを含むログイン状態で制限し、
   assert.match(options, /value="codex" selected disabled/); assert.doesNotMatch(options, /ChatGPT/);
   a.context.renderSettings();
   const html = a.element('#main').innerHTML;
-  assert.match(html,/data-f="model" aria-label="モデル" disabled/); assert.match(html,/data-f="effort" aria-label="思考" disabled/);
-  const accounts = a.element('#ai-accounts').innerHTML; assert.match(accounts,/ChatGPT を開く/); assert.match(accounts,/キーチェーン/); assert.match(accounts,/value="agy" disabled/);
+  assert.doesNotMatch(html,/data-f="model" aria-label="モデル" disabled/); assert.match(html,/data-f="effort" aria-label="思考" hidden disabled/);
+  const accounts = a.element('#ai-accounts').innerHTML; assert.match(accounts,/<summary>MCP /); assert.match(accounts,/キーチェーン/); assert.match(accounts,/value="agy" disabled/);
   vm.runInContext('state.agyAvailable=false; state.accounts[3].status="not-installed"',a.context);
   assert.match(a.context.roleAiOptions('agy'),/value="agy" selected disabled>Gemini（Agy CLI）（未導入）/);
 });
+test('認証用Terminalが開いたままでも再確認でログイン済みになり、未確認の理由を安全に表示する', async () => {
+  const a = app(), data = snapshot(); data.agyAvailable = true;
+  data.accounts = [{ai:'agy',id:'default',name:'既定',busy:true,authTerminal:true,status:'unknown',message:'確認できません <script>bad</script>'}];
+  vm.runInContext('state='+JSON.stringify(data)+';view={kind:"settings"}',a.context);
+  const before = a.context.accountSettingsHtml();
+  assert.match(before, /未確認[\s\S]*認証用Terminalを開いています/);
+  assert.match(before, /確認できません &lt;script&gt;bad&lt;\/script&gt;/); assert.doesNotMatch(before, /<script>bad/);
+  assert.doesNotMatch(before, /・作業中／順番待ち/);
+  a.context.api = async route => route === '/api/chatgpt' ? {work:false} : {accounts:[{...data.accounts[0],status:'logged-in',message:''}]};
+  await a.context.checkRoleAccounts();
+  const after = a.context.accountSettingsHtml();
+  assert.match(after, /ログイン済み[\s\S]*認証用Terminalを開いています/); assert.doesNotMatch(after.split('<div class="account-row ai-chatgpt-row">')[0], /確認できません|bad/);
+  assert.doesNotMatch(after, /data-account-action="login"/); assert.match(after, /data-account-action="logout"\s*>/);
+  assert.match(a.context.roleAiOptions('agy'), /value="agy" selected\s+>Gemini/);
+});
+
 test('役割状態の自動確認は1回・再確認は共通結果を使い、編集中の値とDOMを保持する', async () => {
   const a = app(), data = snapshot(); data.agyAvailable = true;
   data.roles.roles = [{name:'調査',main:{ai:'codex',model:'draft',effort:'MAX'},backup:{ai:'人'}}];
@@ -1967,16 +3330,16 @@ test('役割状態の自動確認は1回・再確認は共通結果を使い、�
   assert.match(select.innerHTML,/value="agy"\s+>Gemini/); assert.match(select.innerHTML,/value="codex" selected disabled/);
   assert.match(a.element('#role-account-status').textContent,/\d\d:\d\d に確認/);
   a.context.selectSettingsTab('basic'); a.context.selectSettingsTab('ai'); assert.equal(calls,1);
-  a.context.api = async()=>{calls++;throw Error('fixture failure');};
+  a.context.api = async route=>{if(route === '/api/chatgpt') return {work:false}; calls++;throw Error('fixture failure');};
   await assert.rejects(a.context.checkRoleAccounts(), /fixture failure/); assert.equal(calls,2);
   a.context.selectSettingsTab('ai'); assert.equal(calls,2); assert.match(a.element('#role-account-status').textContent,/fixture failure/);
 });
-test('Geminiへ役割を切り替えるとモデルと高を固定する', async () => {
+test('Geminiへ役割を切り替えてもモデルを自動選択せず高を保持する', async () => {
   const a=app(), data=snapshot();data.roles.models.agy=['Gemini 3.1 Pro (High)'];
   data.roles.roles=[{name:'調査',main:{ai:'codex',model:'old',effort:'Ultra'},backup:{ai:'人'}}];
   vm.runInContext('state='+JSON.stringify(data)+';rolesDraft=JSON.parse(JSON.stringify(state.roles.roles));render=()=>{}',a.context);
   await a.events.get('change')({target:{dataset:{r:'0',k:'main',f:'ai'},value:'agy'}});
-  assert.equal(vm.runInContext('rolesDraft[0].main.model',a.context),'Gemini 3.1 Pro (High)'); assert.equal(vm.runInContext('rolesDraft[0].main.effort',a.context),'高');
+  assert.equal(vm.runInContext('rolesDraft[0].main.model',a.context),''); assert.equal(vm.runInContext('rolesDraft[0].main.effort',a.context),'高');
 });
 
 for (const failure of ['HTTP 503', '通信拒否']) test(`アカウント確認の${failure}後も現DOMで再試行でき、busyと役割下書きを保持する`, async () => {
@@ -1986,7 +3349,7 @@ for (const failure of ['HTTP 503', '通信拒否']) test(`アカウント確認�
   vm.runInContext('state='+JSON.stringify(data)+';view={kind:"settings"};rolesDraft=JSON.parse(JSON.stringify(state.roles.roles))',a.context);
   a.element('#account-new-ai').value='codex';
   const button={disabled:false,dataset:{accountAction:'status'},closest:()=>null};
-  let reject; a.context.api=()=>new Promise((_,r)=>reject=r);
+  let reject; a.context.api=route=>route === '/api/chatgpt' ? Promise.resolve({work:false}) : new Promise((_,r)=>reject=r);
   const pending=a.context.operateAccount(button);
   a.context.drawAccountSettings(); // 操作中の画面交換
   assert.match(a.element('#ai-accounts').innerHTML,/data-account-action="status" disabled/);
@@ -2032,7 +3395,7 @@ test('Grok task chat/terminal account choices and buttons use Grok without chang
  assert.doesNotMatch(a.context.initialPickHtml(),/Grok/);
 });
 
-test('成果整理は完了確認・完了ボタンを出さず、稼働中はあなたの番に数えない',()=>{
+test('成果整理は完了確認・完了ボタンを出さず、稼働中は作業中にだけ数える',()=>{
  const a=app();vm.runInContext(`state={projects:[],sessions:[],chatting:[],waiting:[]};`,a.context);
  for(const auto of ['running','failed','blocked','none']) {
   const t={id:'kid',title:'子',state:'実行中',steps:[{done:true,text:'完成'}],question:'',completionPending:false,resultsPending:{auto,reason:'書式を確認してください',detail:'理由'}};
@@ -2042,6 +3405,1027 @@ test('成果整理は完了確認・完了ボタンを出さず、稼働中は�
   if(auto==='running')assert.doesNotMatch(html,/成果の整理を頼む/);else assert.match(html,/成果の整理を頼む/);
   assert.equal(vm.runInContext('Boolean(NEEDS(gateTask))',a.context),auto!=='running');
   assert.equal(vm.runInContext('Boolean(REPLY(gateProject,gateTask))',a.context),auto!=='running');
-  const row=vm.runInContext('taskRow(gateProject,gateTask,false,"reply")',a.context);assert.match(row,/成果整理/);assert.doesNotMatch(row,/完了確認|送らずに消す/);
+  const row=vm.runInContext('taskRow(gateProject,gateTask,false,"reply")',a.context);assert.match(row,auto==='running'?/作業中/:/成果整理/);assert.doesNotMatch(row,/完了確認|送らずに消す/);
+  assert.equal(vm.runInContext('notificationKind(gateProject,gateTask)',a.context),auto==='running'?'work':'reply');
  }
+});
+
+test('契約枠と手動候補を撤去し、自動Chat／ProとCodexのAstraを保持する',()=>{
+ const a=app(),s=snapshot();s.roles.models.codex=['GPT-6.1-Sol','Astra'];vm.runInContext('state='+JSON.stringify(s),a.context);
+ const p=s.projects[0],t=p.tasks[0];let html=a.context.chatHtml(p,t);
+ assert.doesNotMatch(html,/value="chatgpt\|gpt-6-astra"|chat-plan-label|契約枠/);
+ assert.doesNotMatch(html,/dot\|inbox/);
+ for(const value of ['chatgpt|auto'])assert.ok(html.includes('value="'+value+'"'));
+ assert.ok(s.roles.models.codex.includes('Astra'));
+ a.context.chatPick=()=>({ai:'chatgpt',model:'gpt-6-astra',effort:''});html=a.context.chatHtml(p,t);
+ assert.match(html,/value="chatgpt\|gpt-6-astra"[^>]*selected disabled/);
+ assert.match(html,/利用不可。選び直してください/);
+ assert.doesNotMatch(html,/value="chatgpt\|chat"[^>]*selected/);
+});
+
+test('stale app warning appears at the top and in ChatGPT settings only inside the app', () => {
+ for (const ua of ['', 'ProjectHubApp/1']) {
+  const a = app(ua), s = snapshot(); s.appShell = { stale: true, appVersion: '4.53.3' };
+  vm.runInContext('state='+JSON.stringify(s), a.context); a.context.drawShellAlerts(); const html = a.context.accountSettingsHtml();
+  if (ua) { assert.match(html, /古い版 v4.53.3/); assert.match(a.element('#app-shell-alert').innerHTML, /data-shell-rebuild/); assert.equal(a.element('#app-shell-alert').hidden, false); }
+  else { assert.doesNotMatch(html, /data-shell-rebuild/); assert.equal(a.element('#app-shell-alert').hidden, true); }
+  s.appShell.stale = false; vm.runInContext('adoptState('+JSON.stringify(s)+')', a.context); assert.equal(a.element('#app-shell-alert').hidden, true);
+ }
+});
+test('rebuild button disables duplicates and reports success or failure without restarting', async () => {
+ for (const failed of [false, true]) {
+  const a = app('ProjectHubApp/1'), s = snapshot(); s.appShell = { stale: true, appVersion: '4.53.3' }; vm.runInContext('state='+JSON.stringify(s), a.context);
+  let finish, calls = 0, notice; a.context.toast = text => { notice = text; };
+  a.context.api = route => { assert.equal(route, '/api/app/rebuild'); calls++; return new Promise((resolve, reject) => { finish = () => failed ? reject(Error('fixture failure')) : resolve({ ok: true }); }); };
+  const handler = a.documentListeners.find(x => x.cb.toString().includes("closest('[data-shell-rebuild]')")).cb, event = { target: { closest: () => ({}) } };
+  const pending = handler(event); assert.match(a.element('#app-shell-alert').innerHTML, /disabled/); await handler(event); assert.equal(calls, 1); finish(); await pending;
+  assert.match(notice, failed ? /fixture failure/ : /終了して開き直して/); assert.equal(a.context.location.href, '');
+  assert.match(a.element('#app-shell-alert').innerHTML, failed ? /data-shell-rebuild/ : /終了して開き直して/);
+ }
+});
+test('廃止Dotは選択不可で、旧依頼は再送案内のない参照表示にする',async()=>{
+  const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];t.owner='dot';
+  vm.runInContext('state='+JSON.stringify(s),a.context);
+  assert.match(a.context.chatHtml(p,t),/value="dot\|inbox"[^>]*disabled/);
+  assert.doesNotMatch(source,/<option value="dot">|const DOT_SETUP/);
+  const html=a.context.msgHtml({role:'user',to:'dot',request:'old',text:'<script>old</script>'});
+  assert.match(html,/廃止・参照のみ/);assert.doesNotMatch(html,/data-copy|Hubの依頼|<script>/);
+  a.context.api=async()=>({work:false});await a.context.loadChatgpt();
+  const settings=a.element('#chatgpt-box').innerHTML;assert.match(settings,/id="chatgpt-work"/);assert.doesNotMatch(settings,/Dot|hub_dot_inbox|トンネル/);
+});
+test('旧Dot選択を残した画面からは送信せず、入力を保持する',async()=>{
+  const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"work",project:"p",task:"t"}',a.context);
+  a.element('#chat-ai').value='dot|inbox';a.element('#chat-in').value='残す依頼';a.element('#chat-effort').value='高';
+  let send,calls=0;a.context.bindAskAnswers=(_box,cb)=>{send=cb;};a.context.toast=()=>{};
+  a.context.api=async route=>{if(route.startsWith('/api/discussion?'))return discussionView();calls++;throw Error('must not send');};
+  a.context.openChat(p,t);assert.equal(await send(),false);assert.equal(calls,0);assert.equal(a.element('#chat-in').value,'残す依頼');
+});
+
+function queuedUI() {
+ const a=app(),s=snapshot();vm.runInContext('state='+JSON.stringify(s)+';view={kind:"work",project:"p",task:"t"}',a.context);
+ a.context.toast=m=>{a.lastToast=m;};a.element('#chat-in').value='composer draft';a.context.openChat(s.projects[0],s.projects[0].tasks[0]);
+ const el=a.element('#chat-queue'),input={dataset:{queueText:'q1'},value:'',selectionStart:0,selectionEnd:0,focus(){a.document.activeElement=this;},setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;}};
+ el.querySelector=()=>input;a.input=input;
+ a.queue=rows=>a.stream().onmessage({data:JSON.stringify({type:'queue',queue:rows})});
+ a.click=d=>el.handlers.click({target:{closest:()=>({dataset:d})}});
+ a.type=text=>{input.value=text;el.handlers.input({target:input});};
+ return a;
+}
+const queuedItem={id:'q1',ai:'codex',model:'GPT-6.1-Sol',text:'queued\nline'};
+test('停止保留表示：作業画面は解除前後とも未処理理由と同じ指示・モデル・添付を保つ',()=>{
+ const a=queuedUI(),item={...queuedItem,stopHeld:true,images:[{id:'kept-image'}]},before=JSON.stringify(item);
+ let calls=0;a.context.api=async()=>{calls++;throw Error('display must not send');};
+ vm.runInContext('state.stopControl={all:true,tasks:[]}',a.context);a.queue([item]);
+ assert.match(a.element('#chat-queue').innerHTML,/保留中.*復旧/);
+ vm.runInContext('state.stopControl={all:false,tasks:[]}',a.context);a.queue([item]);
+ assert.match(a.element('#chat-queue').innerHTML,/自動では始まりません/);
+ assert.match(a.element('#chat-queue').innerHTML,/data-run="q1"/);
+ assert.equal(a.element('#chat-in').value,'composer draft');assert.equal(JSON.stringify(item),before);assert.equal(calls,0);
+});
+test('queued editor keeps multiline draft and cursor through queue changes without touching composer',async()=>{
+ const a=queuedUI();a.queue([queuedItem]);assert.match(a.element('#chat-queue').innerHTML,/data-qedit/);assert.doesNotMatch(a.element('#chat-queue').innerHTML,/data-qamend/);
+ await a.click({qedit:'q1'});a.type('edited\n<script>literal</script>');a.input.selectionStart=4;a.input.selectionEnd=7;
+ a.queue([queuedItem,{...queuedItem,id:'q2',text:'later'}]);assert.match(a.element('#chat-queue').innerHTML,/edited\n&lt;script&gt;literal&lt;\/script&gt;/);assert.equal(a.document.activeElement,a.input);assert.deepEqual([a.input.selectionStart,a.input.selectionEnd],[4,7]);assert.equal(a.element('#chat-in').value,'composer draft');
+ a.queue([]);assert.equal(a.element('#chat-queue').hidden,false);assert.match(a.element('#chat-queue').innerHTML,/編集内容は残っています/);
+});
+test('queue save failures retain draft; save during further typing updates expected text without discarding later edits',async()=>{
+ const a=queuedUI();a.queue([queuedItem]);await a.click({qedit:'q1'});a.type('first edit');
+ a.context.api=async()=>{throw Error('save failed');};await a.click({qsave:'q1'});assert.match(a.element('#chat-queue').innerHTML,/first edit/);assert.equal(a.lastToast,'save failed');
+ let finish,request;a.context.api=(route,body)=>{request={route,body};return new Promise(r=>finish=r);};
+ const saving=a.click({qsave:'q1'});a.type('later edit');await a.click({qsave:'q1'});finish({queue:[{...queuedItem,text:'first edit'}]});await saving;
+ assert.equal(request.route,'/api/chat/queue/edit');assert.equal(request.body.expectedText,queuedItem.text);assert.match(a.element('#chat-queue').innerHTML,/later edit/);
+ a.context.api=async(route,body)=>{assert.equal(body.expectedText,'first edit');return {queue:[{...queuedItem,text:body.text}]};};await a.click({qsave:'q1'});assert.doesNotMatch(a.element('#chat-queue').innerHTML,/qeditor/);assert.match(a.element('#chat-queue').innerHTML,/later edit/);
+});
+test('queued amend sends selected ID once, retains failure and prevents sending unsaved edits',async()=>{
+ const a=queuedUI();vm.runInContext('chatBusy={ai:"codex",model:"GPT-6.1-Sol"}',a.context);a.queue([queuedItem,{...queuedItem,id:'q2',text:'remaining'}]);assert.match(a.element('#chat-queue').innerHTML,/すぐ追加/);
+ await a.click({qedit:'q1'});a.type('unsaved');let calls=0;a.context.api=async()=>{calls++;throw Error('launch failed');};await a.click({qamend:'q1'});assert.equal(calls,0);assert.match(a.lastToast,/保存してから/);
+ await a.click({qclose:'q1'});await a.click({qamend:'q1'});assert.equal(calls,1);assert.match(a.element('#chat-queue').innerHTML,/queued/);
+ let finish,request;a.context.api=(route,body)=>{calls++;request={route,body};return new Promise(r=>finish=r);};const sending=a.click({qamend:'q1'});await a.click({qamend:'q1'});assert.equal(calls,2);finish({ok:true});await sending;
+ assert.equal(request.route,'/api/chat/send');assert.equal(request.body.fromQueue,'q1');assert.equal(request.body.mode,'amend');assert.equal(request.body.expectedText,queuedItem.text);assert.doesNotMatch(a.element('#chat-queue').innerHTML,/data-qamend="q1"/);assert.match(a.element('#chat-queue').innerHTML,/remaining/);assert.equal(a.element('#chat-in').value,'composer draft');
+});
+
+function historyUI() {
+  const a = conversationApp(), ta = a.element('#chat-in');
+  ta.selectionStart = ta.selectionEnd = 0;
+  ta.setSelectionRange = (start,end) => { ta.selectionStart=start; ta.selectionEnd=end; };
+  a.key = (key, extra = {}) => { const e = {key,preventDefault(){this.prevented=true;},...extra}; ta.handlers.keydown(e); return !!e.prevented; };
+  a.type = text => { ta.value=text; ta.handlers.input(); };
+  a.record = text => { a.context.historyText=text; vm.runInContext('instructionHistory.record(chatAttachmentKey("p","t"), historyText)',a.context); };
+  return a;
+}
+test('composer arrows recall text directly and restore converted draft, cursor and file/image attachments', () => {
+  const a=historyUI(), ta=a.element('#chat-in'); a.record('older'); a.record('last\nline');
+  a.type('変換済み\n書きかけ'); ta.setSelectionRange(2,2);
+  a.context.chatImages('p','t').push(attached()); a.context.appendChatPaths('p','t',['/local/note.txt']);
+  const before=JSON.stringify(a.context.chatImages('p','t'));
+  assert.equal(a.key('ArrowUp'),true); assert.equal(ta.value,'last\nline');
+  a.type('edited last'); assert.equal(a.key('ArrowUp'),true); assert.equal(ta.value,'older');
+  assert.equal(a.key('ArrowDown'),true); assert.equal(ta.value,'edited last');
+  assert.equal(a.key('ArrowDown'),true); assert.equal(ta.value,'変換済み\n書きかけ');
+  assert.deepEqual([ta.selectionStart,ta.selectionEnd],[2,2]);
+  assert.equal(JSON.stringify(a.context.chatImages('p','t')),before);
+  assert.equal(a.key('ArrowDown'),false);
+  a.element('#chat-images').handlers.click({target:{closest:()=>({dataset:{chatRemove:a.context.chatImages('p','t')[1].id}})}});
+  assert.equal(a.context.chatImages('p','t').length,1);
+});
+test('composer keeps native arrows inside instructions and switches history only at the matching edge', () => {
+  const a=historyUI(), ta=a.element('#chat-in'); a.record('old\nsecond\nlast');
+  const draft='first\nmiddle\nlast'; a.type(draft); ta.setSelectionRange(8,8);
+  for (const key of ['ArrowUp','ArrowDown']) { assert.equal(a.key(key),false); assert.equal(ta.value,draft); }
+  ta.setSelectionRange(1,3); assert.equal(a.key('ArrowUp'),false);
+  ta.setSelectionRange(1,1); assert.equal(a.key('ArrowDown'),false);
+  assert.equal(a.key('ArrowUp'),true); assert.equal(ta.value,'old\nsecond\nlast');
+  ta.setSelectionRange(5,5);
+  assert.equal(a.key('ArrowUp'),false); assert.equal(a.key('ArrowDown'),false);
+  ta.setSelectionRange(ta.value.length,ta.value.length);
+  assert.equal(a.key('ArrowDown'),true); assert.equal(ta.value,draft);
+  assert.deepEqual([ta.selectionStart,ta.selectionEnd],[1,1]);
+  ta.setSelectionRange(draft.length,draft.length); assert.equal(a.key('ArrowUp'),false);
+});
+test('IME composition and modified arrow keys retain native behavior, including converted text at compositionend', () => {
+  const a=historyUI(), ta=a.element('#chat-in'); a.record('previous'); a.type('かな');
+  for (const extra of [{isComposing:true},{keyCode:229},{shiftKey:true},{ctrlKey:true},{altKey:true},{metaKey:true}]) assert.equal(a.key('ArrowUp',extra),false);
+  ta.handlers.compositionstart(); assert.equal(a.key('ArrowUp'),false); assert.equal(ta.value,'かな');
+  a.type('漢字'); ta.handlers.compositionend(); assert.equal(a.key('ArrowUp'),true); assert.equal(ta.value,'previous');
+  a.key('ArrowDown'); assert.equal(ta.value,'漢字');
+});
+test('only accepted composer text enters history: failed send, image-only, answers, AI rows and queues are omitted', async () => {
+  const a=historyUI(); a.type('not accepted'); a.context.api=async()=>{throw Error('send failed');};
+  let send; a.context.bindAskAnswers=(_box,cb)=>{send=cb;};
+  a.context.openChat(project(),project().tasks[0]);
+  assert.equal(await send(),false); assert.equal(a.key('ArrowUp'),false);
+  a.context.api=async()=>({ok:true,queued:true,queue:1}); a.context.load=async()=>{};
+  a.type('  human\ninstruction  '); a.context.chatImages('p','t').push(attached()); assert.equal(await send(),true);
+  assert.equal(await send('answer chosen from AI question'),true);
+  a.type(''); a.context.chatImages('p','t').push(attached('image-only')); assert.equal(await send(),true);
+  a.stream().onmessage({data:JSON.stringify({type:'row',row:{role:'user',text:'AI delegation'}})});
+  a.stream().onmessage({data:JSON.stringify({type:'queue',queue:[{...queuedItem,text:'AI generated continuation'}]})});
+  a.type('new draft'); assert.equal(a.key('ArrowUp'),true); assert.equal(a.element('#chat-in').value,'  human\ninstruction  ');
+  a.key('ArrowUp'); assert.equal(a.element('#chat-in').value,'  human\ninstruction  ');
+  assert.doesNotMatch(a.element('#chat-in').value,/\/local|AI|answer/);
+});
+test('history navigation survives a redraw and never discards a newer draft during an accepted send', async () => {
+  const a=historyUI(); a.record('previous'); a.type('current'); a.key('ArrowUp');
+  a.context.openChat(project(),project().tasks[0]); a.key('ArrowDown'); assert.equal(a.element('#chat-in').value,'current');
+  let send,finish; a.context.bindAskAnswers=(_box,cb)=>{send=cb;}; a.context.openChat(project(),project().tasks[0]);
+  a.context.api=()=>new Promise(r=>finish=r); a.context.load=async()=>{};
+  const sending=send(); a.type('newer converted draft'); a.key('ArrowUp'); finish({ok:true,queued:true,queue:1});
+  assert.equal(await sending,true); a.key('ArrowDown'); assert.equal(a.element('#chat-in').value,'newer converted draft');
+});
+test('send completion cannot erase a new draft when a recalled instruction exactly equals the pending sent text', async () => {
+  const a=historyUI(); a.record('same sent text'); a.type('same sent text');
+  let send,finish; a.context.bindAskAnswers=(_box,cb)=>{send=cb;}; a.context.openChat(project(),project().tasks[0]);
+  a.context.api=()=>new Promise(r=>finish=r);
+  const sending=send(); a.type('new converted draft'); a.key('ArrowUp');
+  assert.equal(a.element('#chat-in').value,'same sent text'); finish({ok:true,queued:true,queue:1}); await sending;
+  assert.equal(a.element('#chat-in').value,'same sent text'); a.key('ArrowDown'); assert.equal(a.element('#chat-in').value,'new converted draft');
+});
+test('file-only and mixed attachments preserve paths for CLI requests', async () => {
+  const a=historyUI(); a.element('#chat-ai').value='codex|GPT-6.1-Sol'; a.context.appendChatPaths('p','t',['/local/note.txt']);
+  a.context.chatImages('p','t').push(attached()); let send,request;
+  a.context.bindAskAnswers=(_box,cb)=>{send=cb;}; a.context.openChat(project(),project().tasks[0]);
+  a.context.api=async(_route,body)=>{request=body;return {ok:true,queued:true,queue:1};}; a.context.load=async()=>{};
+  assert.equal(await send(),true); assert.match(request.text,/\/local\/note.txt\n\/local\/first.png/);
+  assert.equal(request.images,undefined); assert.equal(a.context.chatImages('p','t').length,0);
+  a.type('draft'); assert.equal(a.key('ArrowUp'),false,'file-only fallback is generated, so it is not human history');
+});
+test('retired manual/app choices reject before clipboard, request, history or draft changes', async () => {
+  for(const model of ['chat','app']) {
+    const a=historyUI(); a.element('#chat-ai').value='chatgpt|'+model; a.type('keep draft');
+    a.context.appendChatPaths('p','t',['/local/note.txt']);
+    let send; const notices=[]; a.context.bindAskAnswers=(_box,cb)=>{send=cb;};
+    a.context.openChat(project(),project().tasks[0]);
+    a.context.api=()=>assert.fail('retired route must not call API');
+    a.context.copyText=()=>assert.fail('retired route must not copy');
+    a.context.toast=text=>notices.push(text);
+    assert.equal(await send(),false); assert.equal(a.element('#chat-in').value,'keep draft');
+    assert.equal(a.context.chatImages('p','t').length,1);assert.equal(a.key('ArrowUp'),false);
+    assert.match(notices.join(' '),/廃止された経路/);
+  }
+});
+
+test('当日対象0件の後でもUI一括操作から新鮮な対象確認を要求し連打を防ぐ', async () => {
+  const a = app(); a.context.fixture = snapshot(); let posts = 0, release;
+  a.context.api = async route => { assert.equal(route, '/api/ai-tools/update-all'); posts++; await new Promise(r => release = r); return { results: [] }; };
+  a.context.loadAiTools = async () => {}; a.context.refreshAiToolCatalog = async () => {};
+  vm.runInContext('state=fixture;aiTools={codex:{installed:true,eligible:false,status:"logged-out"}};drawAiTools()', a.context);
+  assert.doesNotMatch(a.element('#ai-tools').innerHTML, /data-ai-update-all disabled/);
+  const pending = a.context.runAiUpdateAll(); await a.context.runAiUpdateAll(); assert.equal(posts, 1); release(); await pending;
+});
+test('上部UpdateはHub/CLI/両方/無しを保持状態で切り替え、busyでもクリック案内を返す', async () => {
+  const a = app(); a.context.fixture = snapshot(); vm.runInContext('state=fixture', a.context);
+  for (const [latest, cli, label] of [['2',false,'Update v2'], ['1',true,'Update AI CLI'], ['2',true,'Update v2 / AI CLI'], ['1',false,'']]) {
+    a.context.latest = latest; a.context.cli = cli;
+    vm.runInContext('state.latest=latest;state.aiCliUpdate={available:cli};showVersion("1",latest)', a.context);
+    assert.equal(a.element('#upd').hidden, !label); if (label) assert.equal(a.element('#upd').textContent, label);
+  }
+  const notices = []; let requests = 0;
+  a.context.toast = x => notices.push(x); a.context.api = async () => { requests++; }; a.context.render = () => {};
+  for (const busy of ['state.updateBlocked=true', 'state.updateBlocked=false;state.aiCliUpdate.busyCount=1', 'state.aiCliUpdate.busyCount=0;state.chatting=[{}]', 'state.chatting=[];state.sessions=[{running:true}]']) {
+    vm.runInContext('state.latest="2";state.aiCliUpdate.available=true;'+busy, a.context);
+    await a.element('#upd').handlers.click(); assert.match(notices.at(-1), /CLIは/); assert.equal(requests, 0); assert.equal(a.element('#upd').disabled, false);
+  }
+  vm.runInContext('state.sessions=[];state.latest="2"', a.context); await a.context.openUpdate();
+  assert.equal(vm.runInContext('view.kind', a.context), 'settings'); assert.equal(vm.runInContext('settingsTab', a.context), 'ai');
+  assert.match(notices.at(-1), /Hubだけなら/); assert.equal(requests, 0);
+  vm.runInContext('state.latest="1"', a.context); await a.context.openUpdate(); assert.match(notices.at(-1), /設定の/);
+  let restarts = 0; a.context.restartHub = async () => restarts++;
+  vm.runInContext('state.aiCliUpdate.available=false;state.latest="2"', a.context); await a.context.openUpdate(); assert.equal(restarts, 1);
+});
+
+
+for (const outcome of ['unsupported', 'failed', 'unexecuted']) test(`CLI一括が${outcome}でも両方表示から明示的なHub単独切替へ到達する`, async () => {
+  const a = app(); a.context.fixture = snapshot(); let restarts = 0;
+  a.context.restartHub = async () => restarts++;
+  a.context.render = () => {};
+  vm.runInContext('state=fixture;state.latest="2";state.aiCliUpdate={available:true};aiTools={codex:{eligible:true,installed:true,version:"0.1",updateCheck:{ok:true,available:true,applicable:true,latestVersion:"0.2"}}}', a.context);
+  if (outcome !== 'unexecuted') {
+    a.context.api = async () => ({ results: [{ai:'codex',state:outcome}] });
+    a.context.loadAiTools = async () => {}; a.context.refreshAiToolCatalog = async () => {};
+    await a.context.runAiUpdateAll();
+  }
+  await a.element('#upd').handlers.click(); assert.equal(restarts,0);
+  a.context.drawAiTools(); assert.match(a.element('#ai-tools').innerHTML, /data-hub-update>Hub を v2 に切り替える/);
+  const target = { closest: selector => selector === '[data-hub-update]' ? {} : null };
+  for (const l of a.documentListeners.filter(l => l.name === 'click' && String(l.cb).includes('[data-hub-update]'))) await l.cb({target});
+  assert.equal(restarts,1);
+  vm.runInContext('state.updateBlocked=true',a.context);
+  await a.context.switchHubUpdate(); assert.equal(restarts,2);
+  assert.equal(a.element('#upd').disabled,false);
+});
+test('未対応CLIの保持取得は上部対象から除外するが行の更新先と未対応案内を保持する', async () => {
+  const a = app(); a.context.fixture=snapshot(); vm.runInContext('state=fixture;state.latest="2"',a.context);
+  for (const applicable of [false,undefined,true]) {
+    a.context.api = async () => ({tools:{codex:{eligible:true,installed:true,version:'0.1',modelsStatus:'changed',updateCheck:{ok:true,available:true,applicable,latestVersion:'0.2'}}}});
+    await a.context.loadAiTools();
+    assert.equal(a.element('#upd').textContent,applicable?'Update v2 / AI CLI':'Update v2');
+    assert.match(a.element('#ai-tools').innerHTML,/→ 0.2/);
+    if(applicable===false) assert.match(a.element('#ai-tools').innerHTML,/この導入方法では、Hubから更新できません/);
+  }
+  a.context.api = async () => ({tools:{codex:{eligible:true,installed:true,modelsStatus:'changed',updateCheck:{ok:true,available:false,applicable:true}}}});
+  await a.context.loadAiTools(); assert.equal(a.element('#upd').textContent,'Update v2');
+  a.context.renderSettings(); assert.match(a.element('#main').innerHTML,/data-hub-update>Hub を v2 に切り替える/);
+});
+
+test('PCとスマホの旧Dot送信は依頼・添付・下書きを保持して拒否する',async()=>{
+ for(const ua of ['', 'iPhone']){
+  const a=app(ua),data=snapshot(),p=data.projects[0],t=p.tasks[0];
+  vm.runInContext('state='+JSON.stringify(data)+';view={kind:"work",project:"p",task:"t"}',a.context);
+  a.context.bindAskAnswers=(_b,fn)=>{a.send=fn;};a.context.toast=()=>{};
+  a.context.api=()=>assert.fail('retired Dot request');a.context.window.open=()=>assert.fail('retired Dot window');
+  a.element('#chat-ai').value='dot|inbox';a.element('#chat-in').value='保持する';a.context.chatImages('p','t').push({id:'keep',name:'image.png',path:'/image.png'});
+  a.context.openChat(p,t);assert.equal(await a.send(),false);assert.equal(await a.send(),false);
+  assert.equal(a.element('#chat-in').value,'保持する');assert.equal(a.context.chatImages('p','t').length,1);assert.equal(vm.runInContext('chatBusy',a.context),null);
+ }
+});
+
+test('conversation rotation rejection and generation reset preserve an unsent draft',async()=>{
+ const a=app(),p=project(),t=p.tasks[0];a.context.fixture=snapshot();vm.runInContext('state=fixture;view={kind:"work",project:"p",task:"t"};',a.context);
+ a.context.openChat(p,t);const input=a.element('#chat-in');input.value='整理後に送る指示';input.handlers.input();a.element('#chat-ai').value='codex|GPT-6.1-Sol';a.element('#chat-effort').value='高';
+ a.context.api=async()=>{throw Error('会話を整理中です');};await a.element('#composer').handlers.submit({preventDefault(){}});await new Promise(r=>setImmediate(r));
+ assert.equal(input.value,'整理後に送る指示');assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context),'整理後に送る指示');
+ a.context.load=async()=>{};a.stream().onmessage({data:JSON.stringify({type:'reset',generation:2})});assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context),'整理後に送る指示');assert.equal(a.context.HubChatGenerations.get('p\0t'),2);
+});
+
+test('自動Chatは初期無効、設定済みで選択可、送信不明は明示的な再送と停止を区別する', () => {
+  const a = app(); a.context.fixture = snapshot();
+  vm.runInContext('state=fixture;view={kind:"work",project:"p",task:"t"};',a.context);
+  const html=()=>vm.runInContext('chatHtml(state.projects[0],state.projects[0].tasks[0])',a.context);
+  assert.match(html(),/<option[^>]*value="chatgpt\|auto"[^>]*disabled[^>]*>ChatGPT（Chat／Pro）/);
+  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|chat"/);
+  vm.runInContext('state.webchat={enabled:true,location:"/external",model:"Pro",thinking:"Extended",jobs:[]}',a.context);
+  assert.match(html(),/<option[^>]*value="chatgpt\|auto"[^>]*>ChatGPT（Chat／Pro）/);
+  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|auto"[^>]*disabled/);
+  for (const model of ['chat','auto','app']) {
+    a.context.localStorage.getItem = () => JSON.stringify({ai:'chatgpt',model,effort:''});
+    assert.equal(vm.runInContext('chatPick(state.projects[0],state.projects[0].tasks[0]).model',a.context), model);
+    assert.match(html(),new RegExp(`<option[^>]*value="chatgpt\\|${model}"[^>]*selected`));
+  }
+  a.context.localStorage.getItem = () => null;
+  a.context.matchMedia = () => ({matches:true});
+  assert.match(html(),/<option[^>]*value="chatgpt\|auto"[^>]*>Chat／Pro<\/option>/);
+  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|chat"/);
+  vm.runInContext('state.phoneLabels={labels:"full"}',a.context);
+  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|chat"/);
+  a.context.matchMedia = () => ({matches:false});
+  vm.runInContext('state.webchat.jobs=[{project:"p",parent:"t",task:"child",request:"r",kind:"conversation",state:"unknown",model:"Pro",error:"webchat_timeout"}]',a.context);
+  assert.match(html(),/送信済みか不明・自動再送なし/);assert.match(html(),/data-webchat="retry"/);assert.doesNotMatch(html(),/data-webchat="stop"/);
+  vm.runInContext('state.webchat.jobs[0].state="sending"',a.context);
+  assert.match(html(),/Chat／Proへ送信中/);assert.doesNotMatch(html(),/data-webchat="(?:stop|retry)"/);
+  const settings=vm.runInContext('webchatSettingsHtml(state.webchat)',a.context);
+  assert.match(settings,/WebChatMCPの場所（絶対パス）/);assert.match(settings,/data-webchat="login"/);assert.doesNotMatch(settings,/data-webchat="(?:save|status|models)"/);
+  assert.match(settings,/<summary>設定/);
+});
+test('Chat conversation sends from the composer without a child warning, preserves rejection drafts and records accepted sends',async()=>{
+ const a=historyUI(),calls=[];let send;
+ vm.runInContext('state.webchat={enabled:true,location:"/fake",model:"",thinking:""}',a.context);
+ a.context.bindAskAnswers=(_box,cb)=>{send=cb;};a.context.openChat(project(),project().tasks[0]);
+ a.element('#chat-ai').value='chatgpt|auto';a.element('#chat-effort').value='';
+ a.context.warnChildren=async()=>assert.fail('conversation must not warn about child work');
+ a.context.load=async()=>{};a.type('same conversation request');
+ a.context.api=async(route,body)=>{calls.push({route,body});throw Error('人間確認の画面で停止しています');};
+ assert.equal(await send(),false);assert.equal(a.element('#chat-in').value,'same conversation request');
+ assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context),'same conversation request');
+ a.context.api=async(route,body)=>{calls.push({route,body});return {ok:true,webchat:true,task:'t',request:'r'};};
+ assert.equal(await send(),true);assert.equal(a.element('#chat-in').value,'');
+ assert.equal(calls[1].route,'/api/chat/send');assert.equal(calls[1].body.task,'t');assert.equal(calls[1].body.model,'auto');
+ assert.doesNotMatch(a.element('#toast').textContent,/子作業/);
+});
+test('Chat conversation busy state hides CLI controls, ignores stale polls and stops updating a navigated conversation',async()=>{
+ const a=conversationApp();let resolve;
+ const partial=()=>{const el=a.element('#msg-partial');el.querySelector=s=>a.element('partial-'+s);el.remove=()=>a.elements.delete('#msg-partial');};partial();
+ a.element('#msgs').insertAdjacentHTML=(_where,html)=>{if(html.includes('id="msg-partial"'))partial();};
+ const emit=ev=>a.stream().onmessage({data:JSON.stringify(ev)});
+ a.context.api=()=>new Promise(r=>resolve=r);
+ emit({type:'webchat'});
+ emit({type:'busy',ai:'codex',model:'GPT-6.1-Sol',started:1});
+ resolve({jobs:[{project:'p',task:'t',state:'sending',at:new Date().toISOString()}]});await new Promise(r=>setImmediate(r));
+ assert.equal(a.element('#chat-redo').hidden,false,'stale webchat response cannot mask CLI controls');
+ emit({type:'busy',ai:'chatgpt',model:'',started:1,webchat:true});assert.equal(a.element('#chat-redo').hidden,true);assert.equal(a.element('#chat-q').hidden,true);
+ emit({type:'webchat'});const old=a.stream();
+ vm.runInContext('closePanes();openChat(proj("p"),taskOf(proj("p"),"t"))',a.context);
+ resolve({jobs:[]});await new Promise(r=>setImmediate(r));
+ old.onmessage({data:JSON.stringify({type:'busy',ai:'chatgpt',webchat:true})});
+ assert.equal(vm.runInContext('chatBusy',a.context),null);
+});
+function webchatAvailabilityUI() {
+  const a=conversationApp(), s=snapshot();
+  s.webchat={enabled:true,location:'/fake',check:{loggedIn:true,temporaryChat:true},jobs:[]};
+  s.projects[0].tasks[0].webchatReason='webchat_busy';
+  vm.runInContext('state='+JSON.stringify(s)+';renderedMainKey=mainKey()',a.context);
+  const option={value:'chatgpt|auto',disabled:true,dataset:{}}, other={value:'codex|GPT-6.1-Sol',disabled:false,dataset:{}};
+  const select=a.element('#chat-ai'), input=a.element('#chat-in');
+  select.options=[other,option];select.value=option.value;select.selectedOptions=[option];
+  input.value='次の依頼を書いている';input.tagName='TEXTAREA';input.selectionStart=2;input.selectionEnd=5;
+  a.document.activeElement=input;
+  let renders=0;a.context.render=()=>{renders++;};a.context.renderTree=()=>{};
+  return {...a,s,option,other,select,input,renders:()=>renders};
+}
+test('Chat availability poll restores the disabled option while focused and details stay open, preserving the draft and selections',async()=>{
+  const a=webchatAvailabilityUI();a.details.push({open:true,classList:{contains:()=>false}});
+  a.context.syncChatWebchatAvailability();assert.match(a.element('#webchat-notice').innerHTML,/動いています/);
+  const ready=JSON.parse(JSON.stringify(a.s));ready.projects[0].tasks[0].webchatReason='';
+  a.context.fetchState=async()=>ready;await a.context.pollState();
+  assert.equal(a.option.disabled,false);assert.equal(a.element('#webchat-notice').innerHTML,'');
+  assert.equal(a.renders(),0);assert.equal(a.document.activeElement,a.input);assert.equal(a.element('#chat-in'),a.input);
+  assert.equal(a.input.value,'次の依頼を書いている');assert.deepEqual([a.input.selectionStart,a.input.selectionEnd],[2,5]);
+  assert.equal(a.select.value,'chatgpt|auto');assert.equal(a.other.disabled,false);assert.equal(a.element('#chat-ai'),a.select);
+  a.option.disabled=true;a.context.fetchState=async()=>null;await a.context.pollState();assert.equal(a.option.disabled,false,'304 still repairs the DOM');
+});
+test('Chat availability refresh and preserved load synchronize actual reasons without selecting another AI',async()=>{
+  const a=webchatAvailabilityUI();
+  for(const [reason,text] of [
+    ['webchat_busy',/自動Chatが動いています/],['webchat_task_busy',/この会話でAI/],
+    ['webchat_selection_unconfirmed',/自動再送はしません/],['webchat_login_unconfirmed',/ログイン状態を判定できない/],
+    ['webchat_temporary_chat_unconfirmed',/一時チャットを確認できない/],['webchat_remote_challenge_required',/人間確認/],
+  ]) {
+    const next=JSON.parse(JSON.stringify(a.s));next.projects[0].tasks[0].webchatReason=reason;
+    a.context.fetchState=async()=>next;await a.context.refreshTree();
+    assert.equal(a.option.disabled,true);assert.match(a.element('#webchat-notice').innerHTML,text);assert.equal(a.select.value,'chatgpt|auto');
+    if(reason.includes('busy'))assert.doesNotMatch(a.element('#webchat-notice').innerHTML,/data-go="settings"/);
+  }
+  a.select.value=a.other.value;a.context.syncChatWebchatAvailability();assert.equal(a.element('#webchat-notice').innerHTML,'');
+  const ready=JSON.parse(JSON.stringify(a.s));ready.projects[0].tasks[0].webchatReason='';
+  a.context.fetchState=async()=>ready;await a.context.load({preserveMain:true});
+  assert.equal(a.option.disabled,false);assert.equal(a.select.value,a.other.value);assert.equal(a.renders(),0);
+  assert.equal(a.document.activeElement,a.input);assert.equal(a.input.value,'次の依頼を書いている');
+});
+test('Chat composer accepts a second request after terminal SSE while the next draft stays focused',async()=>{
+  const a=webchatAvailabilityUI();let send,next=JSON.parse(JSON.stringify(a.s));
+  next.projects[0].tasks[0].webchatReason='';
+  a.context.fetchState=async()=>next;await a.context.refreshTree();
+  a.context.bindAskAnswers=(_box,cb)=>{send=cb;};a.context.openChat(next.projects[0],next.projects[0].tasks[0]);
+  const load=a.context.load;a.context.load=()=>load({preserveMain:true});
+  const requests=[];
+  a.context.api=async(route,body)=>{
+    if(route==='/api/webchat')return next.webchat;
+    assert.equal(route,'/api/chat/send');requests.push(body);
+    next=JSON.parse(JSON.stringify(next));next.projects[0].tasks[0].webchatReason='webchat_busy';
+    next.webchat.jobs.push({project:'p',task:'t',request:'r'+requests.length,kind:'conversation',state:'sending'});
+    return {ok:true,webchat:true,task:'t',request:'r'+requests.length};
+  };
+  for(const text of ['1回目','2回目']) {
+    a.input.value=text;a.input.handlers.input();assert.equal(await send(),true);assert.equal(a.option.disabled,true);
+    a.input.value='続けて書いている';a.input.handlers.input();a.input.focus();
+    next=JSON.parse(JSON.stringify(next));next.projects[0].tasks[0].webchatReason='';next.webchat.jobs.at(-1).state='done';
+    a.stream().onmessage({data:JSON.stringify({type:'webchat'})});await new Promise(r=>setImmediate(r));
+    assert.equal(a.option.disabled,false);assert.equal(a.document.activeElement,a.input);assert.equal(a.input.value,'続けて書いている');
+    assert.equal(a.select.value,'chatgpt|auto');
+  }
+  assert.deepEqual(requests.map(r=>r.text),['1回目','2回目']);assert.ok(requests.every(r=>r.project==='p' && r.task==='t'));
+  assert.equal(a.renders(),0);
+});
+for(const terminal of ['done','blocked','unknown','stopped']) test('Chat terminal SSE refreshes availability without redrawing the focused composer: '+terminal,async()=>{
+  const a=webchatAvailabilityUI(), next=JSON.parse(JSON.stringify(a.s));
+  next.projects[0].tasks[0].webchatReason=terminal==='unknown'?'webchat_login_unconfirmed':'';
+  next.webchat.jobs=[{project:'p',task:'t',state:terminal,kind:'conversation'}];
+  let fetches=0;a.context.fetchState=async()=>{fetches++;return next;};a.context.api=async()=>next.webchat;
+  a.stream().onmessage({data:JSON.stringify({type:'webchat'})});await new Promise(r=>setImmediate(r));
+  assert.equal(fetches,1);assert.equal(a.option.disabled,terminal==='unknown');assert.equal(a.renders(),0);
+  assert.equal(a.document.activeElement,a.input);assert.equal(a.input.value,'次の依頼を書いている');
+  assert.equal(a.select.value,'chatgpt|auto');
+});
+test('Chat terminal state fetch cannot overwrite a newer SSE or a different conversation',async()=>{
+  for(const interrupt of ['new-event','navigation']) {
+    const a=webchatAvailabilityUI(), stale=JSON.parse(JSON.stringify(a.s));
+    stale.projects[0].tasks[0].webchatReason='';stale.webchat.jobs=[{project:'p',task:'t',state:'done'}];
+    let release;a.context.fetchState=()=>new Promise(r=>release=r);a.context.api=async()=>stale.webchat;
+    a.stream().onmessage({data:JSON.stringify({type:'webchat'})});await new Promise(r=>setImmediate(r));
+    assert.ok(release);
+    if(interrupt==='navigation')vm.runInContext('closePanes();openChat(proj("p"),taskOf(proj("p"),"t"))',a.context);
+    else {a.context.api=()=>new Promise(()=>{});a.stream().onmessage({data:JSON.stringify({type:'webchat'})});}
+    release(stale);await new Promise(r=>setImmediate(r));
+    assert.equal(a.option.disabled,true);assert.equal(vm.runInContext('proj("p").tasks[0].webchatReason',a.context),'webchat_busy');
+  }
+});
+test('Chat availability shows a concise actual reason before sending, and legacy jobs cannot be replayed',()=>{
+ const a=app(),s=snapshot();s.projects[0].tasks[0].owner='chatgpt';s.projects[0].tasks[0].webchatReason='webchat_remote_challenge_required';
+ s.webchat={enabled:true,location:'/fake',jobs:[{project:'p',task:'t',request:'legacy',state:'unknown',error:'webchat_restart'}]};
+ vm.runInContext('state='+JSON.stringify(s),a.context);const html=a.context.chatHtml(s.projects[0],s.projects[0].tasks[0]);
+ assert.match(html,/人間確認/);assert.match(html,/value="chatgpt\|auto"[^>]*selected[^>]*disabled/);assert.doesNotMatch(html,/data-webchat="retry"|保存してから送/);
+});
+test('ChatGPT担当は自動を既定とし、未設定なら無効と設定案内を出す',()=>{
+ const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];t.owner='chatgpt';vm.runInContext('state='+JSON.stringify(s),a.context);
+ assert.equal(a.context.chatPick(p,t).model,'auto');let html=a.context.chatHtml(p,t);
+ assert.match(html,/ChatGPT（Chat／Pro）は未設定/);assert.match(html,/data-go="settings"/);
+ const disabledOptions=[...html.matchAll(/<option([^>]*)>[^<]*<\/option>/g)].filter(m=>m[1].includes('chatgpt|'));
+ assert.equal(disabledOptions.length,1);assert.match(disabledOptions[0][1],/auto/);assert.match(disabledOptions[0][1],/selected/);assert.match(disabledOptions[0][1],/disabled/);
+ assert.doesNotMatch(html,/value="chatgpt\|(?:chat|app)"/);
+ vm.runInContext('state.webchat={enabled:true,location:"/fake/external",model:"Pro"}',a.context);html=a.context.chatHtml(p,t);
+ const options=[...html.matchAll(/<option([^>]*)>[^<]*<\/option>/g)].filter(m=>m[1].includes('chatgpt|'));
+ assert.equal(options.length,1);assert.match(options[0][1],/auto/);assert.match(options[0][1],/selected/);assert.doesNotMatch(options[0][1],/disabled/);
+ assert.doesNotMatch(html,/未設定です/);
+});
+
+test('Project chat links allow only parsed HTTP/HTTPS URLs and retain unsafe values as escaped text', () => {
+  const a = app(); a.context.fixture = snapshot();
+  const chats = [
+    { title: 'Web <chat>', url: 'https://example.com/chat?a=1&b=2' },
+    { title: 'HTTP', url: 'HTTP://example.com/room' },
+    ...['javascript:alert(1)', ' JaVaScRiPt:alert(1)', 'java\nscript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'file:///tmp/chat', '//example.com/chat', 'https://', 'https://exa\tmple.com'].map(url => ({ title: '<blocked>', url })),
+    { url: 'javascript:<script>alert(1)</script>' },
+  ];
+  a.context.fixture.projects[0].chats = chats;
+  const stored = JSON.stringify(chats);
+  vm.runInContext('state=fixture; renderOverview(state.projects[0]);', a.context);
+  const html = a.element('#main').innerHTML;
+  const card = html.split('<h3 class="sec">ブラウザのチャット</h3>')[1].split('</ul>')[0];
+  assert.equal((card.match(/<a /g) || []).length, 2);
+  assert.match(card, /href="https:\/\/example\.com\/chat\?a=1&amp;b=2"/);
+  assert.match(card, /href="http:\/\/example\.com\/room"/);
+  assert.match(card, /Web &lt;chat&gt;/);
+  assert.match(card, /javascript:&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.equal((card.match(/&lt;blocked&gt;/g) || []).length, 8);
+  assert.doesNotMatch(card, /<script|href="(?:javascript|data|file):/i);
+  assert.equal(JSON.stringify(a.context.fixture.projects[0].chats), stored);
+});
+
+test('ローカル画像MarkdownとCodex生成画像は端末共通の認証付きURLと開くリンクで表示する',()=>{
+  for(const ua of ['', 'ProjectHubApp', 'iPhone']) {
+    const a=app(ua);vm.runInContext('view={kind:"work",project:"freetalk",task:"topic"}',a.context);
+    a.context.imagePath='/Users/test/空 白&名前.png';
+    const html=vm.runInContext('msgHtml({role:"assistant",ai:"codex",text:"完了",generatedImages:[{path:imagePath,name:"画像"}]})',a.context);
+    assert.match(html,/class="chat-image"/);assert.match(html,/data-path="\/Users\/test\/空 白&amp;名前.png"/);
+    assert.ok(html.includes('/api/file/view?project=freetalk&amp;task=topic&amp;path='+encodeURIComponent(a.context.imagePath)));
+    assert.doesNotMatch(html,/src="file:|src="data:/);
+    const markdown=vm.runInContext('richText("![Gemini版](<file://"+imagePath+">)")',a.context);
+    assert.match(markdown,/class="chat-image"/);assert.match(markdown,/alt="Gemini版"/);
+    assert.doesNotMatch(vm.runInContext('richText("![外部](https://example.com/image.png)")',a.context),/<img/);
+  }
+});
+
+test('受領済み保持子・照合中・未提出は統合を求めず、新成果と進行中だけ表示',()=>{
+ const a=app(),s=snapshot(),kid={id:'kid',title:'保持した子',parent:'t',state:'完了',steps:[]};s.projects[0].tasks.push(kid);s.taskOffers=[{project:'p',task:'kid',targetProject:'p',targetTask:'t',pending:false,received:{id:'receipt'},receiptChecked:true}];
+ a.context.fixture=s;vm.runInContext('state=fixture',a.context);const html=()=>vm.runInContext('kidsDoneBar(state.projects[0],state.projects[0].tasks[0])',a.context);
+ assert.doesNotMatch(html(),/data-act="integrate"/);
+ const offer=s.taskOffers[0];offer.pending=true;offer.receiptChecked=false;assert.doesNotMatch(html(),/data-act="integrate"/,'cold receipt check is not a new offer');
+ offer.receiptChecked=true;assert.match(html(),/data-act="integrate"/,'verified changed receipt');
+ offer.received=null;kid.state='実行中';kid.steps=[{done:false,text:'作業中'}];assert.doesNotMatch(html(),/data-act="integrate"/,'unfinished unsubmitted child');
+ offer.handedUp=true;assert.match(html(),/data-act="integrate"/,'explicit partial handoff');
+ offer.pending=false;assert.doesNotMatch(html(),/data-act="integrate"/,'received partial child');
+ s.taskIntegrations=[{project:'p',task:'t',stage:'children',items:[{task:'kid'}]}];assert.match(html(),/data-act="integrate"/,'unfinished integration');
+ s.taskIntegrations[0].stage='main';assert.doesNotMatch(html(),/data-act="integrate"/);
+ s.taskHandoffs=[{project:'p',task:'kid',title:kid.title,targetProject:'p',targetTask:'t'}];assert.match(html(),/data-act="integrate"/,'unfinished receipt notification');
+});
+for(const locale of ['ja','zh-TW'])test('古い本体停止は新鮮な同一証拠だけ履歴にし、変更・再起動・期限・通信失敗で未確認へ戻す：'+locale,async()=>{
+ const a=app(),s=snapshot(),old={id:'old',main:{state:'intent',sourceHead:'a'.repeat(40)},stopped:{reason:'本体取り込みの前提を確認できません'}};s.hubInstance='instance1';s.taskOffers=[];s.taskIntegrations=[{project:'p',task:'t',stage:'main',mainPending:old}];
+ a.context.UI=require('./ui-locale-fixture')(locale);a.context.fixture=s;vm.runInContext('state=fixture;view={kind:"work",project:"p",task:"t"}',a.context);
+ a.element('[data-main-preview]').remove=()=>{};
+ let response={files:0,conflict:false,mainDisplay:{key:JSON.stringify(old),reflected:true}};a.context.api=async()=>response;
+ const html=()=>vm.runInContext('kidsDoneBar(state.projects[0],state.projects[0].tasks[0])',a.context);
+ await a.context.loadPreview('p','t');assert.match(html(),/data-integration-history/);assert.doesNotMatch(html(),/data-integration-main|data-act="integrate"/);assert.match(html(),locale==='ja'?/現在の本体に反映済み/:/已反映至目前本體/);
+ if(locale==='ja'){assert.doesNotMatch(html(),/別の未保存変更/);response={files:0,conflict:false,mainDisplay:{key:JSON.stringify(old),reflected:true,mainUncommitted:3}};await a.context.loadPreview('p','t');assert.match(html(),/data-integration-history/);assert.doesNotMatch(html(),/data-integration-main/);assert.match(html(),/本体には別の未保存変更があります。この取り込み結果とは別です（3）/);response={files:0,conflict:false,mainDisplay:{key:JSON.stringify(old),reflected:true}};await a.context.loadPreview('p','t');}
+ const original=JSON.stringify(old);old.stopped.reason='different';assert.match(html(),/data-integration-main/);old.stopped.reason='本体取り込みの前提を確認できません';assert.equal(JSON.stringify(old),original);
+ s.hubInstance='instance2';assert.match(html(),/data-integration-main/);s.hubInstance='instance1';
+ vm.runInContext('integrationMainEvidence.get("p\\0t").at-=30001',a.context);assert.match(html(),/data-integration-main/);
+ await a.context.loadPreview('p','t');response=null;await a.context.loadPreview('p','t');assert.match(html(),/data-integration-main/);
+ response={files:0,mainDisplay:{key:JSON.stringify(old),reflected:true}};await a.context.loadPreview('p','t');a.context.api=async()=>{throw Error('fixture disconnect');};await a.context.loadPreview('p','t');assert.match(html(),/data-integration-main/);
+ // A delayed old proof cannot overwrite a newer negative proof.
+ let release,n=0;a.context.api=()=>++n===1?new Promise(r=>release=r):Promise.resolve({files:0,mainDisplay:{key:JSON.stringify(old),reflected:false}});
+ const first=a.context.loadPreview('p','t');await a.context.loadPreview('p','t');release(response);await first;assert.match(html(),/data-integration-main/);assert.equal(JSON.stringify(old),original);
+});
+test('子受領完了の帯は本体待ちだけを分離し、新しい候補がある場合だけ統合入口を表示',()=>{
+ const a=app(),data=snapshot();data.taskIntegrations=[{project:'p',task:'t',stage:'main',items:[],mainPending:{id:'old',main:{state:'intent'},stopped:{reason:'本体取り込みの前提を確認できません'}}}];a.context.fixture=data;vm.runInContext('state=fixture',a.context);
+ let html=vm.runInContext('kidsDoneBar(state.projects[0],state.projects[0].tasks[0])',a.context);assert.match(html,/data-integration-main/);assert.match(html,/結果が不明/);assert.doesNotMatch(html,/子作業の成果|data-act="integrate"/);
+ data.projects[0].tasks.push({id:'new',title:'次の子',parent:'t',state:'完了',steps:[]});html=vm.runInContext('kidsDoneBar(state.projects[0],state.projects[0].tasks[0])',a.context);assert.match(html,/子作業の成果/);assert.match(html,/data-act="integrate"/);assert.match(html,/data-integration-main/);assert.doesNotMatch(html,/片付け済み/);
+ data.taskIntegrations[0].stage='children';data.projects[0].tasks.pop();html=vm.runInContext('kidsDoneBar(state.projects[0],state.projects[0].tasks[0])',a.context);assert.match(html,/data-act="integrate"/);
+});
+test('完了子の入口を隠した後も新候補/受領完了を定期取得と通知で反映し、下書き・会話DOM・無再送を保つ',async()=>{
+ const a=app(),s=snapshot();s.taskIntegrations=[{project:'p',task:'t',stage:'main',items:[],mainPending:{id:'old',main:{state:'intent'}}}];a.context.fixture=s;vm.runInContext('state=fixture;view={kind:"work",project:"p",task:"t"};renderedMainKey=mainKey();renderedTreeKey=treeKey()',a.context);
+ const box=a.element('[data-kids-done]');let html='',writes=0;Object.defineProperty(box,'innerHTML',{get:()=>html,set:v=>{html=v;writes++;}});a.context.refreshKidsDoneBar();assert.doesNotMatch(html,/data-act="integrate"/);
+ let renders=0,posts=0;a.context.render=()=>{renders++;};a.context.api=async()=>{posts++;return [];};a.element('#main').innerHTML='会話DOMを保持';const input=a.element('#chat-in');input.value='入力中の依頼';input.tagName='TEXTAREA';a.document.activeElement=input;
+ const next=JSON.parse(JSON.stringify(s));next.projects[0].tasks.push({id:'new',title:'新しい子',parent:'t',state:'完了',steps:[]});a.context.fetchState=async()=>next;await a.context.pollState();assert.match(html,/data-act="integrate"/);assert.match(html,/data-integration-main/);
+ const before=writes;a.context.fetchState=async()=>null;await a.context.pollState();assert.equal(writes,before);a.document.activeElement=null;
+ a.context.fetchState=async()=>s;await a.context.refreshTree();assert.doesNotMatch(html,/data-act="integrate"/);assert.match(html,/data-integration-main/);assert.equal(renders,0);assert.equal(posts,0);assert.equal(input.value,'入力中の依頼');assert.equal(a.element('#main').innerHTML,'会話DOMを保持');
+});
+
+test('再起動の予約と取消は明示操作だけで送信し、待機理由を設定画面に表示する', async () => {
+  const a=app(),calls=[];
+  vm.runInContext('state.restartBusy=true',a.context);
+  assert.match(a.context.restartControls(),/終了後に再起動を予約/);
+  a.context.api=async(route,body)=>{calls.push([route,body]);return {restart:route.endsWith('/cancel')?{reserved:null}:{reserved:{at:'fixture'},waiting:[{message:'統合が進行中'}]}};};
+  const click=a.documentListeners.find(x=>x.name==='click'&&x.cb.toString().includes('[data-restart-reserve],[data-restart-cancel]')).cb;
+  await click({target:{closest:s=>s==='[data-restart-cancel]'?null:{}}});
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['/api/restart',{reserve:true}]]);
+  assert.match(a.context.restartControls(),/再起動予約を取消/);assert.match(a.context.restartControls(),/統合が進行中/);
+  assert.equal(calls.length,1);
+  await click({target:{closest:()=>({})}});
+  assert.equal(calls[1][0],'/api/restart/cancel');assert.doesNotMatch(a.context.restartControls(),/再起動予約を取消/);
+  vm.runInContext('state.restart={committed:true}',a.context);assert.doesNotMatch(a.context.restartControls(),/data-restart-reserve|data-restart-cancel/);
+});
+
+function restartPollingApp(sessionStorage) {
+  const a = app('', sessionStorage); let reloads = 0;
+  a.context.location.reload = () => { reloads++; };
+  a.context.fixture = { ...snapshot(), hubInstance: 'old', restart: { reserved: { at: 'fixture' }, committed: false } };
+  vm.runInContext('state=fixture;view={kind:"settings"}', a.context);
+  for (const name of ['syncWebchatSettingsControls', 'syncChatPhoneLabels', 'syncAccountPickers', 'drawPhoneLabels', 'drawModelOrder', 'syncRoleModelOrder', 'drawInitialPick', 'showVersion', 'updateTurnCounts', 'renderTree']) a.context[name] = () => {};
+  a.context.treeKey = () => ''; a.context.window.HubMobile = { badges() {} };
+  return { ...a, reloads: () => reloads };
+}
+test('予約再起動の新しい起動を検知し、同じ版・確定の見逃し・重複取得でも一度だけ再読込する', async () => {
+  for (const seeCommit of [true, false]) {
+    const a = restartPollingApp();
+    const next = { ...a.context.fixture, hubInstance: 'new', restart: { reserved: null, committed: false } };
+    const states = [...(seeCommit ? [{ ...a.context.fixture, restart: { committed: true } }] : []), next, next];
+    a.context.fetchState = async () => states.shift();
+    for (let i = 0; i < (seeCommit ? 3 : 2); i++) await a.context.pollState();
+    assert.equal(a.reloads(), 1); a.context.observeRestart(next); assert.equal(a.reloads(), 1);
+  }
+  const a = restartPollingApp();
+  a.context.fetchState = async () => ({ ...a.context.fixture, hubInstance: undefined, version: '2', restart: { reserved: null, committed: false } });
+  await a.context.pollState(); assert.equal(a.reloads(), 1, '旧状態に起動識別子がなくても新版への変更を検知する');
+});
+test('予約取消と通常更新では入力を保ち、予約表示を見逃した新起動も検知する', async () => {
+  const a = restartPollingApp(), ta = a.element('#chat-in'); ta.value = '入力途中';
+  const states = [a.context.fixture, { ...a.context.fixture, restart: { reserved: null, committed: false } }, { ...a.context.fixture, hubInstance: 'new', restart: { reserved: null, committed: false } }];
+  a.context.fetchState = async () => states.shift();
+  for (let i = 0; i < 3; i++) await a.context.pollState();
+  assert.equal(a.reloads(), 1); assert.equal(ta.value, '入力途中');
+  a.context.observeRestart({ ...a.context.fixture, restart: { committed: true } }); assert.equal(a.reloads(), 1);
+});
+test('予約再起動の再読込をまたいで会話・待ち指示・質問・設定・freetalkの下書きを保持する', async () => {
+  const rows = new Map(), storage = { getItem: k => rows.get(k) || null, setItem: (k,v) => rows.set(k,v), removeItem: k => rows.delete(k) };
+  const a = restartPollingApp(storage);
+  vm.runInContext('setChatDraft("draft", "送信前の本文");queueDrafts.set("draft",{id:"held",original:"元",text:"編集中"});askDrafts.set("draft",["選択途中"]);freetalkSummaryDrafts.set("topic","要約編集中");rolesDraft=[{name:"編集中"}]', a.context);
+  vm.runInContext('quickDrafts.set("p",{ai:"claude",model:"Opus 5.5",effort:"高"});quickOverrides.add("p");chatFileSequence=3', a.context);
+  a.context.fetchState = async () => ({ ...a.context.fixture, hubInstance: 'new', restart: {} });
+  await a.context.pollState(); assert.equal(a.reloads(), 1); assert.ok(rows.has('hub-restart-drafts'));
+  const b = app('', storage);
+  assert.equal(vm.runInContext('chatDraft.draft', b.context), '送信前の本文');
+  assert.equal(vm.runInContext('queueDrafts.get("draft").text', b.context), '編集中');
+  assert.equal(vm.runInContext('askDrafts.get("draft")[0]', b.context), '選択途中');
+  assert.equal(vm.runInContext('freetalkSummaryDrafts.get("topic")', b.context), '要約編集中');
+  assert.equal(vm.runInContext('rolesDraft[0].name', b.context), '編集中'); assert.equal(rows.has('hub-restart-drafts'), false);
+  b.context.drawSpecialMode = () => {}; b.context.syncSpecialModeChange();
+  assert.equal(vm.runInContext('quickDrafts.get("p").model', b.context), 'Opus 5.5');
+  assert.equal(vm.runInContext('chatFileSequence', b.context), 3);
+});
+test('下書きの保存失敗時は再読込を待ち、保存回復後に一度だけ実行する', async () => {
+  const a = restartPollingApp({ setItem() { throw Error('quota'); } });
+  vm.runInContext('setChatDraft("draft", "保持する入力")', a.context);
+  const next = { ...a.context.fixture, hubInstance: 'new', restart: {} }; a.context.fetchState = async () => next;
+  await a.context.pollState(); assert.equal(a.reloads(), 0); assert.equal(vm.runInContext('chatDraft.draft', a.context), '保持する入力');
+  a.context.sessionStorage = { setItem() {} }; await a.context.pollState(); await a.context.pollState(); assert.equal(a.reloads(), 1);
+});
+
+test('freetalk要約完了から確認へ：保存intentから復元し移せる物だけ全選択、入力focusでも表示',async()=>{
+ const a=freetalkConversation();let ready=false,preview=0;const h=()=>({generation:1,revision:'r',summaryId:'s',promotionRequested:true,reason:ready?'':'AIが作業中です',draft:ready?'要約':''});
+ a.context.api=async route=>{if(route.includes('/status'))return h();if(route.endsWith('project-preview')){preview++;return {operationId:'o',revision:'r',summaryId:'s',name:'旅行',summary:'要約',files:[{path:'safe.txt',size:2},{path:'other',reason:'リンクを含む場所は移せません'},{path:'300MB',reason:'移すファイルが大きすぎます'}]};}throw Error(route);};
+ const sync=()=>vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+ await sync();assert.equal(preview,0);assert.match(a.element('.freetalk-history').outerHTML,/要約を待っています/);
+ ready=true;a.document.activeElement={tagName:'TEXTAREA'};await sync();const html=a.element('.freetalk-history').outerHTML;
+ assert.match(html,/data-promotion-field="name"/);assert.doesNotMatch(html,/safe.txt" checked/);assert.match(html,/other" disabled/);assert.match(html,/300MB" disabled/);assert.doesNotMatch(html,/AIが作業中です|この要約で続ける/);assert.equal(preview,1);
+ assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(freetalkPromotionDrafts.get("t").files)',a.context)),[]);
+});
+test('freetalk preview失敗は可視alertと再確認、status失敗を区別し無言で全ボタン無効にしない',async()=>{
+ const a=freetalkConversation();let fail=true,calls=0;const h={generation:1,revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''};
+ a.context.api=async route=>{if(route.includes('/status'))return h;if(route.endsWith('project-preview')){calls++;if(fail)throw Error('<b>確認準備失敗</b>');return {operationId:'o',revision:'r',summaryId:'s',summary:'要約',name:'名前',files:[]};}throw Error(route);};
+ const sync=()=>vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+ await sync();await sync();assert.equal(calls,1,'修正前の自動再試行なし');let html=a.element('.freetalk-history').outerHTML;
+ assert.match(html,/role="alert">&lt;b&gt;確認準備失敗/);assert.match(html,/freetalkretry/);assert.doesNotMatch(html,/要約を待っています|AIが作業中です/);
+ fail=false;await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});assert.equal(calls,2);assert.match(a.element('.freetalk-history').outerHTML,/data-act="freetalkcreate"/);
+ a.context.api=async()=>{throw Error('状態取得失敗');};await sync();html=a.element('.freetalk-history').outerHTML;assert.match(html,/role="alert">状態取得失敗/);assert.match(html,/もう一度確認/);
+});
+test('freetalk staleは要約し直し、作成失敗は入力保持と再確認、二重クリックは同操作1回で新プロジェクトへ',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''},fail=true,creates=0,finish;
+ const d={operationId:'o',revision:'r',summaryId:'s',name:'元名前',summary:'要約',files:[]};
+ a.context.api=async(route,body)=>{if(route.includes('/status'))return h;if(route.endsWith('project-preview'))return d;if(route.endsWith('/promote')){creates++;if(fail)throw Error('試験の作成失敗');return new Promise(r=>finish=r);}if(route.endsWith('/summary')){assert.equal(body.intent,'promote');h={...h,draft:'',stale:false,staleReason:'',summaryId:'new',reason:'AIが作業中です'};return {};}throw Error(route);};
+ a.context.load=async()=>{};
+ const sync=()=>vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);await sync();
+ vm.runInContext('freetalkPromotionDrafts.get("t").name="人の名前"',a.context);
+ await a.context.act({dataset:{act:'freetalkcreate',t:'t'},disabled:false});assert.match(a.element('.freetalk-history').outerHTML,/試験の作成失敗/);assert.match(a.element('.freetalk-history').outerHTML,/value="人の名前"/);
+ await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});fail=false;
+ const one=a.context.act({dataset:{act:'freetalkcreate',t:'t'},disabled:false});await a.context.act({dataset:{act:'freetalkcreate',t:'t'},disabled:false});assert.equal(creates,2);
+ finish({project:'新プロジェクト',task:'new'});await one;assert.equal(vm.runInContext('view.project',a.context),'新プロジェクト');
+ vm.runInContext('view={kind:"work",project:"freetalk",task:"t"};freetalkPromotionDrafts.clear()',a.context);
+ h={...h,stale:true,staleReason:'要約の後に会話が追加されました。要約し直してください'};await sync();assert.match(a.element('.freetalk-history').outerHTML,/freetalkresummary/);
+ await a.context.act({dataset:{act:'freetalkresummary',t:'t'},disabled:false});assert.match(a.element('.freetalk-history').outerHTML,/要約を待っています/);
+});
+test('freetalk通常整理はpromote intentを送らず、確認欄なしで要約続行、取消はサーバーも解除',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''};const routes=[];
+ a.context.load=async()=>{};a.context.api=async(route,body)=>{routes.push([route,body]);if(route.includes('/status'))return h;if(route.endsWith('promotion-intent')){assert.equal(body.requested,false);h={...h,promotionRequested:false};return h;}if(route.endsWith('/summary')){assert.equal(body.intent,undefined);h={...h,promotionRequested:false};return {};}throw Error(route);};
+ await a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});assert.match(a.element('.freetalk-history').outerHTML,/この要約で続ける/);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/);
+ await a.context.act({dataset:{act:'freetalksummary',t:'t'},disabled:false});assert.equal(routes.at(-1)[0],'/api/freetalk/summary');
+});
+test('freetalk開始前のsummary/intent拒否は同期でも理由を保持し、再確認で開始し直せる',async()=>{
+ for(const stage of ['summary','promotion-intent']) {
+  const a=freetalkConversation();let fail=true,calls=0;
+  let h={revision:'r',summaryId:'s',draft:stage==='summary'?'':'要約',promotionRequested:false,reason:''};
+  a.context.api=async(route,body)=>{
+   if(route.includes('/status'))return h;
+   if(route.endsWith('/'+stage) && body.requested!==false){calls++;if(fail)throw Error(stage+'開始拒否');h={...h,promotionRequested:true};return h;}
+   if(route.endsWith('project-preview'))return {operationId:'o',revision:'r',summaryId:'s',name:'名前',summary:'要約',files:[]};
+   if(route.endsWith('promotion-intent') && body.requested===false){h={...h,promotionRequested:false};return h;}
+   throw Error(route);
+  };
+  const sync=()=>vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+  await a.context.act({dataset:{act:'freetalkpromote',t:'t'},disabled:false});await sync();
+  assert.equal(calls,1,'同期は失敗した開始操作を自動再送しない');
+  assert.match(a.element('.freetalk-history').outerHTML,new RegExp('role="alert">'+stage+'開始拒否'));
+  fail=false;await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});assert.equal(calls,2,'statusだけでなく拒否された開始を再実行');
+  assert.equal(h.promotionRequested,true);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/開始拒否/);
+  await a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/);
+ }
+ const a=freetalkConversation();a.context.api=async route=>{assert.match(route,/\/status\?/);return {promotionRequested:false,reason:''};};
+ await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});
+ assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/,'statusだけの再確認はプロジェクト化を開始しない');
+});
+test('freetalk status取得失敗中は編集と直接操作でも作成を拒否、取得回復まで無効を維持',async()=>{
+ const a=freetalkConversation(),h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''};let statusFail=false,creates=0;
+ a.context.api=async route=>{if(route.includes('/status')){if(statusFail)throw Error('状態取得失敗');return {...h};}if(route.endsWith('project-preview'))return {operationId:'o',revision:'r',summaryId:'s',name:'名前',summary:'要約',files:[{path:'safe.txt',size:2}]};if(route.endsWith('/promote'))creates++;else throw Error(route);};
+ const sync=()=>vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);await sync();statusFail=true;await sync();
+ assert.match(a.element('.freetalk-history').outerHTML,/data-act="freetalkcreate"[^>]*disabled/);
+ const create={dataset:{act:'freetalkcreate'},disabled:true},size={},block={dataset:{topic:'t'},querySelector:s=>s==='[data-act="freetalkcreate"]'?create:size};
+ const input=a.documentListeners.find(x=>x.name==='input' && x.cb.toString().includes('data-promotion-size')).cb;
+ for(const dataset of [{promotionField:'name'},{promotionField:'summary'},{promotionFile:'safe.txt'}]) {
+  input({target:{closest:()=>block,dataset,value:'人の編集',checked:false}});assert.equal(create.disabled,true);
+ }
+ await a.context.act({dataset:{act:'freetalkcreate',t:'t'},disabled:false});assert.equal(creates,0,'状態未取得のまま直接操作も送信しない');
+ const el=a.element('.freetalk-history');el.contains=()=>true;el.querySelectorAll=()=>[create];a.document.activeElement={tagName:'INPUT'};
+ statusFail=false;await sync();assert.equal(create.disabled,false,'編集中の同期も状態回復後に同じ判定で解除');
+ h.reason='AIが作業中です';await sync();assert.equal(create.disabled,true);input({target:{closest:()=>block,dataset:{promotionField:'name'},value:'保持する名前'}});assert.equal(create.disabled,true);
+ h.reason='';await sync();assert.equal(create.disabled,false);assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").name',a.context),'保持する名前');
+});
+for(const draft of ['', '通常整理の要約']) {
+ test('freetalk状態確認だけの連続失敗→回復は開始意図を作らない（要約'+(draft?'あり':'なし')+'）',async()=>{
+  const a=freetalkConversation();let fail=true;const starts=[];
+  const h={revision:'r',summaryId:'s',draft,promotionRequested:false,reason:''};
+  a.context.api=async(route,body)=>{if(route.includes('/status')){if(fail)throw Error('状態503');return h;}starts.push([route,body]);throw Error('未依頼の開始');};
+  const sync=()=>vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+  await sync();
+  for(let i=0;i<2;i++) {
+   await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});
+   assert.match(a.element('.freetalk-history').outerHTML,/role="alert">状態503/);
+   assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/);
+  }
+  fail=false;await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});
+  assert.deepEqual(starts,[],'要約開始・intent保存を一度も依頼しない');assert.equal(h.promotionRequested,false);
+  assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/状態503|class="freetalk-promotion"/);
+  if(draft)assert.match(a.element('.freetalk-history').outerHTML,/この要約で続ける/);
+ });
+ test('freetalk明示開始の最初のstatus拒否は理由を保持し再確認で開始（要約'+(draft?'あり':'なし')+'）',async()=>{
+  const a=freetalkConversation();let fail=true,h={revision:'r',summaryId:'s',draft,promotionRequested:false,reason:''};const starts=[];
+  a.context.api=async(route,body)=>{
+   if(route.includes('/status')){if(fail)throw Error('開始前の状態503');return h;}
+   if(route.endsWith('/summary') || route.endsWith('promotion-intent')) {
+    starts.push([route,body]);h={...h,draft:'要約',promotionRequested:body.requested!==false};return h;
+   }
+   if(route.endsWith('project-preview'))return {operationId:'o',revision:'r',summaryId:'s',name:'名前',summary:'要約',files:[]};
+   throw Error(route);
+  };
+  await a.context.act({dataset:{act:'freetalkpromote',t:'t'},disabled:false});
+  await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});
+  assert.deepEqual(starts,[]);assert.match(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"[\s\S]*role="alert">開始前の状態503/);
+  fail=false;await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});
+  assert.equal(starts.length,1);assert.equal(starts[0][0],draft?'/api/freetalk/promotion-intent':'/api/freetalk/summary');
+  assert.equal(h.promotionRequested,true);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/開始前の状態503/);
+  await a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});
+  assert.equal(h.promotionRequested,false);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/);
+ });
+}
+
+for(const stage of ['summary','promotion-intent']) for(const outcome of ['reject','resolve']) {
+ test('freetalk '+stage+'再試行→取消→旧'+outcome+'は確認も開始意図も復活させない',async()=>{
+  const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:stage==='summary'?'':'通常要約',promotionRequested:false,reason:''},calls=0,finish;
+  const act=action=>a.context.act({dataset:{act:action,t:'t'},disabled:false});
+  a.context.api=async(route,body)=>{
+   if(route.includes('/status'))return {...h};
+   if(route.endsWith('promotion-intent') && body.requested===false){h={...h,promotionRequested:false};return {...h};}
+   if(route.endsWith('/'+stage)){calls++;if(calls===1)throw Error('最初の開始拒否');const old={...h,promotionRequested:true};return new Promise((resolve,reject)=>finish=()=>outcome==='reject'?reject(Error('旧開始拒否')):resolve(old));}
+   throw Error('取消後に追加通信：'+route);
+  };
+  await act('freetalkpromote');const retry=act('freetalkretry');await new Promise(r=>setImmediate(r));assert.equal(typeof finish,'function');
+  await act('freetalkcancel');assert.equal(h.promotionRequested,false);
+  finish();await retry;await act('freetalkretry');
+  assert.equal(calls,2,'取消後の再確認は開始を再送しない');assert.equal(vm.runInContext('freetalkPromotionErrors.has("t") || freetalkPromotionDrafts.has("t")',a.context),false);
+  assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"|旧開始拒否/);
+  assert.equal(vm.runInContext('taskOf(proj("freetalk"),"t").freetalkHistory.promotionRequested',a.context),false);
+ });
+ test('freetalk '+stage+'の旧'+outcome+'は新しい開始の確認・編集を上書きしない',async()=>{
+  const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:stage==='summary'?'':'通常要約',promotionRequested:false,reason:''},calls=0,finish;
+  const act=action=>a.context.act({dataset:{act:action,t:'t'},disabled:false});
+  a.context.api=async(route,body)=>{
+   if(route.includes('/status'))return {...h};
+   if(route.endsWith('/'+stage)){calls++;if(calls===1)throw Error('最初の拒否');if(calls===2)return new Promise((resolve,reject)=>finish=()=>outcome==='reject'?reject(Error('旧拒否')):resolve({...h,summaryId:'old'}));h={...h,draft:'新要約',summaryId:'new',promotionRequested:true};return {...h};}
+   if(route.endsWith('project-preview'))return {operationId:'new',revision:'r',summaryId:'new',name:'新名前',summary:'新要約',files:[]};
+   throw Error(route);
+  };
+  await act('freetalkpromote');const old=act('freetalkretry');await new Promise(r=>setImmediate(r));assert.equal(typeof finish,'function');
+  await act('freetalkpromote');vm.runInContext('freetalkPromotionDrafts.get("t").name="人の新しい編集"',a.context);
+  finish();await old;
+  assert.equal(calls,3);assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").name',a.context),'人の新しい編集');
+  assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").summaryId',a.context),'new');assert.equal(vm.runInContext('freetalkPromotionErrors.has("t")',a.context),false);
+  assert.equal(vm.runInContext('taskOf(proj("freetalk"),"t").freetalkHistory.summaryId',a.context),'new');
+ });
+}
+for(const outcome of ['reject','resolve']) test('freetalk同期previewの旧'+outcome+'も取消後は確認・理由を復活させない',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''},finish,previews=0;
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('promotion-intent')){assert.equal(body.requested,false);h={...h,promotionRequested:false};return h;}
+  if(route.endsWith('project-preview')){previews++;return new Promise((resolve,reject)=>finish=()=>outcome==='reject'?reject(Error('旧preview拒否')):resolve({operationId:'old',revision:'r',summaryId:'s',name:'旧名前',summary:'要約',files:[]}));}
+  throw Error(route);
+ };
+ const sync=vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);await new Promise(r=>setImmediate(r));
+ await a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});finish();await sync;
+ assert.equal(previews,1);assert.equal(vm.runInContext('freetalkPromotionErrors.has("t") || freetalkPromotionDrafts.has("t")',a.context),false);
+ assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"|旧preview拒否/);
+});
+test('freetalk遅い取消成功は取消中に行った新しい開始を消さない',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''},finish;
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('promotion-intent')){if(body.requested===false){h={...h,promotionRequested:false};return new Promise(resolve=>finish=()=>resolve({...h,promotionRequested:false}));}h={...h,promotionRequested:true};return h;}
+  if(route.endsWith('project-preview'))return {operationId:'new',revision:'r',summaryId:'s',name:'新名前',summary:'要約',files:[]};
+  throw Error(route);
+ };
+ const cancel=a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});await new Promise(r=>setImmediate(r));
+ await a.context.act({dataset:{act:'freetalkpromote',t:'t'},disabled:false});vm.runInContext('freetalkPromotionDrafts.get("t").name="新しい編集"',a.context);finish();await cancel;
+ assert.equal(h.promotionRequested,true);assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").name',a.context),'新しい編集');
+});
+test('freetalk取消拒否は理由と編集を保持し、再確認と取消の復旧ができる',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''},reject=true;
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('project-preview'))return {operationId:'o',revision:'r',summaryId:'s',name:'元名前',summary:'要約',files:[]};
+  if(route.endsWith('promotion-intent')){assert.equal(body.requested,false);if(reject)throw Error('取消保存拒否');h={...h,promotionRequested:false};return h;}
+  throw Error(route);
+ };
+ await vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+ vm.runInContext('freetalkPromotionDrafts.get("t").name="保持する編集"',a.context);
+ h={...h,stale:true,staleReason:'追加会話の古い要約'};
+ await a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});assert.match(a.element('.freetalk-history').outerHTML,/role="alert">取消保存拒否/);
+ assert.match(a.element('.freetalk-history').outerHTML,/data-act="freetalkretry"/);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/data-act="freetalkresummary"/);
+ assert.equal(h.promotionRequested,true);assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").name',a.context),'保持する編集');
+ await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});assert.match(a.element('.freetalk-history').outerHTML,/取消保存拒否/);
+ assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").name',a.context),'保持する編集');
+ reject=false;await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});assert.equal(h.promotionRequested,false);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/);
+});
+test('freetalk開始前の取消失敗を再確認しても要約・開始intentを送らない',async()=>{
+ const a=freetalkConversation();let reject=true,cancels=0;
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {promotionRequested:false,reason:''};
+  assert.equal(route,'/api/freetalk/promotion-intent');assert.equal(body.requested,false);cancels++;if(reject)throw Error('開始前の取消拒否');return {};
+ };
+ await a.context.act({dataset:{act:'freetalkcancel',t:'t'},disabled:false});
+ await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});assert.match(a.element('.freetalk-history').outerHTML,/開始前の取消拒否/);
+ reject=false;await a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});assert.equal(cancels,3);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"/);
+});
+
+for(const stage of ['summary','promotion-intent']) for(const outcome of ['reject','resolve']) test('freetalk '+stage+'の旧'+outcome+'は通常整理の後にプロジェクト化欄を戻さない',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:stage==='summary'?'':'通常要約',promotionRequested:false,reason:''},calls=0,finish;
+ a.context.load=async()=>{};
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('/summary') && !body.intent){h={...h,summaryId:'normal-new',draft:'通常整理の新要約',promotionRequested:false};return {};}
+  if(route.endsWith('/'+stage)){calls++;if(calls===1)throw Error('最初の開始拒否');const old={...h,promotionRequested:true};if(outcome==='resolve')h=old;return new Promise((resolve,reject)=>finish=()=>outcome==='resolve'?resolve(old):reject(Error('通常整理後の旧開始拒否')));}
+  throw Error(route);
+ };
+ const act=action=>a.context.act({dataset:{act:action,t:'t'},disabled:false});
+ await act('freetalkpromote');const retry=act('freetalkretry');await new Promise(r=>setImmediate(r));assert.equal(typeof finish,'function');
+ await act('freetalksummary');finish();await retry;
+ await vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+ assert.equal(h.promotionRequested,false);assert.equal(calls,2);assert.equal(vm.runInContext('freetalkPromotionErrors.has("t") || freetalkPromotionDrafts.has("t")',a.context),false);
+ assert.match(a.element('.freetalk-history').outerHTML,/通常整理の新要約/);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"|通常整理後の旧開始拒否/);
+ await act('freetalkretry');assert.equal(calls,2,'通常整理後の状態再確認は開始しない');
+});
+for(const outcome of ['reject','resolve']) test('freetalk通常整理の旧'+outcome+'は新しいプロジェクト化の編集を消さない',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'通常要約',promotionRequested:false,reason:''},finish,loads=0;const notices=[];
+ a.context.load=async()=>loads++;a.context.toast=x=>notices.push(x);
+ vm.runInContext('taskOf(proj("freetalk"),"t").freetalkHistory={revision:"r",summaryId:"s",draft:"通常要約",promotionRequested:false,reason:""}',a.context);
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('/summary')){assert.equal(body.intent,undefined);return new Promise((resolve,reject)=>finish=()=>outcome==='resolve'?resolve({}):reject(Error('古い通常整理の拒否')));}
+  if(route.endsWith('promotion-intent')){assert.equal(body.requested,true);h={...h,promotionRequested:true};return h;}
+  if(route.endsWith('project-preview'))return {operationId:'new',revision:'r',summaryId:'s',name:'新名前',summary:'通常要約',files:[]};throw Error(route);
+ };
+ const old=a.context.act({dataset:{act:'freetalksummary',t:'t'},disabled:false});await new Promise(r=>setImmediate(r));
+ await a.context.act({dataset:{act:'freetalkpromote',t:'t'},disabled:false});vm.runInContext('freetalkPromotionDrafts.get("t").name="新しい人の編集"',a.context);
+ finish();await old;
+ assert.equal(h.promotionRequested,true);assert.equal(vm.runInContext('freetalkPromotionDrafts.get("t").name',a.context),'新しい人の編集');assert.equal(loads,0);assert.deepEqual(notices,[]);
+});
+test('freetalk現在の通常整理拒否は表示され、同じ開始ボタンから復旧する',async()=>{
+ const a=freetalkConversation();let fail=true,calls=0,loads=0;const notices=[];
+ a.context.load=async()=>loads++;a.context.toast=x=>notices.push(x);a.context.api=async(route,body)=>{assert.equal(route,'/api/freetalk/summary');assert.equal(body.intent,undefined);calls++;if(fail)throw Error('通常整理の開始拒否');return {};};
+ const el={dataset:{act:'freetalksummary',t:'t'},disabled:false};await a.context.act(el);assert.equal(notices[0],'通常整理の開始拒否');assert.equal(el.disabled,false);
+ fail=false;await a.context.act(el);assert.equal(calls,2);assert.equal(loads,2);assert.match(notices[1],/要約を頼みました/);assert.equal(vm.runInContext('freetalkPromotionErrors.has("t")',a.context),false);
+});
+for(const action of ['freetalkclear','freetalkcontinue','freetalkdelete','freetalkclean']) for(const outcome of ['reject','resolve']) test('freetalk '+action+'成功後の古い開始'+outcome+'は解除した欄を復活しない',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:false,reason:''},calls=0,finish;const notices=[];
+ a.context.load=async()=>{};a.context.toast=x=>notices.push(x);
+ a.context.api=async(route,body)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('promotion-intent')){calls++;if(calls===1)throw Error('最初の拒否');const old={...h,promotionRequested:true};if(outcome==='resolve')h=old;return new Promise((resolve,reject)=>finish=()=>outcome==='resolve'?resolve(old):reject(Error('解除後の旧拒否')));}
+  if(['/api/freetalk/rotate','/api/freetalk/delete','/api/freetalk/clean'].includes(route)){assert.equal(body.confirm,true);h={...h,draft:'',promotionRequested:false};return {};}
+  throw Error(route);
+ };
+ const act=action=>a.context.act({dataset:{act:action,t:'t'},disabled:false});
+ await act('freetalkpromote');const old=act('freetalkretry');await new Promise(r=>setImmediate(r));await act(action);finish();await old;
+ assert.equal(vm.runInContext('freetalkPromotionErrors.has("t") || freetalkPromotionDrafts.has("t")',a.context),false);assert.equal(h.promotionRequested,false);assert.equal(calls,2);assert.ok(!notices.includes('解除後の旧拒否'));
+});
+for(const outcome of ['reject','resolve']) test('freetalk背景previewの旧'+outcome+'も通常整理への切替後に反映しない',async()=>{
+ const a=freetalkConversation();let h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''},finish;
+ a.context.load=async()=>{};a.context.api=async(route)=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('/summary')){h={...h,summaryId:'normal',draft:'通常整理',promotionRequested:false};return {};}
+  if(route.endsWith('project-preview'))return new Promise((resolve,reject)=>finish=()=>outcome==='resolve'?resolve({operationId:'old',revision:'r',summaryId:'s',name:'古い確認',summary:'要約',files:[]}):reject(Error('古いpreview拒否')));
+  throw Error(route);
+ };
+ const old=vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);await new Promise(r=>setImmediate(r));
+ await a.context.act({dataset:{act:'freetalksummary',t:'t'},disabled:false});finish();await old;
+ await vm.runInContext('syncFreetalkHistory(proj("freetalk"),taskOf(proj("freetalk"),"t"))',a.context);
+ assert.equal(vm.runInContext('freetalkPromotionErrors.has("t") || freetalkPromotionDrafts.has("t")',a.context),false);assert.doesNotMatch(a.element('.freetalk-history').outerHTML,/class="freetalk-promotion"|古いpreview拒否/);
+});
+test('freetalk掃除の古い成功は新しい話題のプロジェクト化・編集を消さない',async()=>{
+ const a=freetalkConversation();let finish;const h={revision:'new',summaryId:'new',draft:'新話題の要約',promotionRequested:false,reason:''};
+ a.context.load=async()=>{};a.context.api=async(route)=>{
+  if(route.endsWith('/clean'))return new Promise(resolve=>finish=()=>resolve({}));
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('promotion-intent')){h.promotionRequested=true;return {...h};}
+  if(route.endsWith('project-preview'))return {operationId:'new',revision:'new',summaryId:'new',name:'新話題',summary:'新話題の要約',files:[]};throw Error(route);
+ };
+ const old=a.context.act({dataset:{act:'freetalkclean'},disabled:false});await new Promise(r=>setImmediate(r));
+ vm.runInContext('state.projects[0].tasks.push({...state.projects[0].tasks[0],id:"new"});view.task="new"',a.context);
+ await a.context.act({dataset:{act:'freetalkpromote',t:'new'},disabled:false});vm.runInContext('freetalkPromotionDrafts.get("new").name="新話題の編集"',a.context);finish();await old;
+ assert.equal(vm.runInContext('view.task',a.context),'new');assert.equal(vm.runInContext('freetalkPromotionDrafts.get("new").name',a.context),'新話題の編集');
+});
+test('freetalk掃除の拒否後は複数話題の確認済み作成を妨げない',async()=>{
+ const a=freetalkConversation(),h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:true,reason:''};
+ vm.runInContext('state.projects[0].tasks.push({...state.projects[0].tasks[0],id:"second"})',a.context);
+ a.context.api=async route=>{
+  if(route.includes('/status'))return {...h};
+  if(route.endsWith('project-preview'))return {operationId:'o',revision:'r',summaryId:'s',name:'名前',summary:'要約',files:[]};
+  if(route.endsWith('/clean'))throw Error('掃除の拒否');
+  throw Error(route);
+ };
+ for(const id of ['t','second']){
+  vm.runInContext('view.task='+JSON.stringify(id),a.context);
+  await a.context.act({dataset:{act:'freetalkpromote',t:id},disabled:false});
+ }
+ await a.context.act({dataset:{act:'freetalkclean'},disabled:false});
+ for(const id of ['t','second'])assert.equal(vm.runInContext('freetalkPromotionBlocked(taskOf(proj("freetalk"),'+JSON.stringify(id)+'))',a.context),false,'掃除が失敗しても確認済みの話題は作成を続けられる');
+});
+test('freetalkクリアの確認を取り消した場合は未取消の開始失敗を保持する',async()=>{
+ const a=freetalkConversation();let finish,calls=0;const h={revision:'r',summaryId:'s',draft:'要約',promotionRequested:false,reason:''};
+ a.context.api=async(route)=>{if(route.includes('/status'))return {...h};if(route.endsWith('promotion-intent')){calls++;if(calls===1)throw Error('最初の拒否');return new Promise((resolve,reject)=>finish=()=>reject(Error('まだ有効な開始拒否')));}throw Error(route);};
+ await a.context.act({dataset:{act:'freetalkpromote',t:'t'},disabled:false});const old=a.context.act({dataset:{act:'freetalkretry',t:'t'},disabled:false});await new Promise(r=>setImmediate(r));
+ a.context.confirm=()=>false;await a.context.act({dataset:{act:'freetalkclear',t:'t'},disabled:false});finish();await old;
+ assert.match(a.element('.freetalk-history').outerHTML,/まだ有効な開始拒否/);assert.equal(calls,2);
+});
+
+test('予約も確定も取得する前に再起動が完了しても下書きを保存して新画面へ一度だけ切り替える',async()=>{
+ const rows=new Map(),storage={getItem:k=>rows.get(k)||null,setItem:(k,v)=>rows.set(k,v),removeItem:k=>rows.delete(k)},a=restartPollingApp(storage);
+ vm.runInContext('state.restart={};setChatDraft("draft","途中の本文");queueDrafts.set("draft",{text:"待ち指示"})',a.context);
+ const next={...a.context.fixture,hubInstance:'new',restart:{}};a.context.fetchState=async()=>next;
+ await a.context.pollState();await a.context.pollState();assert.equal(a.reloads(),1);assert.equal(JSON.parse(rows.get('hub-restart-drafts')).chatDraft.draft,'途中の本文');
+});
+test('保存済み要約は次の作業と判断待ちを先頭へ表示し、原文とボタン数は変えない',()=>{
+ const a=app(),text='Hubの自動整理\n承認（人の発言のみ）：\n- 昔の承認\n残件・判断待ち：\n- 人の判断\n次にすること：\n- 残作業\n参照先：\n- INDEX.md';
+ const row={role:'event',summaryAuto:true,text};a.context.fixture=row;const html=vm.runInContext('msgHtml(fixture)',a.context);
+ assert.ok(html.indexOf('次にする作業')<html.indexOf('残件・判断待ち'));assert.ok(html.indexOf('残件・判断待ち')<html.indexOf('承認（人の発言のみ）'));assert.equal(row.text,text);assert.doesNotMatch(html,/<button|<input/);
+ assert.equal(a.context.continuationSummary('区画のない旧要約'),'区画のない旧要約');
+ const zh='Hub 自動整理\n核准（僅限使用者發言）：\n- 核准\n剩餘工作與待決定事項：\n- 判斷\n次にすること：\n- 待辦\n已決定事項：\n- 完成\n参照先：\n- INDEX.md';
+ const sorted=a.context.continuationSummary(zh);assert.ok(sorted.indexOf('次にする作業')<sorted.indexOf('核准'));assert.ok(sorted.includes('已決定事項：\n- 完成'));assert.ok(sorted.includes('INDEX.md'));
+});
+
+for (const ai of ['claude', 'codex', 'grok', 'agy']) test(`${ai} account shows exactly one auth action for each state`, () => {
+  const a = app(), data = snapshot();
+  for (const status of ['logged-in', 'logged-out', 'unknown', 'api']) {
+    data.accounts = [{ai,id:'default',name:'test',status,busy:false}];
+    vm.runInContext('state='+JSON.stringify(data)+';view={kind:"settings"}', a.context);
+    const html = a.context.accountSettingsHtml();
+    const actions = [...html.matchAll(/data-account-action="(login|logout)"/g)].map(m=>m[1]);
+    assert.deepEqual(actions, [status === 'logged-in' || status === 'api' ? 'logout' : 'login']);
+  }
+});
+test('auth button resumes existing Terminal without changing cached auth or starting another login', async () => {
+  const a = app(), data = snapshot();
+  data.accounts = [{ai:'agy',id:'default',name:'test',status:'logged-in',busy:true,authTerminal:true}];
+  vm.runInContext('state='+JSON.stringify(data)+';accountStatusRows=state.accounts;view={kind:"settings"}',a.context);
+  const calls=[]; a.context.api=async (route,body)=>{
+    if(route === '/api/chatgpt') return {work:false};
+    calls.push({route,body}); return {existingTerminal:true,warning:'Terminal focused'};
+  };
+  a.context.confirm=()=>{throw Error('focus does not log out');};
+  await a.context.operateAccount({disabled:false,dataset:{accountAction:'logout'},closest:()=>({dataset:{ai:'agy',id:'default',authTerminal:'1'}})});
+  assert.equal(calls.length,1);assert.equal(calls[0].route,'/api/accounts/terminal');assert.equal(calls[0].body.action,'logout');
+  assert.equal(a.element('#account-message').textContent,'Terminal focused');
+  assert.match(a.context.accountSettingsHtml(),/ログイン済み/);
+});
+
+test('省スペース：上部単一領域・補助操作と管理の折畳み、メモUIのみ撤去する',()=>{
+ const a=app(),s=snapshot();s.projects[0].tasks[0].copy=true;
+ vm.runInContext('state='+JSON.stringify(s)+';view={kind:"work",project:"p",task:"t"};stepsOpen=true;renderWork()',a.context);
+ const html=a.element('#main').innerHTML;
+ assert.equal((html.match(/data-main-preview/g)||[]).length,1);
+ for(const name of ['more','info','management','steps'])assert.match(html,new RegExp('data-work-fold="'+name+'"'));
+ assert.doesNotMatch(html,/data-work-fold="settings"|chat-settings-summary/);
+ assert.match(html,/class="work-topline"[\s\S]*data-act="merge"[\s\S]*class="work-more"/);
+ assert.match(html,/work-more-panel[\s\S]*data-go="project"[\s\S]*>アイデア台帳<[\s\S]*>ファイルを見る</);
+ assert.doesNotMatch(html,/id="memo"|data-act="memo"|history-footer/);
+ assert.match(html,/id="chat-history-help"/);assert.match(html,/aria-describedby="chat-history-help"/);
+ assert.match(html,/data-task-history="continue"[\s\S]*id="history-progress"[\s\S]*data-task-history="archives"[\s\S]*id="msgs"/);
+ assert.match(html,/work-management[^>]*>[\s\S]*状態：実行中・手順 0\/0/);
+ assert.doesNotMatch(html,/data-work-fold="steps" open/,'別の作業で開いた旧フラグを引き継がない');
+});
+test('省スペース：開閉の記憶は作業別で、再描画時だけ戻して他の作業へ漏らさない',()=>{
+ const a=app(),el={dataset:{workFold:'more'},open:true,isConnected:true,closest:()=>({dataset:{p:'p',t:'t'}})};
+ a.context.rememberWorkFold(el);
+ assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'more'),'open');
+ assert.equal(a.context.workFoldAttr({id:'p'},{id:'other'},'more'),'');
+ el.open=false;a.context.rememberWorkFold(el);assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'more'),'');
+ el.isConnected=false;el.open=true;a.context.rememberWorkFold(el);assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'more'),'');
+});
+test('省スペース：通常会話とfreetalkの設定を直接使え、AI別の許可・選択値を保つ',()=>{
+ const a=app(),s=snapshot();s.accounts=[{ai:'codex',id:'default',name:'既定'},{ai:'codex',id:'work',name:'仕事用'}];s.acceleration={codexAllowed:true};
+ const p=s.projects[0],t=p.tasks[0];t.accounts={codex:'work'};t.codexFast=true;
+ for(const freetalk of [false,true])for(const ai of ['codex','claude','agy','chatgpt']){
+   t.freetalk=freetalk;t.owner=ai;t.model=ai==='chatgpt'?'auto':'';vm.runInContext('state='+JSON.stringify(s),a.context);
+   const html=a.context.chatHtml(p,t),settings=html.match(/<div class="composer-settings">([\s\S]*?)<\/div>/)[1];
+   assert.doesNotMatch(html,/chat-settings-summary|composer-settings-panel|data-work-fold="settings"/);
+   assert.match(settings,/id="chat-account-box"/);assert.match(settings,/id="chat-fast-box"/);assert.match(settings,/id="discussion-toggle"[^>]*type="button"/);
+   assert.equal(settings.includes('data-task-fast'),ai==='codex');
+   if(ai==='codex'){assert.match(settings,/value="work" selected/);assert.match(settings,/data-task-fast[^>]*checked/);}
+ }
+ assert.equal(t.accounts.codex,'work');assert.equal(t.codexFast,true);
+});
+
+test('queue model draft is local, survives redraw, blocks unsaved start and saves only selected instruction',async()=>{
+ const a=queuedUI();a.queue([queuedItem]);await a.click({qedit:'q1'});
+ const el=a.element('#chat-queue');el.handlers.change({target:{dataset:{queueModel:'q1'},value:'claude|Fable 5.1'}});
+ a.queue([queuedItem,{...queuedItem,id:'q2',text:'other'}]);assert.match(el.innerHTML,/data-queue-model/);assert.match(el.innerHTML,/value="claude\|Fable 5.1"[^>]*selected/);
+ let request;a.context.api=async(route,body)=>{request={route,body};return {queue:[{...queuedItem,ai:'claude',model:'Fable 5.1'}]};};
+ await a.click({run:'q1'});assert.equal(request,undefined);assert.match(a.lastToast,/保存してから/);
+ await a.click({qsave:'q1'});assert.equal(request.body.ai,'claude');assert.equal(request.body.model,'Fable 5.1');assert.equal(request.body.expectedItem,JSON.stringify(queuedItem));assert.equal(a.element('#chat-in').value,'composer draft');
+});
+
+test('queue image viewer deletes only selected reference on save; Back and stale save preserve source and draft',async()=>{
+ const a=queuedUI(),images=[{id:'one',path:'/fixture/one.png',url:'/api/start/image?id=one',name:'one.png'},{id:'two',path:'/fixture/two.png',url:'/api/start/image?id=two',name:'two.png'}];
+ const item={...queuedItem,attachmentDraft:{text:'body',attachments:images}};a.queue([item]);await a.click({qedit:'q1'});let viewer;a.context.showFileViewer=(...args)=>{viewer=args;};
+ await a.click({imageOpen:'one'});assert.equal(viewer[0],images[0].path);viewer[3].remove();assert.doesNotMatch(a.element('#chat-queue').innerHTML,/data-image-open="one"/);assert.match(a.element('#chat-queue').innerHTML,/data-image-open="two"/);assert.equal(item.attachmentDraft.attachments.length,2);
+ await a.click({qclose:'q1'});await a.click({qedit:'q1'});assert.match(a.element('#chat-queue').innerHTML,/data-image-open="one"/);
+ await a.click({imageOpen:'one'});viewer[3].remove();let body;a.context.api=async(_r,b)=>{body=b;throw Error('stale selection');};await a.click({qsave:'q1'});assert.deepEqual(Array.from(body.attachmentIds),['two']);assert.equal(body.text,'body');assert.match(a.element('#chat-queue').innerHTML,/data-image-open="two"/);assert.equal(a.lastToast,'stale selection');
+ // A delayed viewer callback cannot alter a newly opened editor, or an instruction that started.
+ await a.click({qclose:'q1'});await a.click({qedit:'q1'});viewer[3].remove();assert.match(a.element('#chat-queue').innerHTML,/data-image-open="one"/);
+ await a.click({imageOpen:'one'});a.queue([]);viewer[3].remove();assert.match(a.element('#chat-queue').innerHTML,/data-image-open="one"/);
+});
+
+test('composer preview uses original resource and a delayed delete cannot touch new attachment identities or other conversations',()=>{
+ const a=conversationApp(),image={id:'one',path:'/fixture/one.png',url:'/api/start/image?id=one',name:'one.png'};a.context.chatImages('p','t').push(image);a.context.drawChatImages('p','t');let viewer;a.context.showFileViewer=(...args)=>{viewer=args;};
+ a.element('#chat-images').handlers.click({target:{closest:selector=>selector==='[data-image-open]'?{dataset:{imageOpen:'one'}}:null}});assert.equal(viewer[3].url,image.url);
+ a.context.clearSentChatImages('p','t',[image]);const newer={...image};a.context.chatImages('p','t').push(newer);viewer[3].remove();assert.equal(a.context.chatImages('p','t').length,1);
+ a.element('#chat-images').handlers.click({target:{closest:selector=>selector==='[data-image-open]'?{dataset:{imageOpen:'one'}}:null}});vm.runInContext('view.task="elsewhere"',a.context);viewer[3].remove();assert.equal(a.context.chatImages('p','t').length,1);
+});
+
+test('終了保存の未解決表示は当該会話と復旧可能段階だけにボタンを出し、最新の証拠だけ送る',async()=>{
+ const a=app(),data=snapshot();data.chatHandoffErrors=[{project:'p',task:'t',run:'run',token:'fresh',stage:'finished',recovery:'confirm-finished',error:'保存 <確認>'},{project:'p',task:'t',run:'unknown',stage:'on-settled',recovery:'not-sent'},{project:'other',task:'else',run:'other',token:'other',recovery:'confirm-finished'}];
+ vm.runInContext('state='+JSON.stringify(data),a.context);
+ const html=a.context.chatHandoffHtml('p','t');assert.match(html,/保存 &lt;確認&gt;/);assert.match(html,/処理途中の記録の確認/);assert.equal([...html.matchAll(/data-handoff-recover=/g)].length,1);assert.doesNotMatch(html,/data-handoff-recover="other"/);
+ const calls=[],button={dataset:{p:'p',t:'t',handoffRecover:'run',token:'stale'},disabled:false};a.context.api=async(route,body)=>{calls.push({route,body});return {ok:true};};a.context.load=async()=>{};a.context.render=()=>{};
+ const cb=a.documentListeners.find(x=>x.name==='click'&&String(x.cb).includes("'[data-handoff-recover]'" )).cb;
+ await cb({target:{closest:()=>button}});assert.equal(calls.length,0);
+ button.dataset.token='fresh';await cb({target:{closest:()=>button}});assert.equal(calls.length,1);assert.equal(calls[0].route,'/api/chat/handoff/recover');assert.deepEqual(JSON.parse(JSON.stringify(calls[0].body)),{project:'p',task:'t',run:'run',token:'fresh'});assert.equal(button.disabled,false);
+ button.disabled=true;await cb({target:{closest:()=>button}});assert.equal(calls.length,1);
 });

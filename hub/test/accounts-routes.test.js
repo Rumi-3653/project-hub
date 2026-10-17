@@ -249,3 +249,32 @@ test('Gemini auth routes open interactive Terminal with API env removed, default
   assert.equal((await post('/api/accounts/delete', {ai:'agy', confirm:true})).status,400);
   assert.equal((await post('/api/accounts/login', {ai:'chatgpt'})).status,400);
 });
+
+test('account status HTTP refresh verifies Gemini while login Terminal remains open and protects further auth', async () => {
+  const { accounts } = require('../server').aiUpdates;
+  const previous = {dry:accounts.dry,execute:accounts.execute};
+  const rolesFile = path.join(root, '_hub/roles.yaml'), rolesBefore = fs.readFileSync(rolesFile);
+  let loggedIn = false;
+  accounts.dry = false;
+  accounts.execute = async file => file === 'agy'
+    ? loggedIn ? {stdout:'gemini-3.1-pro-high\tGemini 3.1 Pro (High)',stderr:''} : {stdout:'',stderr:'Please sign in'}
+    : {stdout:'',stderr:''};
+  const terminal = accounts.terminalCommand('agy', 'default', 'true', require('../lib/launch').sq, 'auth', 'login');
+  try {
+    const check = async () => (await (await fetch(base + '/api/accounts?status=1', {headers:{'X-Hub':'1'}})).json()).accounts.find(r => r.ai === 'agy');
+    assert.equal((await check()).status, 'logged-out');
+    loggedIn = true; const row = await check();
+    assert.equal(row.status, 'logged-in'); assert.equal(row.authTerminal, true); assert.equal(row.busy, true);
+    const focused = await ok('/api/accounts/terminal', {ai:'agy',action:'login'});
+    assert.equal(focused.existingTerminal,true); assert.match(focused.warning,/\/login/);
+    assert.equal((await post('/api/accounts/terminal',{ai:'agy',action:'delete'})).status,400);
+    assert.equal((await post('/api/accounts/login', {ai:'agy'})).status, 409);
+    assert.equal((await post('/api/accounts/logout', {ai:'agy',confirm:true,confirmDefault:true})).status, 409);
+    assert.deepEqual(fs.readFileSync(rolesFile), rolesBefore);
+  } finally { terminal.cancel(); Object.assign(accounts, previous); }
+});
+
+test('resume Terminal requires a matching live authentication marker', async () => {
+  assert.equal((await post('/api/accounts/terminal',{ai:'agy',action:'login'})).status,409);
+  assert.equal((await post('/api/accounts/terminal',{ai:'agy',action:'login'},{'X-Hub':''})).status,403);
+});

@@ -52,7 +52,10 @@ function run(file, args, options = {}) {
 
 class AppUpdate {
   constructor(options) {
+    if (options.hubPath && !options.ownerEdition && !(path.isAbsolute(options.source || '') && fs.existsSync(path.join(options.source, '.git')))) return new (require('./app-update-packaged').PackagedUpdate)(options);
+    this.currentVersion = options.version || '';
     this.root = options.root;
+    this.ownerEdition = options.ownerEdition === true;
     this.home = path.join(this.root, '_hub', 'updates');
     this.stateFile = path.join(this.home, 'state.json');
     this.settingsFile = path.join(this.home, 'settings.json');
@@ -80,6 +83,7 @@ class AppUpdate {
     this.appPath = options.appPath || '';
     const settings = readJSON(this.settingsFile);
     this.enabled = typeof settings.enabled === 'boolean' ? settings.enabled : this.env.HUB_AUTO_UPDATE === '1';
+    if (this.ownerEdition) this.enabled = false;
     this.dry = options.dry === true;
     this.running = null;
     this.timer = null;
@@ -91,6 +95,7 @@ class AppUpdate {
     if (this.data.phase === 'publishing') { this.data.phase = 'installed'; this.data.publishError = message('publish'); }
   }
   supported() {
+    if (this.ownerEdition) return false;
     try {
       return this.platform === 'darwin' && path.isAbsolute(this.source || '') && fs.existsSync(path.join(this.source, '.git')) &&
         path.isAbsolute(this.appPath) && path.basename(this.appPath) === 'Project Hub.app' && fs.existsSync(path.dirname(this.appPath)) && Boolean(this.env.HUB_STORAGE_GUARD);
@@ -100,10 +105,11 @@ class AppUpdate {
   status() {
     const { job, install, publication, ...publicState } = this.data;
     const last = Date.parse(this.data.lastCheck || this.data.lastAttempt || '');
-    return { enabled: this.enabled, supported: this.supported(), sourceVersion: this.version(), latestVersion: '', lastCheck: null, lastAttempt: null,
-      nextCheck: Number.isFinite(last) ? new Date(last + DAY).toISOString() : null, pending: false, publishPending: false, error: '', phase: 'idle', reason: '', ...publicState,
+    return { mode: this.supported() ? 'source' : 'unsupported', unsupportedReason: this.ownerEdition ? 'owner' : 'source-requirements', currentVersion: this.currentVersion || this.version(), enabled: this.enabled, supported: this.supported(), sourceVersion: this.version(), latestVersion: '', lastCheck: null, lastAttempt: null,
+      nextCheck: Number.isFinite(last) ? new Date(last + DAY).toISOString() : null, pending: false, publishPending: false, error: '', phase: 'idle', reason: this.ownerEdition ? '製作者版は自動更新の対象外です' : '', ...publicState,
       upstream: UPSTREAM, autoTranslate: Boolean(this.translate), publishEnabled: Boolean(this.publish), appPath: this.appPath, restartNeeded: this.restartNeeded };
   }
+  nextHub() { return path.join(this.source, 'hub'); }
   applying() { return ['installing', 'publishing'].includes(this.data.phase) || this.restartNeeded; }
   busyMessage() { return message('restarting'); }
   idleMessage() { return message('busy'); }
@@ -113,6 +119,7 @@ class AppUpdate {
   }
   async phase(phase, extra = {}) { Object.assign(this.data, { phase }, extra); await this.persist(); }
   async settings(enabled) {
+    if (this.ownerEdition) return this.status();
     if (typeof enabled !== 'boolean') throw Error(message('format'));
     if (!(await this.guard())) throw Error(message('guard'));
     noLinks(this.home); writeJSON(this.settingsFile, { enabled }); this.enabled = enabled;
@@ -123,12 +130,14 @@ class AppUpdate {
   publishDue() { const last = Date.parse(this.data.lastPublishAttempt || ''); return !Number.isFinite(last) || this.now() - last >= DAY; }
   translationDue() { const last = Date.parse(this.data.lastTranslationAttempt || ''); return !Number.isFinite(last) || this.now() - last >= DAY; }
   start() {
+    if (this.ownerEdition) return;
     if (this.dry || this.timer) return;
     void this.lock(() => this.recover()).then(() => this.tick()).catch(() => {});
     this.timer = setInterval(() => this.tick(), 60000); this.timer.unref?.();
   }
   stop() { clearInterval(this.timer); this.timer = null; }
   tick() {
+    if (this.ownerEdition) return;
     if (!this.enabled || this.running || this.dry) return;
     if (this.due()) void this.check().catch(() => {});
     else if ((this.data.pending || (this.data.publishPending && this.publishDue())) && ['idle', 'deferred', 'ready', 'installed'].includes(this.data.phase)) void this.resume().catch(() => {});
@@ -141,6 +150,7 @@ class AppUpdate {
     return this.running;
   }
   async check() {
+    if (this.ownerEdition) return this.status();
     if (this.dry || this.running) return this.status();
     return this.lock(async () => {
       await this.recover();
@@ -149,6 +159,7 @@ class AppUpdate {
     });
   }
   async checkOnce() {
+    if (this.ownerEdition) return this.status();
     const at = new Date(this.now()).toISOString();
     Object.assign(this.data, { lastCheck: at, lastAttempt: at, phase: 'checking', error: this.data.publishError || '', reason: '' });
     try {
@@ -174,11 +185,13 @@ class AppUpdate {
     return { commit, version: String(body.version || '') };
   }
   async resume() {
+    if (this.ownerEdition) return this.status();
     if (this.running || !this.enabled || !(this.data.pending || this.data.publishPending)) return this.status();
     return this.lock(() => (this.data.pending ? this.advance() : this.publishPrepared()).catch(async error => { this.data.phase = error.kind === 'conflict' ? 'conflict' : 'failed'; this.data.error = message(error.kind || 'prepare'); try { await this.persist(); } catch {} return this.status(); }));
   }
   async defer(reason) { if (this.data.phase !== 'deferred' || this.data.reason !== message(reason)) await this.phase('deferred', { reason: message(reason) }); return this.status(); }
   async advance() {
+    if (this.ownerEdition) return this.status();
     if (!this.enabled) return this.defer('disabled');
     if (this.busy()) return this.defer('busy');
     if (await this.dirty()) return this.defer('dirty');
@@ -195,6 +208,7 @@ class AppUpdate {
     return this.status();
   }
   async prepare() {
+    if (this.ownerEdition) return this.status();
     const sourceHead = await this.git(['rev-parse', 'HEAD']);
     const folder = path.join(this.home, 'versions', crypto.randomUUID());
     const stage = path.join(folder, 'source');
@@ -216,11 +230,12 @@ class AppUpdate {
     if (await this.git(['ls-files', '-u'], stage)) throw Object.assign(Error(message('conflict')), { kind: 'conflict' });
     await this.git(['diff', '--check'], stage);
     const version = this.version(stage); if (!version) throw Object.assign(Error(message('invalid')), { kind: 'invalid' });
-    const env = { ...this.env, HUB_ROOT: path.join(folder, 'test-workspace'), HUB_AI_HOME: path.join(folder, 'test-ai-home'), HUB_DRY_RUN: '1', HUB_SKIP_APP: '1', HUB_SKIP_NPM: '1', TMPDIR: path.join(folder, 'temp') };
+    const env = { ...this.env, ...(this.translate ? { HUB_I18N_STRICT: '1' } : {}), HUB_ROOT: path.join(folder, 'test-workspace'), HUB_AI_HOME: path.join(folder, 'test-ai-home'), HUB_DRY_RUN: '1', HUB_SKIP_APP: '1', HUB_SKIP_NPM: '1', TMPDIR: path.join(folder, 'temp') };
     fs.mkdirSync(env.TMPDIR, { recursive: true });
     await this.phase('testing');
     await this.run('npm', ['ci', '--no-audit', '--no-fund'], { cwd: path.join(stage, 'hub'), env, timeout: 600000 });
     await this.run('npm', ['test'], { cwd: path.join(stage, 'hub'), env, timeout: 1800000 });
+    if (this.translate) await this.run('npm', ['run', 'test:langpack'], { cwd: path.join(stage, 'hub'), env, timeout: 600000 });
     await this.phase('building');
     const built = path.join(folder, 'built'), buildEnv = { ...this.env, HUB_APP_DIR: built, HUB_ROOT: this.root, HUB_UPDATE_SOURCE: stage, HUB_UPDATE_APP: this.appPath, HUB_NO_DESKTOP_LINK: '1', TMPDIR: env.TMPDIR };
     if (this.build) await this.build(stage, built, buildEnv);
@@ -238,6 +253,7 @@ class AppUpdate {
     await this.phase('ready');
   }
   async install() {
+    if (this.ownerEdition) return this.status();
     const job = this.data.job;
     if (job.context?.upstreamSha !== this.data.latestCommit) { this.data.job = null; return this.defer('changed'); }
     const previous = structuredClone(this.data), previousSource = this.source;
@@ -290,6 +306,7 @@ class AppUpdate {
     return this.status();
   }
   async publishPrepared() {
+    if (this.ownerEdition) return this.status();
     if (!this.enabled || !this.publish || !this.data.publishPending || !this.data.publication || !this.publishDue()) return this.installedStatus();
     const publication = this.data.publication;
     try {
@@ -309,6 +326,7 @@ class AppUpdate {
     return this.installedStatus();
   }
   async recover() {
+    if (this.ownerEdition) return this.status();
     const journal = this.data.install;
     if (!journal) return;
     if (!(await this.guard())) throw Error(message('guard'));

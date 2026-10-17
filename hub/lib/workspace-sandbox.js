@@ -1,0 +1,53 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const SECRET = /^(\.git|\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?|\.netrc|\.npmrc|\.pypirc)$/i;
+const MAX = 64 * 1024;
+const inside = (f, root) => f === root || f.startsWith(root + path.sep);
+class WorkspaceError extends Error { constructor(code) { super(code); this.code = code; this.status = 403; } }
+function resolveWorkspace(root, raw) {
+  if (typeof raw !== 'string' || !raw || raw.includes('\0')) throw new WorkspaceError('invalid_path');
+  const f = path.resolve(root, raw);
+  if (!inside(f, root) || f.split(path.sep).some(p => SECRET.test(p))) throw new WorkspaceError('path_not_allowed');
+  let probe = f;
+  while (!fs.existsSync(probe)) {
+    try { if (fs.lstatSync(probe).isSymbolicLink()) throw new WorkspaceError('path_not_allowed'); } catch (e) { if (e instanceof WorkspaceError) throw e; }
+    probe = path.dirname(probe);
+  }
+  if (fs.realpathSync(probe) !== probe) throw new WorkspaceError('path_not_allowed');
+  const st = fs.existsSync(f) && fs.lstatSync(f);
+  if (st && (st.isSymbolicLink() || st.isFile() && st.nlink > 1)) throw new WorkspaceError('path_not_allowed');
+  return f;
+}
+class WorkspaceSandbox {
+  constructor(scope, opts = {}) { this.scope = scope; this.workspace = opts.workspace; this.platform = opts.platform || process.platform; this.spawn = opts.spawn || spawn; this.children = opts.children || new Set(); this.Error = opts.Error || WorkspaceError; this.timeoutMs = opts.timeoutMs || 120000; }
+  profile() {
+    const root = this.workspace(), quote = x => JSON.stringify(x);
+    return `(version 1) (deny default)
+      (allow process-exec process-fork signal sysctl-read mach-lookup)
+      (allow file-read-metadata)
+      (allow file-read* (literal "/") (subpath ${quote(root)}) ${['/System', '/usr', '/bin', '/sbin', '/Library'].map(x => '(subpath ' + quote(x) + ')').join(' ')} (literal ${quote(fs.realpathSync(process.execPath))}) (literal "/dev/null") (literal "/dev/urandom") ${this.scope.readFiles.map(x => '(literal ' + quote(x) + ')').join(' ')})
+      (allow file-write* (subpath ${quote(root)}) (literal "/dev/null"))
+      (deny file-read* file-write* (subpath ${quote(path.join(root, '.git'))})
+        (regex #"(^|/)[.][gG][iI][tT](/|$)")
+        (regex #"(^|/)([.][eE][nN][vV][^/]*|[.][nN][eE][tT][rR][cC]|[.][nN][pP][mM][rR][cC]|[.][pP][yY][pP][iI][rR][cC]|[iI][dD]_([rR][sS][aA]|[eE][dD]25519|[eE][cC][dD][sS][aA]|[dD][sS][aA])[^/]*|[^/]*[.]([pP][eE][mM]|[kK][eE][yY]|[pP]12|[pP][fF][xX]))$"))`;
+  }
+  run(command) {
+    if (this.platform !== 'darwin' || !fs.existsSync('/usr/bin/sandbox-exec')) throw new this.Error('command_sandbox_unavailable');
+    const root = this.workspace();
+    // Reject linked/hardlinked workspace contents before granting recursive writes.
+    const check = dir => { for (const d of fs.readdirSync(dir, { withFileTypes: true })) { if (d.name.toLowerCase() === '.git') continue; const f = path.join(dir, d.name), st = fs.lstatSync(f); if (st.isSymbolicLink()) { if (!inside(fs.realpathSync(f), root)) throw new this.Error('command_link_not_allowed'); continue; } if (st.isFile() && st.nlink > 1) throw new this.Error('command_link_not_allowed'); if (st.isDirectory()) check(f); } }; check(root);
+    return new Promise((resolve, reject) => {
+      const child = this.spawn('/usr/bin/sandbox-exec', ['-p', this.profile(), '/bin/sh', '-c', command], { cwd: root, detached: true, env: { PATH: path.dirname(process.execPath) + ':/usr/bin:/bin:/usr/sbin:/sbin', HOME: root, TMPDIR: root, LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      this.children.add(child); const out = { stdout: '', stderr: '' }; let bytes = 0, truncated = false;
+      const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } };
+      const timer = setTimeout(kill, this.timeoutMs);
+      for (const key of ['stdout', 'stderr']) child[key].on('data', buf => { const remaining = MAX - bytes; out[key] += buf.subarray(0, remaining).toString('utf8'); bytes += Math.min(remaining, buf.length); if (buf.length > remaining) truncated = true; });
+      child.on('error', () => { clearTimeout(timer); this.children.delete(child); reject(new this.Error('command_failed')); });
+      child.on('close', (code, signal) => { clearTimeout(timer); kill(); this.children.delete(child); resolve({ code, signal, ...out, truncated }); });
+    });
+  }
+  stop() { for (const c of this.children) { try { process.kill(-c.pid, 'SIGKILL'); } catch { c.kill('SIGKILL'); } } }
+}
+module.exports = { WorkspaceSandbox, WorkspaceError, resolveWorkspace, inside };

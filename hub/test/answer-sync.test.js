@@ -25,7 +25,7 @@ test.before(async()=>{
  fs.writeFileSync(path.join(dir,'PROJECT.md'),'---\nname: 回答の見本\nstatus: 進行中\nphases: []\nfolders: {}\nrelated: []\n---\n');reset();fs.mkdirSync(bin);
  fs.writeFileSync(path.join(bin,'codex'),`#!${process.execPath}\nprocess.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>{console.log(JSON.stringify({type:'turn.completed'}));},2000));process.on('SIGTERM',()=>process.exit(143));\n`,{mode:0o755});
  process.env.PATH=bin+':/usr/bin:/bin';process.env.HUB_ROOT=root;process.env.HUB_PORT='0';process.env.HUB_DRY_RUN='1';process.env.HUB_AI_HOME=path.join(tmp,'home');process.env.HUB_TRASH=path.join(tmp,'trash');
- ({server}=require('../server'));await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));process.env.HUB_PORT=String(port);delete require.cache[require.resolve('../server')];({server}=require('../server'));await new Promise(r=>server.listen(port,'127.0.0.1',r));base=`http://127.0.0.1:${port}`;
+ ({server}=require('../server'));await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));process.env.HUB_PORT=String(port);require.cache[require.resolve('../server')]?.exports.stopControl.cleanExit();delete require.cache[require.resolve('../server')];({server}=require('../server'));await new Promise(r=>server.listen(port,'127.0.0.1',r));base=`http://127.0.0.1:${port}`;
 });
 test.afterEach(async()=>{
  await post('/api/chat/stop');
@@ -37,6 +37,8 @@ test.afterEach(async()=>{
   assert.ok(Date.now()<deadline,'前の fake CLI が終了しない');
   await new Promise(r=>setTimeout(r,10));
  }
+ await post('/api/ai/resume',{confirm:true});
+ require('../server').chats.setQueue(key.project,key.task,[]);
 });
 test.after(async()=>{if(server){await post('/api/chat/stop');await new Promise(r=>server.close(r));}});
 
@@ -68,12 +70,12 @@ test('送らずに消す操作は会話とAI起動を増やさない',async()=>{
 
 // 下書きなどのDOMを保持したまま上部だけ同期する。新質問・別作業・古い取得を区別する。
 const app=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
-const helper=app.slice(app.indexOf('let sendWorkAnswer = null;'),app.indexOf('\nfunction renderWork()'));
+const helper=app.slice(app.indexOf('let sendWorkAnswer = null;'),app.indexOf('\nfunction syncChatHandoff()'));
 function ui() {
  const t={id:'answer',question,state:'返事待ち'},p={id:'p',tasks:[t]},slot={dataset:{question},innerHTML:'question'},badge={className:'pill',textContent:'返事待ち'},select={value:'返事待ち'},msgs={scrollTop:173};
  const retained={draft:'書きかけ',image:'見本画像',model:'GPT-6.1-Sol',effort:'極高'};
  const input={disabled:false},upper={querySelectorAll:()=>[input]},ask={dataset:{askKey:'old'},classList:{add:()=>{ask.done=true}},querySelector:()=>status},status={textContent:''};
- const c={UI:require('./ui-locale-fixture')(),view:{kind:'work',project:'p',task:'answer'},proj:()=>p,taskOf:()=>t,esc:x=>x,richText:x=>x,chatSending:new Set(),chatAttachmentKey:()=> 'p/answer',document:{querySelectorAll:()=>[ask]},updateAskControls:()=>{},refreshAsks:()=>{},askDrafts:new Map([['old','選択A']]),window:{HubMobile:{badges:()=>{c.badges++}}},stateLoadEpoch:0,badges:0,loads:0,tree:0,counts:0,toast:()=>{},updateTurnCounts:()=>{c.counts++},renderTree:()=>{c.tree++},load:async()=>{c.loads++},$:s=>({'#work-question':slot,'#msgs':msgs,'.whead .pill':badge,'.wfoot [data-act="state"]':select,'#ask-form':upper}[s])};vm.createContext(c);vm.runInContext(helper,c);return {c,t,p,slot,badge,select,msgs,retained,ask,status,input};
+ const c={UI:require('./ui-locale-fixture')(),view:{kind:'work',project:'p',task:'answer'},proj:()=>p,taskOf:()=>t,esc:x=>x,richText:x=>x,chatSending:new Set(),chatAttachmentKey:()=> 'p/answer',document:{addEventListener:()=>{},querySelector:()=>null,querySelectorAll:()=>[ask]},updateAskControls:()=>{},refreshAsks:()=>{},askDrafts:new Map([['old','選択A']]),window:{HubMobile:{badges:()=>{c.badges++}}},stateLoadEpoch:0,badges:0,loads:0,tree:0,counts:0,toast:()=>{},updateTurnCounts:()=>{c.counts++},renderTree:()=>{c.tree++},load:async()=>{c.loads++},$:s=>({'#work-question':slot,'#msgs':msgs,'.whead .pill':badge,'.wfoot [data-act="state"]':select,'#ask-form':upper}[s])};vm.createContext(c);vm.runInContext(helper,c);return {c,t,p,slot,badge,select,msgs,retained,ask,status,input};
 }
 test('受付成功で上部と件数を即時更新し、下書きと読書位置は保持する',async()=>{
  const f=ui();await f.c.acceptedWorkAnswer(f.p,f.t,question,{answeredQuestion:question},'old');assert.equal(f.slot.innerHTML,'');assert.equal(f.badge.textContent,'実行中');assert.equal(f.select.value,'実行中');assert.equal(f.c.counts,1);assert.equal(f.c.badges,1);assert.equal(f.c.loads,1);assert.equal(f.c.stateLoadEpoch,1);assert.equal(f.msgs.scrollTop,173);assert.equal(f.ask.done,true);assert.deepEqual(f.retained,{draft:'書きかけ',image:'見本画像',model:'GPT-6.1-Sol',effort:'極高'});
@@ -91,6 +93,6 @@ test('順番待ちの受付はAI開始待ちと明記し、上部から送って
 
 test('送信前の古い一覧取得は受付後の状態を復活させない',async()=>{
  const f=ui();let finish;f.c.fetchState=()=>new Promise(resolve=>{finish=resolve});f.c.state={projects:[f.p]};f.c.treeKey=()=>'';f.c.renderedTreeKey='';
- const start=app.indexOf('async function refreshTree()'),end=app.indexOf('const editing =',start);vm.runInContext(app.slice(start,end),f.c);
+ const start=app.indexOf('async function refreshTree('),end=app.indexOf('const editing =',start);vm.runInContext(app.slice(start,end),f.c);
  const pending=f.c.refreshTree();await f.c.acceptedWorkAnswer(f.p,f.t,question,{answeredQuestion:question},'old');finish({projects:[{id:'p',tasks:[{id:'answer',question,state:'返事待ち'}]}]});await pending;assert.equal(f.c.state.projects[0].tasks[0].question,'');assert.equal(f.slot.innerHTML,'');
 });

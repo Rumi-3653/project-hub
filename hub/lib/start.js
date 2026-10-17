@@ -20,10 +20,13 @@ function lastSpec(p) {
   specCache.set(f, { key, value });
   return value;
 }
-function saveSpec(p, spec) { fs.mkdirSync(path.dirname(specFile(p)), { recursive: true }); fs.writeFileSync(specFile(p), JSON.stringify(spec)); }
+function saveSpec(p, spec) { fs.mkdirSync(path.dirname(specFile(p)), { recursive: true }); require('./integration-writes').write(specFile(p),()=>fs.writeFileSync(specFile(p), JSON.stringify(spec))); }
 function imageFile(p, id, preview = false) {
   if (!/^[a-f\d-]{36}\.(png|jpg|jpeg|webp|gif|heic)$/i.test(id)) throw Error(lt('画像の指定が正しくありません'));
   return path.join(dirOf(p), preview && !/\.(png|jpe?g)$/i.test(id) ? id + '.png' : id);
+}
+function convertImage(file, output) {
+  execFileSync('/usr/bin/sips', ['-s', 'format', 'png', file, '--out', output], { timeout: 15000, stdio: 'pipe' });
 }
 function saveImage(p, name, data) {
   if (!IMAGE.test(name)) throw Error(lt('画像は png／jpg／jpeg／webp／gif／heic に対応しています'));
@@ -33,14 +36,14 @@ function saveImage(p, name, data) {
   fs.mkdirSync(dirOf(p), { recursive: true });
   fs.writeFileSync(file, data);
   if (!/\.(png|jpe?g)$/i.test(id)) {
-    try { execFileSync('/usr/bin/sips', ['-s', 'format', 'png', file, '--out', imageFile(p, id, true)], { timeout: 15000, stdio: 'pipe' }); }
+    try { convertImage(file, imageFile(p, id, true)); }
     catch {
       // 失敗した一時コピーだけを片付ける。利用者の元画像には触らない。
       for (const temp of [file, imageFile(p, id, true)]) { try { fs.unlinkSync(temp); } catch { /* 未作成 */ } }
       throw Error(lt('画像をPNGに変換できませんでした。画像を書き出し直して追加してください'));
     }
   }
-  return { id, name: /^hub-paste-/i.test(path.basename(name)) ? '貼り付け画像.png' : path.basename(name), url: '/api/start/image?project=' + encodeURIComponent(p.id) + '&id=' + id, path: imageFile(p, id, true) };
+  return { id, name: /^hub-paste-/i.test(path.basename(name)) ? lt('貼り付け画像.png') : path.basename(name), url: '/api/start/image?project=' + encodeURIComponent(p.id) + '&id=' + id, path: imageFile(p, id, true) };
 }
 function imageFromPath(p, raw) {
   const file = fs.realpathSync(String(raw));
@@ -66,4 +69,4 @@ function copyImages(p, ids, dir, task) {
 function imagePrompt(ai, text, images) {
   return images.length ? text + lt('\n\n参照画像（絶対パス）：\n') + images.join('\n') + '\n' + (ai === 'claude' ? lt('これらの画像を Read で見てから始める。') : ['agy', 'grok'].includes(ai) ? lt('これらの画像を読み、内容を確認してから始める。') : lt('添付画像を確認してから始める。')) : text;
 }
-module.exports = { IMAGE, MAX, lastSpec, saveSpec, imageFile, saveImage, imageFromPath, copyImages, imagePrompt };
+module.exports = { IMAGE, MAX, lastSpec, saveSpec, imageFile, saveImage, imageFromPath, copyImages, imagePrompt, convertImage };

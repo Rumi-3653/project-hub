@@ -19,13 +19,13 @@ function readPublic(url) {
     req.on('close', () => clearTimeout(timer)); req.on('error', reject);
   });
 }
-async function latestVersion(ai, method, home, read = readPublic) {
+async function latestVersion(ai, method, home, read = readPublic, claudeDir) {
   let url, field;
   if (ai === 'codex') { url = 'https://api.github.com/repos/openai/codex/releases/latest'; field = 'tag_name'; }
   else if (ai === 'claude' && method === 'homebrew-cask') { url = 'https://formulae.brew.sh/api/cask/claude-code@latest.json'; field = 'version'; }
   else if (ai === 'claude') {
     let channel = 'latest';
-    try { if (JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')).autoUpdatesChannel === 'stable') channel = 'stable'; } catch (e) { if (e.code !== 'ENOENT') throw Error(lt('Claudeの更新チャンネルを確認できません')); }
+    try { if (JSON.parse(fs.readFileSync(path.join(claudeDir || path.join(home, '.claude'), 'settings.json'), 'utf8')).autoUpdatesChannel === 'stable') channel = 'stable'; } catch (e) { if (e.code !== 'ENOENT') throw Error(lt('Claudeの更新チャンネルを確認できません')); }
     url = `${CLAUDE_DIST}/${channel}`;
   } else if (ai === 'agy') {
     if (!['darwin', 'linux', 'win32'].includes(process.platform) || !['arm64', 'x64'].includes(process.arch)) throw Error(lt('このOSの配布情報に対応していません'));

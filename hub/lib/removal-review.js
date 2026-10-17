@@ -4,7 +4,7 @@ const { lt } = require('./locale');
 const fs=require('node:fs'),path=require('node:path'),{randomUUID}=require('node:crypto');
 const {noLinks,exists}=require('./remove');
 class RemovalReview {
- constructor({store,removal,start,busy,rows,queued=()=>false}){Object.assign(this,{store,removal,start,busy,rows,queued});this.starting=new Set();}
+ constructor({store,removal,start,busy,rows,queued=()=>false,pick=()=>null}){Object.assign(this,{store,removal,start,busy,rows,queued,pick});this.starting=new Set();}
  file(project){const p=this.store.readProject(project);if(!p)throw Error(lt('プロジェクトがありません'));const f=path.join(p.dir,'.ai/work/remove-sharing.json');noLinks(f);return f;}
  read(project){const f=this.file(project);if(!exists(f))return null;const st=fs.statSync(f);if(st.size>1024*1024)throw Error(lt('共有確認の記録が大きすぎます'));return JSON.parse(fs.readFileSync(f,'utf8'));}
  save(project,r){const f=this.file(project);fs.mkdirSync(path.dirname(f),{recursive:true});noLinks(f+'.tmp');fs.writeFileSync(f+'.tmp',JSON.stringify(r,null,2));fs.renameSync(f+'.tmp',f);}
@@ -18,7 +18,7 @@ class RemovalReview {
   this.starting.add(project);
   let r;
   try {
-   const task=this.store.createTask(project,{title:lt('削除前の共有確認'),owner:'claude-code',role:'チェック',model:'claude-fable-5-1',workspaceMode:'direct',steps:[lt('外の場所の共有を読み取りだけで確認する')]});
+   const task=this.store.createTask(project,{title:lt('削除前の共有確認'),owner:'claude-code',role:'チェック',model:'claude-fable-5-1',...(this.pick() || {}),workspaceMode:'direct',steps:[lt('外の場所の共有を読み取りだけで確認する')]});
    if(!task)throw Error(lt('共有確認の作業を作れませんでした'));
    r={id:randomUUID(),task:task.id,status:'running',candidates,results:[],error:'',at:new Date().toISOString()};this.save(project,r);
    const p=this.store.readProject(project),text=[

@@ -34,6 +34,18 @@ function fixture(overrides={}) {
  const selectAll=checked=>{const all=el('#maintenance-select-all');all.checked=checked;change(all);};
  return {ctx,el,events,calls,click,change,select,selectAll,get candidates(){return candidates;},get actions(){return actions;},data};
 }
+test('整理と確認を開き直すと前回のスクロール位置をリセットし、閉じる操作を維持する',async()=>{
+ const a=fixture(),drawer=a.el('#maintenance-drawer'),body=a.el('#maintenance-body');
+ drawer.scrollTop=300;body.scrollTop=600;
+ const open={dataset:{p:'p',maintenance:'open'}};
+ await a.events.get('click')({target:{closest:s=>s==='[data-maintenance]'?open:null}});
+ assert.equal(drawer.hidden,false);assert.equal(drawer.scrollTop,0);assert.equal(body.scrollTop,0);
+ await a.events.get('click')({target:{id:'maintenance-close',closest:()=>null}});
+ assert.equal(drawer.hidden,true);
+ body.scrollTop=900;
+ await a.events.get('click')({target:{closest:s=>s==='[data-maintenance]'?open:null}});
+ assert.equal(body.scrollTop,0);assert.equal(drawer.hidden,false);
+});
 test('cleanup candidates start unchecked, apply starts disabled and dangerous text is escaped',()=>{
  const a=fixture(),html=a.el('#maintenance-body').innerHTML;
  assert.match(html,/type="checkbox" data-maint-candidate="choice"/);assert.doesNotMatch(html,/type="checkbox"[^>]*\bchecked\b/);

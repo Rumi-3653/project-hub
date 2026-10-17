@@ -71,3 +71,33 @@ test('A cached daily check displays stored status without claiming a new check s
   assert.doesNotMatch(f.element('#app-update-status').textContent,/開始しました/);
   assert.equal(f.run('appUpdateData.lastCheck'),snapshot.lastCheck);
 });
+
+test('U20 completed App card shows verified release details, disabled reasons and existing gray button style', () => {
+  const f = fixture();
+  const html = f.context.appUpdateHtml({ ...snapshot, mode: 'packaged', currentVersion: '1.2.3', sourceVersion: '0.0.0', phase: 'ready', pending: true, notes: '<script>notes</script>', previousVersion: '1.2.2' });
+  assert.match(html, /GitHub Releases（完成アプリ）/); assert.match(html, /1\.2\.3/); assert.doesNotMatch(html, /0\.0\.0/);
+  assert.match(html, /保持している前の版：1\.2\.2/); assert.match(html, /&lt;script&gt;notes/); assert.match(html, /data-app-update="apply"/);
+  for (const reason of ['準備中：配布元の設定がまだありません', '製作者版は自動更新の対象外です', 'ディスクイメージの中から開いています']) {
+    const disabled = f.context.appUpdateHtml({ ...snapshot, mode: 'unsupported', supported: false, reason });
+    assert.match(disabled, new RegExp(reason)); assert.match(disabled, /id="app-auto-update"[^>]*disabled/); assert.match(disabled, /id="app-update-check"[^>]*disabled/);
+  }
+  const css = fs.readFileSync(path.join(__dirname, '../public/app.css'), 'utf8');
+  assert.match(css, /#app-update-box \.acts \.btn:disabled\{background:var\(--hover\);border-color:var\(--line\);color:var\(--muted\);cursor:not-allowed\}/);
+});
+
+test('U20 completed App apply asks about drafts, serializes writes, preserves errors and never reloads', async () => {
+  const f = fixture(); f.context.api = async () => ({ ...snapshot, mode: 'packaged', phase: 'ready', pending: true }); await f.context.loadAppUpdate();
+  f.run('var chatDraft={task:"unsent"}; var rolesDirty=()=>false; var restartDraftMaps=()=>({drafts:new Map()});');
+  let prompts = 0; f.context.confirm = () => { prompts++; return false; };
+  assert.equal(f.context.appUpdateMayRestart(), false); await f.context.applyAppUpdate(); assert.equal(prompts, 1); assert.equal(f.calls.length, 0);
+  let finish; f.context.confirm = () => true;
+  f.context.api = (route, body) => { f.calls.push({ route, body: JSON.parse(JSON.stringify(body)) }); return new Promise(resolve => { finish = resolve; }); };
+  const applying = f.context.applyAppUpdate(); await f.context.applyAppUpdate(); assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls[0], { route: '/api/app-update', body: { action: 'apply' } });
+  finish({ ...snapshot, mode: 'packaged', phase: 'deferred', pending: true }); await applying;
+  assert.doesNotMatch(f.element('#app-update-box').innerHTML, /data-app-update="apply"[^>]*disabled/);
+  f.context.api = async () => { throw Error('apply failed'); }; await f.context.applyAppUpdate(); assert.equal(f.element('#app-update-status').textContent, 'apply failed');
+  f.run('chatDraft={};'); assert.equal(f.context.appUpdateMayRestart(), true);
+  f.run('rolesDirty=()=>true;'); assert.equal(f.context.appUpdateMayRestart(), false);
+  f.run('rolesDirty=()=>false; restartDraftMaps=()=>({drafts:new Map([["task","draft"]])});'); assert.equal(f.context.appUpdateMayRestart(), false);
+});
