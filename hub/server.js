@@ -2126,7 +2126,7 @@ async function apiRequest(req, res, url) {
       else if (url.pathname === '/api/accounts/terminal') {
         if (!['login', 'logout'].includes(b.action)) return send(res, 400, { error: 'invalid action' });
         // Windows：tty で窓を探せないので、開いている bash の窓で操作してもらう
-        if (process.platform === 'win32') return send(res, 409, { error: lt('Windows では認証用の窓を前に出せません。開いている bash の窓で操作してください') });
+        if (process.platform === 'win32' && !DRY) return send(res, 409, { error: lt('Windows では認証用の窓を前に出せません。開いている bash の窓で操作してください') });
         const pid = accounts.authTerminalPid(ai, id);
         if (!pid) return send(res, 409, { error: lt('認証用Terminalが見つかりません。［状態を確認］を押してください') });
         result = await launch.focusAuthTerminal(pid, DRY);
