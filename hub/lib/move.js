@@ -1,6 +1,7 @@
 'use strict';
 // Portable data only. Never load a module, hook, account or device credential from a bundle.
 const fs = require('node:fs');
+require('./win-compat');
 const fsp = fs.promises;
 const path = require('node:path');
 const os = require('node:os');
@@ -59,7 +60,8 @@ async function atomic(file, value) {
   const h = await fsp.open(tmp, 'wx', 0o600);
   try { await h.writeFile(JSON.stringify(value, null, 2) + '\n'); await h.sync(); } finally { await h.close(); }
   await fsp.rename(tmp, file);
-  const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); }
+  // Windows はディレクトリを fsync できない（EPERM）。NTFS が作成・改名を保持する
+  if (process.platform !== 'win32') { const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); } }
 }
 async function copyFile(from, to, expected) {
   const input = await fsp.open(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);

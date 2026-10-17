@@ -981,5 +981,11 @@
       "6a2c802028a5d2f9cfbed7fd231cfa9b136d58fbd27b7a0a71674a8af77a6eb3",
       "9c5c0abd93b25ff64cbe3761c3fe34de838ae01a25eef8aaf66479596790bb9c"
     ]
+  },
+  "win-compat.js": {
+    "reason": "Windows でディレクトリの fsync が EPERM になる時だけ飛ばす処理。fs は import のみで、ファイルを書かない。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
   }
 }

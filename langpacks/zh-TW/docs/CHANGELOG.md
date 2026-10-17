@@ -8,6 +8,7 @@
 - 以 `.gitattributes` 將文字檔換行固定為 LF（.bat 為 CRLF），避免 Windows 的換行轉換讓多行翻譯鍵對不上而顯示日文，或讓 setup.sh 無法以 bash 執行；公開版也一併包含。
 - 繁體中文：把直接寫在畫面裡、沒有經過翻譯的文字（新專案表單、左欄等待回覆、階段狀態、帳號名稱、額度剩餘時間、初次設定、整理紀錄、啟動訊息等）改為經過翻譯，並補上缺少的譯文。
 - 測試中放置假 CLI 的 PATH 改用 `path.delimiter` 串接（Windows 上原本會呼叫到真正的 CLI）。
+- Windows：對話經由獨立的 CLI 執行（spool）時也使用已解析的執行檔啟動，且不跳出視窗。Windows 無法確認程序所有權（ps），停止時改用 `taskkill /T` 結束 CLI。沒有寫入權的控制代碼（資料夾、唯讀檔）在 Windows 上 fsync 會出現 EPERM，因此略過（`hub/lib/win-compat.js`）。驗證用終端機無法移到前景時，Windows 會回覆說明。
 
 ## 4.117.0 (2026-10-15)
 

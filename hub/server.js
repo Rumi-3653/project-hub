@@ -1,4 +1,5 @@
 'use strict';
+require('./lib/win-compat'); // Windows：ディレクトリの fsync（EPERM）を飛ばす。他のOSでは何もしない
 const { lt, locale, config:localeConfig, configScript, activePack } = require('./lib/locale');
 const langpacks = require('./lib/langpack');
 const { loadPack } = langpacks;

@@ -2,6 +2,8 @@
 // One detached supervisor per turn. It owns only that CLI, never Hub tasks or
 // model selection. Persisted requests contain no environment or credentials.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process'),{EventEmitter}=require('node:events'),{StringDecoder}=require('node:string_decoder');
+// Windows：書き込み権のないハンドル（ディレクトリ・読み取り専用）の fsync は EPERM になるので飛ばす（worker は単体で動くため lib/win-compat.js と同じ処理をここにも持つ）
+if(process.platform==='win32'&&!fs.fsyncSync.hubWindows){const f=fs.fsyncSync,p=fd=>{try{return f(fd);}catch(e){if(e?.code==='EPERM')return undefined;throw e;}};p.hubWindows=true;fs.fsyncSync=p;}
 const WORKER_SOURCE=fs.readFileSync(__filename),OWNED_SOURCE=fs.readFileSync(path.join(__dirname,process.argv[2]==='--worker'?'owned-processes.cjs':'owned-processes.js'));
 function strictRead(dir,name){try{return JSON.parse(fs.readFileSync(path.join(dir,name),'utf8'));}catch(e){if(e.code==='ENOENT')return null;throw e;}}
 function read(dir,name,fallback=null){try{return JSON.parse(fs.readFileSync(path.join(dir,name),'utf8'));}catch{return fallback;}}
