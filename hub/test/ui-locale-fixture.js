@@ -7,7 +7,8 @@ const source = fs.readFileSync(path.join(__dirname, '../public/locale.js'), 'utf
 // Extracted app functions still use the same real locale implementation as the
 // browser. Original behavioral tests deliberately keep the Japanese default.
 module.exports = function uiLocale(locale = 'ja') {
-  const context = vm.createContext({ HUB_LOCALE: { locale } });
+  const messages = locale === 'zh-TW' ? require('../../langpacks/zh-TW/ui.json') : {};
+  const context = vm.createContext({ HUB_LOCALE: { locale, messages } });
   vm.runInContext(source, context);
   return context.HubI18n;
 };

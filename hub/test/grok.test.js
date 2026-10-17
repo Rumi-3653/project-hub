@@ -103,7 +103,7 @@ if(process.env.XAI_API_KEY||process.env.GROK_CODE_XAI_API_KEY||process.env.GROK_
 if(args.includes('--effort')){process.stderr.write('invalid --effort');process.exit(1);}
 process.stdout.write([{type:'text',data:'hello'},{type:'text',data:' world'},{type:'tool_call',title:'read',rawInput:{path:'code.js'}},{type:'end',sessionId:'grok-sid',stopReason:'end_turn'}].map(x=>JSON.stringify(x)).join('\\n'));
 `,{mode:0o755});
-    const runner=new chat.ChatRunner(),opts={project:'p',task:'t',pdir:root,dir:root,ai:'grok',model:model.id,effort:'高',perm:file,env:{XAI_API_KEY:'secret',GROK_CODE_XAI_API_KEY:'secret'},text:'check'};
+    const runner=new chat.ChatRunner(),opts={project:'p',task:'t',pdir:root,dir:root,ai:'grok',model:model.id,effort:'高',perm:'fake-grok',env:{PATH:root+path.delimiter+process.env.PATH,XAI_API_KEY:'secret',GROK_CODE_XAI_API_KEY:'secret'},text:'check'};
     const run=()=>new Promise(resolve=>runner.send({...opts,onEnd:resolve}));
     const first=await run();assert.equal(first.text,'hello world');assert.equal(first.error,'');assert.equal(chat.readMeta(root,'t').sessions.grok,'grok-sid');
     const second=await run();assert.equal(second.error,'');

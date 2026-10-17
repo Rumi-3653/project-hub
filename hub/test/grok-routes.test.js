@@ -36,6 +36,10 @@ else {console.log('PTY_GROK_READY');process.stdin.on('data',d=>process.stdout.wr
  ({server,sessions}=require('../server'));await new Promise(r=>server.listen(port,'127.0.0.1',r));base='http://127.0.0.1:'+server.address().port;
 });
 test.after(async()=>{if(server?.listening)await post('/api/chat/stop');sessions?.stopAll();if(server)await new Promise(r=>server.close(r));fs.rmSync(tmp,{recursive:true,force:true});});
+test.afterEach(async()=>{
+ const runtime=require('../server');
+ if(runtime.stopControl.held(key))await json('/api/ai/resume',{confirm:true});
+});
 
 test('Grok state/catalog/accounts/select and roles keep default assignments',async()=>{
  const state=await(await fetch(base+'/api/state')).json();assert.equal(state.grokAvailable,true);assert.deepEqual(state.roles.models.grok,[model]);assert.equal(state.roles.roles.find(r=>r.name==='コーディング').main.ai,'codex');assert.equal(state.cliFlags.grok[model],model);
@@ -73,7 +77,12 @@ test('Grok delegate queues exact model, stop and busy protections cover named ac
  const queued=await json('/api/delegate',{ai:'grok',model,effort:'高',title:'queue',text:'pending'});assert.ok(queued.queued);
  assert.equal((await post('/api/accounts/delete',{ai:'grok',id:named.id,confirm:true})).status,409);
  await json('/api/chat/stop');assert.equal((await reply(5)).error,'止めました');
+ const runtime=require('../server'),held=runtime.chats.queue(key.project,key.task);
+ assert.equal(held.length,1);assert.equal(held[0].stopHeld,true);
  assert.equal((await post('/api/accounts/logout',{ai:'grok',confirm:true})).status,400);
+ assert.equal((await post('/api/accounts/logout',{ai:'grok',id:named.id,confirm:true})).status,409);
+ // This fixture explicitly discards its own held queue before testing logout.
+ runtime.chats.setQueue(key.project,key.task,[]);
  assert.equal((await json('/api/accounts/logout',{ai:'grok',id:named.id,confirm:true})).args[0],'logout');
 });
 

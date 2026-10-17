@@ -42,7 +42,7 @@ class Maintenance {
  }
  project(id) {const p=this.store.readProject(id);if(!p)throw Error(lt('プロジェクトがありません'));return p;}
  bases(p) {return [...new Set([p.dir,this.baseOf(p)].map(d=>path.resolve(d)))];}
- locked(id) {const p=this.project(id);return [...this.running.keys()].some(k=>this.bases(this.project(k)).some(d=>this.bases(p).includes(d)));}
+ locked(id) {if(!this.running.size)return false;const p=this.project(id);return [...this.running.keys()].some(k=>this.bases(this.project(k)).some(d=>this.bases(p).includes(d)));}
  idle(id) {if(this.busy(id) || this.locked(id))throw Error(lt('同じプロジェクト・本体でAIまたは検証が動いています。終わってから実行してください'));}
  targets(p) {
   const out=[{dir:path.join(p.dir,'.ai/work'),label:lt('一時ファイル'),days:7}];
@@ -196,7 +196,7 @@ class Maintenance {
   for(const e of entries) {fs.mkdirSync(path.dirname(e.src),{recursive:true});fs.renameSync(e.dest,e.src);e.restored=true;this.save(r);}
   return {ok:true,restored:entries.length};
  }
- async verify(id,script,expectedHash,confirm) {
+ async verify(id,script,expectedHash,confirm,beforeRun) {
   this.idle(id);const p=this.project(id),base=this.baseOf(p),checks=[];
   const all=this.store.listProjects();
   const resolve=ref=>all.find(q=>q.id===ref) || (all.filter(q=>q.name===ref).length===1?all.find(q=>q.name===ref):null);
@@ -217,6 +217,7 @@ class Maintenance {
   if(!script)return {ok:checks.every(c=>c.ok),checks,note:lt('構造確認のみです。実際のアプリの動作は未検証です。')};
   const choice=scriptsAt(base).find(x=>x.name===script);
   if(confirm!==true || !choice?.allowed || choice.hash!==expectedHash)throw Error(lt('表示された検証コマンドを確認して選び直してください'));
+  beforeRun?.();
   this.running.set(id,true);
   try {
    const result=await new Promise(resolve=>{

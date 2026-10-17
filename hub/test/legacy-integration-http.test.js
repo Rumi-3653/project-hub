@@ -15,7 +15,13 @@ test.before(async()=>{
   ({server}=require('../server')); await new Promise(r=>server.listen(port,'127.0.0.1',r)); base='http://127.0.0.1:'+port;
 });
 test.after(async()=>{if(server)await new Promise(r=>server.close(r));fs.rmSync(root,{recursive:true,force:true});});
-const post=(route,b)=>fetch(base+route,{method:'POST',headers:{'X-Hub':'1','Content-Type':'application/json'},body:JSON.stringify(b)});
+const cleanupReview=i=>({disposition:'cleanup',review:{...i.review,confirmed:true,residual:'なし',undecided:'なし'}});
+// These fixtures synchronously create/read thousands of Git files between calls.
+// Test request boundaries without retaining idle sockets across that work; never retry a mutation.
+const post=async(route,b)=>{
+  try{return await fetch(base+route,{method:'POST',headers:{'X-Hub':'1','Content-Type':'application/json','Connection':'close'},body:JSON.stringify(b)});}
+  catch(e){throw new Error(route+': '+(e.cause?.code || e.message),{cause:e});}
+};
 for(const code of [true,false])test('R3 HTTPの古い確認tokenは別mergeを壊さず保存・受領前に拒否：'+code,async()=>{
  const project='Foreign merge '+code,body=path.join(root,'System',project),dir=path.join(root,'Product',project),git=require('../lib/git');
  fs.mkdirSync(body,{recursive:true});fs.mkdirSync(dir,{recursive:true});
@@ -35,7 +41,7 @@ for(const code of [true,false])test('R3 HTTPの古い確認tokenは別mergeを�
  assert.deepEqual(git.inspect(body),d.targetSnapshot);
  const mergeHead=sh(body,'rev-parse','MERGE_HEAD'),indexPath=sh(body,'rev-parse','--path-format=absolute','--git-path','index'),index=fs.readFileSync(indexPath);
  r=await post('/api/task/integrate/preview',{project,task:parent.id});assert.equal(r.status,409);assert.match((await r.json()).error,/統合先で取り込みが途中/);
- r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project,task:i.task,files:i.selected,optional:[]}))});
+ r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project,task:i.task,...cleanupReview(i),files:i.selected,optional:[]}))});
  assert.equal(r.status,409);assert.match((await r.json()).error,/統合先で取り込みが途中/);
  assert.equal(sh(body,'rev-parse','MERGE_HEAD'),mergeHead);assert.deepEqual(git.inspect(body),d.targetSnapshot);assert.deepEqual(fs.readFileSync(indexPath),index);
  assert.deepEqual(journals(),oldJournals);assert.equal(fs.readFileSync(taskFile,'utf8'),taskText);assert.equal(fs.readFileSync(report,'utf8'),'report');assert.equal(chat.read(dir,parent.id).filter(x=>x.handoff).length,0);
@@ -77,17 +83,22 @@ test('大量の保存待ちがある親の統合確認と受領で、本体・�
   const staged=sh('diff','--cached','--binary'),status=sh('status','--porcelain');assert.ok(Buffer.byteLength(status)>1024*1024);
   const report=path.join(dir,'作業',child.id,'report.txt');fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'checked result');
   let r=await post('/api/task/integrate/preview',{project,task:parent.id});assert.equal(r.status,200);let d=await r.json();
-  assert.equal(d.items.length,1);assert.deepEqual(d.items[0].blockers,[]);assert.equal(d.targetSnapshot.status,status.trim());
+  assert.equal(d.items.length,1);assert.match(d.items[0].blockers.join(' '),/変更を保存/);assert.equal(d.targetSnapshot.status,status.trim());
   assert.equal(sh('rev-parse','HEAD'),head);assert.equal(sh('diff','--cached','--binary'),staged);
   const first=path.join(pending,'file-00000.txt');fs.writeFileSync(first,'unreviewed change\n');sh('add','--',first);
   assert.equal(sh('status','--porcelain'),status);
-  const select=x=>x.items.map(i=>({project,task:i.task,files:i.selected,optional:[]}));
-  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:select(d),confirm:true});assert.equal(r.status,409);assert.match((await r.json()).error,/統合先が変わりました/);
+  const select=x=>x.items.map(i=>({project,task:i.task,...cleanupReview(i),files:i.selected,optional:[]}));
+  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:select(d),confirm:true});assert.equal(r.status,409);assert.match((await r.json()).error,/変更を保存/);
   assert.ok(store.taskFile(project,child.id));assert.equal(sh('rev-parse','HEAD'),head);
   fs.writeFileSync(first,'pending 0\n');sh('add','--',first);assert.equal(sh('diff','--cached','--binary'),staged);
   r=await post('/api/task/integrate/preview',{project,task:parent.id});assert.equal(r.status,200);d=await r.json();
+  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:select(d),confirm:true});assert.equal(r.status,409);assert.match((await r.json()).error,/変更を保存/);
+  assert.ok(store.taskFile(project,child.id));assert.equal(sh('rev-parse','HEAD'),head);assert.equal(sh('diff','--cached','--binary'),staged);assert.equal(sh('status','--porcelain'),status);
+  // Explicit user save, never an integration-side all-files commit.
+  sh('commit','-qm','explicitly save fixture files');const savedHead=sh('rev-parse','HEAD');
+  r=await post('/api/task/integrate/preview',{project,task:parent.id});d=await r.json();assert.deepEqual(d.items[0].blockers,[]);
   r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:select(d),confirm:true});assert.equal(r.status,200);assert.equal((await r.json()).complete,true);
-  assert.equal(store.taskFile(project,child.id),null);assert.equal(sh('rev-parse','HEAD'),head);assert.equal(sh('diff','--cached','--binary'),staged);assert.equal(sh('status','--porcelain'),status);
+  assert.equal(store.taskFile(project,child.id),null);assert.equal(sh('rev-parse','HEAD'),savedHead);assert.equal(sh('diff','--cached','--binary'),'');assert.equal(sh('status','--porcelain'),'');
   for(let i=0;i<count;i++)assert.equal(fs.readFileSync(path.join(pending,`file-${String(i).padStart(5,'0')}.txt`),'utf8'),`pending ${i}\n`);
   assert.equal(fs.readFileSync(report,'utf8'),'checked result');assert.equal(chat.read(dir,parent.id).filter(x=>x.handoff).length,1);
   const receipts=fs.readdirSync(path.join(root,'_hub/task-handoffs')).map(n=>JSON.parse(fs.readFileSync(path.join(root,'_hub/task-handoffs',n),'utf8'))),receipt=receipts.find(x=>x.project===project);
@@ -113,7 +124,7 @@ test('過去の大きい成果を含めず、明示した成果だけをHTTPで�
   assert.ok(store.taskFile(project,child.id));assert.equal(chat.read(dir,parent.id).filter(x=>x.offer).length,1);
   r=await post('/api/task/integrate/preview',{project,task:parent.id});assert.equal(r.status,200);const d=await r.json();
   assert.equal(d.items.length,1);const item=d.items[0];assert.deepEqual(item.blockers,[]);assert.deepEqual(item.files.map(x=>x.id),offer.selected);
-  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:[{project,task:child.id,files:item.selected,optional:[]}],confirm:true});assert.equal(r.status,200);assert.equal((await r.json()).complete,true);
+  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:[{project,task:child.id,...cleanupReview(item),files:item.selected,optional:[]}],confirm:true});assert.equal(r.status,200);assert.equal((await r.json()).complete,true);
   const receipt=JSON.parse(fs.readFileSync(fs.readdirSync(path.join(root,'_hub/task-handoffs')).map(x=>path.join(root,'_hub/task-handoffs',x)).find(f=>JSON.parse(fs.readFileSync(f)).project===project),'utf8'));
   assert.deepEqual(receipt.files.map(x=>fs.readFileSync(x.to,'utf8')),['current code','checked result']);
   assert.equal(store.taskFile(project,child.id),null);assert.equal(sh('rev-parse','HEAD'),head);assert.equal(fs.readFileSync(code,'utf8'),'current code');assert.equal(fs.readFileSync(report,'utf8'),'checked result');assert.equal(fs.statSync(old).size,65*1024*1024);
@@ -145,7 +156,7 @@ for (const location of ['recent','older-than-500','rotated']) for (const handedU
   r=await post('/api/task/integrate/preview',{project,task:parent.id});assert.equal(r.status,200);const d=await r.json();
   assert.equal(d.items.length,1);const item=d.items[0];assert.deepEqual(item.blockers,[]);assert.deepEqual(item.files,[]);assert.equal(item.handedUp,handedUp);
   assert.equal(item.integrated.commit,commit);assert.equal(item.integrated.recovered,true);assert.deepEqual(item.integrated.files,['result.txt']);
-  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:[{project,task:child.id,files:[],optional:[]}],confirm:true});assert.equal(r.status,200);assert.equal((await r.json()).complete,true);
+  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,selected:[{project,task:child.id,...cleanupReview(item),files:[],optional:[]}],confirm:true});assert.equal(r.status,200);assert.equal((await r.json()).complete,true);
   const rows=chat.read(dir,parent.id).filter(x=>x.handoff);assert.equal(rows.length,1);const row=rows[0];assert.ok(row.integrating);assert.match(row.text,/古い取り込み記録を本体の履歴と照合/);assert.match(row.text,/result.txt/);assert.match(row.text,/統合先/);
   assert.match(fs.readFileSync(store.taskFile(project,parent.id),'utf8'),/古い取り込み記録を本体の履歴と照合/);
   assert.equal(store.taskFile(project,child.id),null);assert.equal(fs.readFileSync(path.join(body,'result.txt'),'utf8'),'fixture result');assert.equal(sh('rev-parse','HEAD'),commit);
@@ -160,11 +171,16 @@ for(const applyParent of [false,true])test('HTTPで旧衝突→親コピー→�
  const store=new Store(root),parent=store.createTask(project,{title:'本作業'}),children=[];
  for(const title of ['A','B']){const c=store.createTask(project,{title,parent:parent.id,steps:['完成']});store.setStep(project,c.id,0,true);const w=git.prepare({base:body,workRoot:path.join(root,'Work',project),taskId:c.id});store.updateTask(project,c.id,{workdir:w.dir});fs.writeFileSync(path.join(w.dir,'base.txt'),title+'\n');git.save(w.dir,title);children.push({...c,workdir:w.dir});}
  let r=await post('/api/task/integrate/preview',{project,task:parent.id}),d=await r.json();assert.equal(r.status,200);
- r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project,task:i.task,files:i.selected,optional:[]}))});assert.equal(r.status,200);const partial=await r.json();assert.equal(partial.conflict,true);assert.equal(partial.partial,true);assert.equal(store.taskFile(project,children[0].id),null);
+ r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,confirm:true,selected:d.items.map(i=>({project,task:i.task,...cleanupReview(i),files:i.selected,optional:[]}))});assert.equal(r.status,200);const partial=await r.json();assert.equal(partial.conflict,true);assert.equal(partial.partial,true);assert.equal(store.taskFile(project,children[0].id),null);
  const copy=git.prepare({base:body,workRoot:path.join(root,'Work',project),taskId:parent.id});store.updateTask(project,parent.id,{workdir:copy.dir});
  assert.throws(()=>sh(copy.dir,'merge','--no-ff','--no-edit',git.inspect(children[1].workdir).branch));fs.writeFileSync(path.join(copy.dir,'base.txt'),'A and B\n');sh(copy.dir,'add','.');sh(copy.dir,'commit','-qm','resolved');
  store.updateTask(project,parent.id,{state:'実行中',question:''});fs.appendFileSync(store.taskFile(project,children[1].id),'\n中断後の確認記録\n');
- if(applyParent){r=await post('/api/task/merge',{project,task:parent.id});assert.equal(r.status,200);assert.equal(store.readTask(store.taskFile(project,parent.id)).workdir,'');}
+ if(applyParent){
+   // 途中の子がある新規片付けは拒否。旧版で既に本体に適用・コピー整理された状態からの復旧も保持する。
+   r=await post('/api/task/merge',{project,task:parent.id});assert.equal(r.status,400);
+   assert.equal(git.merge({dir:copy.dir,workRoot:path.join(root,'Work',project),title:parent.id}).ok,true);
+   store.updateTask(project,parent.id,{workdir:''});
+ }
  const target=applyParent?body:copy.dir,head=git.inspect(target).head;
  r=await post('/api/task/integrate/preview',{project,task:parent.id});assert.equal(r.status,200);d=await r.json();assert.ok(d.recover);assert.deepEqual(d.blockers,[]);assert.equal(d.items[0].retained,true);assert.equal(d.items[1].recordChanged,true);assert.equal(d.items[1].codeAlready,true);
  r=await post('/api/task/integrate',{project,task:parent.id,token:d.token,confirm:true});assert.equal(r.status,409);assert.match((await r.json()).error,/復旧内容/);

@@ -97,6 +97,7 @@ test('Sol・高の初期選択はCLIと会話用作業へ保存し、役割設�
   const rolesFile = path.join(root, '_hub/roles.yaml');
   const roleText = 'models:\n  claude-code: [Fable 5.1, Opus 5.5]\n  codex: [Astra, GPT-6.1-Sol]\nagents: [しおり, つむぎ, りつ]\nroles:\n  コーディング: { main: [claude-code, Fable 5.1, 極高], backup: [codex, Astra, 極高] }\n';
   fs.writeFileSync(rolesFile, roleText);
+  const rolesBefore = require('../lib/roles').read(rolesFile).text;
   const before = (await (await fetch(base + '/api/state')).json()).projects.find(x => x.id === 'サンプルアプリ');
   const res = await post('/api/start', { ai: 'codex', model: 'GPT-6.1-Sol', effort: '高', text: '初期選択の確認', images: [] }), r = await res.json();
   assert.equal(res.status, 200, r.error); assert.equal(r.turn.command, 'codex');
@@ -107,7 +108,7 @@ test('Sol・高の初期選択はCLIと会話用作業へ保存し、役割設�
   assert.equal(task.owner, 'codex'); assert.equal(task.model, 'GPT-6.1-Sol'); assert.equal(task.effort, '高');
   assert.deepEqual(after.startSpec, { ai: 'codex', model: 'GPT-6.1-Sol', effort: '高' });
   for (const old of before.tasks) assert.deepEqual(after.tasks.find(x => x.id === old.id), old);
-  assert.equal(fs.readFileSync(rolesFile, 'utf8'), roleText);
+  assert.equal(fs.readFileSync(rolesFile, 'utf8'), rolesBefore);
 });
 
 test('子作業のSol・高は保存・再読込・会話とターミナルの起動に通り、既存作業と分岐を保持する', async () => {
@@ -120,6 +121,7 @@ test('子作業のSol・高は保存・再読込・会話とターミナルの�
   const roleText = 'models:\n  claude-code: [Fable 5.1]\n  codex: [Astra, GPT-6.1-Sol]\nroles:\n  司令塔: { main: [claude-code, Fable 5.1, 極高], backup: [codex, Astra, 極高] }\n';
   fs.writeFileSync(rolesFile, roleText);
   try {
+    const rolesBefore = require('../lib/roles').read(rolesFile).text;
     const parentRes = await post('/api/task/new', { title: '親の司令塔', owner: 'claude-code', role: '司令塔', phase: '設計' });
     const parent = await parentRes.json(); assert.equal(parentRes.status, 200, parent.error);
     const before = (await (await fetch(base + '/api/state')).json()).projects.find(p => p.id === 'サンプルアプリ');
@@ -146,7 +148,7 @@ test('子作業のSol・高は保存・再読込・会話とターミナルの�
     const args = await recordedArgs(pdir, child.id, captured);
     assert.equal(args[args.indexOf('--model') + 1], 'gpt-6.1-sol'); assert.ok(args.includes('model_reasoning_effort=high'));
     check(new Store(root).readTask(fresh.taskFile('サンプルアプリ', child.id)));
-    assert.equal(fs.readFileSync(rolesFile, 'utf8'), roleText);
+    assert.equal(fs.readFileSync(rolesFile, 'utf8'), rolesBefore);
   } finally { fs.writeFileSync(rolesFile, oldRoles); process.env.PATH = oldPath; }
 });
 

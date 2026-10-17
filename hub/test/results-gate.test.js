@@ -13,6 +13,23 @@ function fixture(t) {
  const current=()=>gate.current('P',child.id),declare=s=>{const text=fs.readFileSync(file,'utf8').split('\n## 成果\n')[0];fs.writeFileSync(file,text+'\n## 成果\n'+s+'\n');};
  return {root,dir,store,parent,child,file,transfer,removal,gate,make,current,declare,get launches(){return launches;},set block(v){block=v;}};
 }
+for(const layout of ['成果が末尾','成果の後に注意','やったことなし'])test('継続受領メモが成果宣言を壊さず完了検査を通る：'+layout,t=>{
+ const f=fixture(t);f.declare('- なし：確認だけ');
+ let before=fs.readFileSync(f.file,'utf8');
+ if(layout==='成果の後に注意')before+='\n## 注意\n保持する注意\n';
+ if(layout==='やったことなし')before=before.replace(/## やったこと\n[\s\S]*?(?=## 次にやること)/,'');
+ fs.writeFileSync(f.file,before);
+ const {readResults}=require('../lib/task-results'),expected=readResults(f.file);
+ const note='- 成果を受領し作業を継続。残件：なし。判断待ち：なし。受領記録：fixture';
+ const prepared=f.store.continuationDocument('P',f.child.id,note);
+ assert.equal(fs.readFileSync(f.file,'utf8'),before,'準備だけでは原文を書き換えない');
+ fs.writeFileSync(f.file,prepared.text);
+ assert.deepEqual(readResults(f.file),expected);
+ const {all,p,t:task}=f.current();
+ assert.equal(task.continuation,true);assert.equal(f.gate.approvalIssue(p,task,all).ok,true);
+ assert.ok(prepared.text.split('## やったこと\n')[1].split(/\n## /)[0].includes(note));
+ assert.equal(task.question,'');assert.equal(task.steps[0].done,true);
+});
 test('不正宣言は完了表示を抑止し二重契機・再起動でも自動依頼は同hashで一度',async t=>{
  const f=fixture(t);f.declare('できました');const {all,p,t:task}=f.current(),shown=f.gate.decorate(p,task,all);
  assert.equal(task.completionPending,true);assert.equal(shown.completionPending,false);assert.equal(shown.resultsPending.code,'format');assert.equal(f.launches,0);
@@ -64,4 +81,18 @@ test('最上位・承認済み・freetalk・未完了は表示も記録も従来
 test('上限交代の待ち順があるエラー終了は後続番に判定を渡し、同hashの成功後は整理する',async t=>{
  const f=fixture(t);f.block='順番待ちがあります';await f.gate.trigger('P',f.child.id,{row:{error:'利用上限'}});assert.equal(f.launches,0);assert.deepEqual(f.gate.records,{});
  f.block='';await f.gate.trigger('P',f.child.id,{row:{}});assert.equal(f.launches,1);
+});
+
+for(const heading of ['やったこと','やったこと（確認結果）',null])test('継続文書を準備するだけでは元文書を変えず成果末尾を保つ：'+heading,t=>{
+ const f=fixture(t);f.declare('- なし：確認のみ');
+ let original=fs.readFileSync(f.file,'utf8');
+ if(heading===null)original=original.replace(/## やったこと[\s\S]*?(?=## )/,'');
+ else original=original.replace('## やったこと','## '+heading);
+ fs.writeFileSync(f.file,original);
+ const prepared=f.store.continuationDocument('P',f.child.id,'- 受領メモ');
+ assert.equal(fs.readFileSync(f.file,'utf8'),original);
+ fs.writeFileSync(f.file,prepared.text);
+ assert.equal(f.store.readTask(f.file).continuation,true);
+ assert.match(f.store.readTask(f.file).done,/受領メモ/);
+ const c=f.current();assert.equal(f.gate.approvalIssue(c.p,c.t,c.all).ok,true);
 });

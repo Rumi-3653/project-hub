@@ -1,0 +1,55 @@
+'use strict';
+process.env.HUB_LANG='ja';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');const {fixture,U}=require('./idea-fixture.cjs'),chat=require('../lib/chat'),spool=require('../lib/cli-spool'),safe=require('../lib/safe-file');
+const wait=ms=>new Promise(r=>setTimeout(r,ms));async function until(fn){for(let n=0;n<240;n++){if(fn())return;await wait(20);}throw Error('fixture timeout');}
+test('C11: queue write/rename後の停止はacceptedを偽装せずintent復旧、破損は空にしない',t=>{const f=fixture(t),c=new chat.ChatRunner({dirOf:()=>f.dir}),file=chat.files(f.dir,'lane').queue;const a={id:'first',text:'先の依頼',ai:'codex'};c.setQueue('P','lane',[a]);const orig=safe.recoverAtomic;let armed=true;safe.recoverAtomic=(dest,bytes)=>{const r=orig(dest,bytes);if(armed&&dest===file){armed=false;throw Error('injected queue response');}return r;};try{assert.throws(()=>c.setQueue('P','lane',[a,{id:'idea',automation:{kind:'idea',runId:U.uuid()}}]),/injected/);}finally{safe.recoverAtomic=orig;}const restarted=new chat.ChatRunner({dirOf:()=>f.dir});assert.equal(restarted.queue('P','lane').length,2);assert.equal(fs.existsSync(file+'.intent.json'),false);fs.writeFileSync(file,'{broken');assert.throws(()=>new chat.ChatRunner({dirOf:()=>f.dir}).queue('P','lane'),/JSON|Unexpected|順番/);assert.equal(fs.readFileSync(file,'utf8'),'{broken');});
+test('C12: 未送信は元原文を保全してblocked、spool読取不能はunknown',async t=>{const f=fixture(t);f.add();f.auto(true);f.dispatch.delegate=async()=>{throw Error('fixture preflight rejection');};await f.runner.tick('P');const d=f.ideas.read('P'),r=Object.values(d.runs)[0];assert.equal(r.delivery,'not-sent');assert.equal(Object.values(d.items)[0].failure.blocked,true);await f.runner.tick('P');assert.equal(Object.values(f.ideas.read('P').runs).filter(x=>x.purpose===r.purpose).length,1);});
+for(const limit of [false,true])test('C13/C19/F4: 終了spoolのcold adopt・barrier・metadata/親session保全'+(limit?'・正式上限':''),async t=>{
+ const f=fixture(t),root=path.join(f.root,'spools'),script=path.join(f.root,'fake-node-fixture.cjs'),trace=path.join(f.root,'launches');
+ const result=limit?{type:'turn.failed',error:{message:"You've hit your usage limit. Try again later."}}:{type:'item.completed',item:{type:'agent_message',text:'{"schema":1,"kind":"plan"}'}};
+ fs.writeFileSync(script,`const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(trace)},'1');process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'idea-new-session'}));console.log(JSON.stringify(${JSON.stringify(result)}));${limit?'':'console.log(JSON.stringify({type:"turn.completed"}));'}},100));`);
+ const original={sessions:{codex:'parent-session'},models:{codex:'gpt-6.1-sol'},rulesSent:{codex:{hash:'parent-rules'}},compacted:{codex:true}};chat.writeMeta(f.dir,'lane',original);
+ const metadata={kind:'idea',schema:1,projectUid:f.ideas.read('P').projectUid,runId:U.uuid(),purpose:'plan',targets:[],requestId:U.uuid(),contextMode:'idea',readOnly:true,autoGeneration:1,stopGeneration:1,laneBindingRev:1,releaseId:null,reviewBinding:null};
+ const options={project:'P',task:'lane',pdir:f.dir,dir:f.work,ai:'codex',model:'gpt-6.1-sol',role:'コーディング',request:metadata.requestId,text:'fixture',automation:metadata,contextMode:'idea',freshContext:true,preserveTaskState:true,readOnly:true,userRow:{turn:U.uuid(),text:'fixture',request:metadata.requestId}};
+ const turn={command:process.execPath,args:[script],stdin:'fixture',modelFlag:'gpt-6.1-sol',freshContext:true,contextMode:'idea'};
+ const a=new chat.ChatRunner({spoolRoot:root,dirOf:()=>f.dir}),run=a.run(options,turn,original,[]);await run.startedP;a.detachForRestart();await until(()=>spool.read(run.child.dir,'exit.json'));
+ f.gate.beginRestore();let settled=0,completed=0,starts=0,preflight=0,verified=0,canStart=0;const delivered=[];
+ const b=new chat.ChatRunner({spoolRoot:root,dirOf:()=>f.dir,startBarrier:o=>f.gate.assert({dir:o.dir||f.work}),beforeAdopt:o=>{assert.deepEqual(o.automation,metadata);assert.equal(o.preserveTaskState,true);},startGate:(o,{adoption})=>{assert.equal(adoption,true);starts++;f.gate.acquire({dir:o.dir,owner:'adopt',adoption});},endGate:()=>f.gate.release('adopt'),onSettled:(o,row)=>{settled++;assert.deepEqual(o.automation,metadata);assert.deepEqual(row.automation.metadata,metadata);assert.equal(Boolean(b.busy('P','lane')),true);},afterCompleted:()=>completed++,limitBackup:()=>({ai:'claude',model:'claude-fable-5-1',role:'チェック',requiredModel:'claude-fable-5-1'}),beforeQueued:()=>{preflight++;},beforeSend:o=>{verified++;assert.equal(f.gate.barrier,false);if(limit)assert.deepEqual(o.automation,metadata);else assert.equal(o.automation,undefined);},canStart:(ai,model,o)=>{canStart++;f.gate.assert({dir:o.dir});return '';},refreshQueued:()=>({dir:f.work})});
+ b.setQueue('P','lane',[{id:'normal-waiting',ai:'codex',model:'gpt-6.1-sol',text:'normal',dir:f.work}]);b.adopt();await until(()=>spool.read(run.child.dir,'finished.json'));assert.equal(settled,1);assert.equal(completed,1);assert.equal(starts,1);assert.equal(f.gate.barrier,true);assert.equal(b.busy('P','lane'),null);assert.equal(fs.readFileSync(trace,'utf8'),'1');assert.deepEqual(chat.readMeta(f.dir,'lane'),original);assert.equal(f.project.tasks[0].state,'進行中');assert.equal(f.project.tasks[0].question,'');
+ if(limit){const q=b.queue('P','lane').find(x=>x.limitSwitch);assert.ok(q);assert.deepEqual(q.automation,metadata);assert.equal(q.contextMode,'idea');assert.equal(q.freshContext,true);assert.equal(q.preserveTaskState,true);assert.equal(q.readOnly,true);}else assert.equal(chat.read(f.dir,'lane').filter(x=>x.role==='assistant').length,1);
+ await assert.rejects(b.sendQueued({...options,request:'new'}),/起動時/);assert.equal(fs.readFileSync(trace,'utf8'),'1');
+ // Exercise the real sendQueued/send guards, replacing only the final process launch.
+ b.run=o=>{delivered.push(o);return {startedP:Promise.resolve(true)};};
+ if(!limit)b.setQueue('P','lane',b.queue('P','lane').map(x=>({...x,text:'edited while restoring'})));
+ b.resumeDeferred();assert.equal(delivered.length,0);assert.equal(preflight,0);
+ f.gate.finishRestore();b.resumeDeferred();b.resumeDeferred();
+ await until(()=>delivered.length===1&&!b.busy('P','lane')&&!b.queue('P','lane').some(x=>x.id===delivered[0].request));
+ b.resumeDeferred();await wait(40);
+ assert.equal(delivered.length,1);assert.equal(preflight,1);assert.equal(verified,1);assert.equal(canStart,1);
+ assert.equal(delivered[0].request,limit?'limit-'+metadata.requestId:'normal-waiting');
+ if(limit){assert.equal(delivered[0].ai,'claude');assert.deepEqual(b.queue('P','lane').map(x=>x.id),['normal-waiting']);}else{assert.equal(delivered[0].text,'edited while restoring');assert.equal(b.queue('P','lane').length,0);}
+ assert.equal(fs.readFileSync(trace,'utf8'),'1');
+});
+
+test('C13/F4: cold adoptの終了保存例外は当該scopeだけ閉じ、barrier解除後は別会話を開始できる',async t=>{
+ const f=fixture(t),root=path.join(f.root,'failed-spools'),script=path.join(f.root,'finished.cjs');
+ fs.writeFileSync(script,`process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>{console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'preserved'}}));console.log(JSON.stringify({type:'turn.completed'}));},80));`);
+ const o={project:'P',task:'lane',pdir:f.dir,dir:f.work,ai:'codex',model:'gpt-6.1-sol',text:'fixture',userRow:{at:new Date().toISOString(),turn:U.uuid()}};
+ const a=new chat.ChatRunner({spoolRoot:root,dirOf:()=>f.dir}),run=a.run(o,{command:process.execPath,args:[script],stdin:'fixture'},{sessions:{},models:{}},[]);
+ await run.startedP;a.detachForRestart();await until(()=>spool.read(run.child.dir,'exit.json'));
+ f.gate.beginRestore();let hooks=0,completed=0,starts=0;
+ const b=new chat.ChatRunner({spoolRoot:root,dirOf:()=>f.dir,startBarrier:o=>f.gate.assert({dir:o.dir}),startGate:(o,{adoption})=>f.gate.acquire({dir:o.dir,owner:'chat:'+o.task,adoption}),endGate:o=>f.gate.release('chat:'+o.task),onHandoffError:(o,e,id)=>f.gate.block('chat-handoff:'+id,o.dir,e.message),onSettled:async()=>{hooks++;throw Error('injected onSettled writer failure');},afterCompleted:()=>completed++,canStart:(ai,model,o)=>{f.gate.assert({dir:o.dir});return '';}});
+ b.setQueue('P','lane',[{id:'must-stay',text:'do not replay',ai:'codex',model:'gpt-6.1-sol'}]);b.adopt();
+ const adopted=b.busy('P','lane');let finished=false;adopted.finishedP.then(()=>{finished=true;});
+ const restoreReady=Promise.all([adopted.settledP]).then(results=>{f.gate.finishRestore();b.resumeDeferred();return results;});
+ assert.deepEqual(await restoreReady,[{state:'failed',error:'injected onSettled writer failure'}]);
+ assert.equal(f.gate.barrier,false);assert.equal(finished,false);assert.equal(completed,0);assert.equal(hooks,1);assert.equal(b.busy('P','lane'),adopted);
+ assert.equal(b.handoffErrors().length,1);assert.throws(()=>b.detachForRestart(),/終了保存/);
+ assert.throws(()=>f.gate.assert({dir:f.work}),/writer failure/);assert.throws(()=>f.gate.assert({dir:f.main}),/writer failure/);
+ assert.doesNotThrow(()=>f.gate.assert({dir:f.dir}));await assert.rejects(b.sendQueued({...o,request:'must-stay'}),/writer failure/);
+ b.run=()=>{starts++;return {startedP:Promise.resolve(true)};};
+ assert.equal(await b.send({...o,task:'independent',dir:f.dir}).started,true);assert.equal(starts,1);
+ b.resumeDeferred();await wait(40);assert.equal(hooks,1);assert.deepEqual(b.queue('P','lane').map(x=>x.id),['must-stay']);assert.equal(spool.read(run.child.dir,'finished.json'),null);
+});
+test('C19/C30: fresh contextはresumeしない、別目的metadataは通常会話へ降格しない',async t=>{const f=fixture(t);const a=f.add();f.auto(true);await f.runner.tick('P');const r=f.current(),m=f.dispatch.metadata(f.ideas.read('P'),r),o={project:'P',task:'lane',dir:f.work,text:r.prompt,request:r.requestId,automation:m,contextMode:'idea',freshContext:true,preserveTaskState:true,readOnly:r.readOnly};assert.doesNotThrow(()=>f.dispatch.verify(o));assert.throws(()=>f.dispatch.verify({...o,automation:{...m,purpose:'build'}}));assert.throws(()=>f.dispatch.verify({...o,contextMode:undefined}));f.auto(false);assert.throws(()=>f.dispatch.verify({...o,request:'limit-successor',limitSwitch:{original:r.prompt,sourceRequest:r.requestId}}),/停止/);const turn=chat.buildTurn({ai:'codex',model:'gpt-6.1-sol',text:'fixture',contextMode:'idea',freshContext:true,readOnly:true,meta:{sessions:{codex:'parent'},models:{codex:'gpt-6.1-sol'}},rows:[]});assert.equal(turn.resume,false);assert.ok(turn.args.includes('read-only'));});
+test('C12/F7: 壊れたspool原物は不在へ落とさずunknown',async t=>{const f=fixture(t),a=f.add();f.auto(true);await f.runner.tick('P');const r=f.current(),root=path.join(f.root,'bad-spool'),dir=path.join(root,'run');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'request.json'),'{broken');f.dispatch.spoolRoot=root;f.busyMap.clear();const result=require('../lib/idea-dispatch').IdeaDispatch.prototype.evidence.call(f.dispatch,'P',r);assert.equal(result.state,'unknown');assert.ok(result.error);});

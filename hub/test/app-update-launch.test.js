@@ -37,6 +37,8 @@ test('App build keeps old App on compile/signature failures and preserves config
   const backups = fs.readdirSync(f.apps).filter(x => x.startsWith('Project Hub.app.backup-')); assert.equal(backups.length, 1);
   assert.equal(fs.readFileSync(path.join(f.apps, backups[0], 'marker'), 'utf8'), 'old');
   assert.match(fs.readFileSync(path.join(app, 'Contents/Info.plist'), 'utf8'), /data &amp; &apos;quoted&apos;/);
+  const hash = require('crypto').createHash('sha256').update(fs.readFileSync(path.join(hub, 'app/window.swift'))).digest('hex');
+  assert.ok(fs.readFileSync(path.join(app, 'Contents/Info.plist'), 'utf8').includes('<key>HubShellHash</key><string>' + hash + '</string>'));
   assert.equal(fs.readdirSync(f.apps).some(x => x.startsWith('.ProjectHub-build-')), false);
   assert.equal(fs.existsSync(path.join(f.home, 'Desktop')), false);
 });

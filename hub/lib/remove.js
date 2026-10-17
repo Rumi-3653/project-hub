@@ -60,7 +60,12 @@ function containsPath(a,b,witness,leafWitness=true) {
  return false;
 }
 const overlaps=(a,b,witness)=>containsPath(a,b,witness)||containsPath(b,a,witness,false);
-function noLinks(f) {for(let q=path.resolve(f);;q=path.dirname(q)){if(exists(q)&&fs.lstatSync(q).isSymbolicLink())throw Error(lt('リンクを含む場所は移せません'));if(q===path.dirname(q))break;}}
+// A batch checks its directory once; each direct child still rejects links.
+function noLink(f) {try{if(fs.lstatSync(f).isSymbolicLink())throw Error(lt('リンクを含む場所は移せません'));}catch(e){if(e.code!=='ENOENT')throw e;}}
+function noLinks(f) {for(let q=path.resolve(f);;q=path.dirname(q)){noLink(q);if(q===path.dirname(q))break;}}
+// Display reads can share ancestor checks within one synchronous state build.
+// Keep noLinks itself strict, including when a writer runs inside a read scope.
+function readNoLinks(f) {for(let q=path.resolve(f);;q=path.dirname(q)){require('./state-read').memo(noLink,q,()=>noLink(q));if(q===path.dirname(q))break;}}
 function copyContains(base,ref,dir=process.cwd()) {
  // .. はリンク先を辿った後に処理する。不在配下もリンク先の実在親で照合する。
  // 最終先が外でも、途中でコピーを通る参照は移動すると切れるため残す。
@@ -111,16 +116,16 @@ function snapshot(f,{contentOnly=false}={}) {
  const walk=q=>{if(++n>20000)throw Error(lt('ファイルが多すぎて照合できません'));const st=fs.lstatSync(q);if(st.isSymbolicLink()||!st.isFile()&&!st.isDirectory())throw Error(lt('リンクや特殊なファイルを含むため移せません'));bytes+=st.isFile()?st.size:0;if(bytes>256*1024*1024)throw Error(lt('照合できる大きさを超えています'));const rel=path.relative(f,q),digest=st.isFile()?hash(fs.readFileSync(q)):'';rows.push(contentOnly?[rel,st.mode,st.isFile()?st.size:0,digest]:[rel,st.ino,st.size,st.mtimeMs,digest]);if(st.isDirectory())for(const x of fs.readdirSync(q).sort())walk(path.join(q,x));};walk(f);return hash(JSON.stringify(rows));
 }
 function referenceTexts(text,file) {
- if(!/\.jsonl?$/.test(file))return [text];
+ if(!/\.(?:jsonl?|original)$/.test(file))return [text];
  const out=[];
- for(const part of file.endsWith('.jsonl')?text.split('\n'):[text]){
+ for(const part of file.endsWith('.jsonl')||file.endsWith('.original')?text.split('\n'):[text]){
   let value;try{value=JSON.parse(part);}catch{out.push(part);continue;}
   const pending=[value];while(pending.length){const v=pending.pop();if(typeof v==='string')out.push(v);else if(v&&typeof v==='object')for(const x of Object.values(v))pending.push(x);}
  }
  return out;
 }
 class Removal {
- constructor({store,busy=()=>false,locked=()=>false,reviewBusy=()=>false,trash=process.env.HUB_TRASH||path.join(os.homedir(),'.Trash'),rename=fs.renameSync}){Object.assign(this,{store,busy,locked,reviewBusy,trash,rename});this.tokens=new Map();this.records=path.join(store.root,'_hub/removed');}
+ constructor({store,busy=()=>false,locked=()=>false,reviewBusy=()=>false,trash=process.env.HUB_TRASH||path.join(os.homedir(),'.Trash'),rename=fs.renameSync}){Object.assign(this,{store,busy,locked,reviewBusy,trash,rename});this.tokens=new Map();this.referenceFiles=new Map();this.records=path.join(store.root,'_hub/removed');}
  trashFor(source){return trashRootFor(source,this.trash);}
  trashDestination(source,destination){return isTrashDestination(source,destination,this.trash);}
  workRoot(p){return path.join(this.store.root,'Work',p.id);}
@@ -260,15 +265,20 @@ class Removal {
     !this.externalReason(e.from,{id:r.project,dir:root},this.store.listProjects(),e.to);
   }catch{return false;}
  }
- referenced(f,p,t,all){
+ referenced(f,p,t,all,{own=false}={}){
   // 持ち主が明確でも、共有や読み切れない参照があれば残す。
+  if(this.referenceFiles.size>=5000)this.referenceFiles.clear();
   const texts=[];let count=0,bytes=0;
   for(const q of all){for(const fld of q.folders)if(inside(f,path.resolve(q.dir,expandHome(fld.path))))return true;
-   for(const base of [path.join(q.dir,'PROJECT.md'),path.join(q.dir,'.ai/tasks'),path.join(q.dir,'.ai/chat')])if(exists(base)){
-    const walk=x=>{noLinks(x);const st=fs.lstatSync(x);if(st.isDirectory()){for(const n of fs.readdirSync(x))walk(path.join(x,n));return;}if(q.id===p.id&&(x===this.store.taskFile(p.id,t.id)||path.basename(x).startsWith(t.id+'.')))return;
-     if(++count>5000||(bytes+=st.size)>16*1024*1024)throw Error(lt('参照を確認しきれないため専用フォルダを残します'));for(const text of referenceTexts(fs.readFileSync(x,'utf8'),x))texts.push({text:text.normalize('NFC'),dir:q.dir.normalize('NFC')});};walk(base);
+   for(const base of [path.join(q.dir,'PROJECT.md'),path.join(q.dir,'.ai/tasks'),path.join(q.dir,'.ai/chat'),path.join(q.dir,'.ai/memory'),path.join(q.dir,'.ai/handoff')])if(exists(base)){
+    const walk=x=>{noLinks(x);const st=fs.lstatSync(x);if(st.isDirectory()){for(const n of fs.readdirSync(x))walk(path.join(x,n));return;}if(!own&&q.id===p.id&&(x===this.store.taskFile(p.id,t.id)||path.basename(x).startsWith(t.id+'.')))return;
+     if(!st.isFile())throw Error(lt('参照を確認しきれないため専用フォルダを残します'));if(++count>5000||(bytes+=st.size)>16*1024*1024)throw Error(lt('参照を確認しきれないため専用フォルダを残します'));const stamp=[st.dev,st.ino,st.size,st.mtimeMs,st.ctimeMs].join(':');let cached=this.referenceFiles.get(x);
+     if(!cached||cached.stamp!==stamp){cached={stamp,texts:referenceTexts(fs.readFileSync(x,'utf8'),x).map(text=>text.normalize('NFC'))};this.referenceFiles.set(x,cached);}
+     for(const text of cached.texts)texts.push({text,dir:q.dir.normalize('NFC')});};walk(base);
    }
   }
+  // 削除・移動の確認では上限とリンクを毎回検査する。本文だけを再利用し、際限なく保持しない。
+  if(this.referenceFiles.size>5000)this.referenceFiles.clear();
   // パス全体を参照元のプロジェクトから解決する。../ を保護し、
   // 受領コピー先の途中に含まれる元の相対パスは共有参照と誤認しない。
   const needle=f.normalize('NFC');
@@ -277,10 +287,11 @@ class Removal {
    if(text.includes(needle))return true;
    const refs=[],tokens=/[^\s"'`<>(){}\[\],;:：|\\*]+/gu,marks=/[。！？「」『』（）、，；【】〈〉《》〔〕［］｛｝]/gu;
    // 引用の内側も、既にパスの途中なら独立した参照にしない。
-   let quoteEnd=0;
+   let quoteEnd=0,scanAt=0,tokenStart=0,lastSlash=-1;const delimiter=/[\s"'`<>(){}\[\],;:：|\\*]/u;
    for(const m of text.matchAll(/"([^"\n]+)"|'([^'\n]+)'|`([^`\n]+)`|「([^」\n]+)」|『([^』\n]+)』|（([^）\n]+)）|【([^】\n]+)】|〈([^〉\n]+)〉|《([^》\n]+)》|〔([^〕\n]+)〕|［([^］\n]+)］|｛([^｝\n]+)｝/g)){
-    const prefix=text.slice(quoteEnd,m.index).match(/[^\s"'`<>(){}\[\],;:：|\\*]*$/u)[0];
-    if(!prefix.includes('/')){refs.push(m.slice(1).find(x=>x));quoteEnd=m.index+m[0].length;}
+    // 引用ごとに長い前方本文へ末尾アンカーの正規表現を当てず、各文字を一度だけ走査する。
+    for(;scanAt<m.index;scanAt++){if(delimiter.test(text[scanAt]))tokenStart=scanAt+1;else if(text[scanAt]==='/')lastSlash=scanAt;}
+    if(lastSlash<Math.max(quoteEnd,tokenStart)){refs.push(m.slice(1).find(x=>x));quoteEnd=m.index+m[0].length;}
    }
    for(const m of text.matchAll(tokens)){
     const token=m[0],slash=token.indexOf('/');if(slash<0)continue;
@@ -308,17 +319,72 @@ class Removal {
  preview(project,task){const d=this.describe(project,task,{removableCopy:true}),token=randomUUID();for(const [k,v] of this.tokens)if(Date.now()-v.at>600000)this.tokens.delete(k);this.tokens.set(token,{at:Date.now(),d});return {...d,token};}
  save(r){noLinks(this.records);fs.mkdirSync(this.records,{recursive:true});const f=path.join(this.records,r.id+'.json');fs.writeFileSync(f+'.tmp',JSON.stringify(r,null,2));fs.renameSync(f+'.tmp',f);}
  apply({token,optional=[],confirm,typed}){
-  const old=this.tokens.get(token);if(confirm!==true||!old||Date.now()-old.at>600000)throw Error(lt('もう一度削除内容を確認してください'));
+  const old=this.tokens.get(token);if(confirm!==true||!old||old.tidy||Date.now()-old.at>600000)throw Error(lt('もう一度削除内容を確認してください'));
   const d=this.describe(old.d.project,old.d.task,{removableCopy:true});if(d.blockers.length)throw Error(d.blockers.join(' / '));if(JSON.stringify(d)!==JSON.stringify(old.d))throw Error(lt('確認中に変わりました。もう一度確認してください'));
   if(d.typed&&typed!==d.title)throw Error(lt('プロジェクト名をそのまま入力してください'));if(!Array.isArray(optional)||new Set(optional).size!==optional.length||optional.some(id=>![...d.optional,...d.keep.filter(x=>x.external&&x.selectable)].some(x=>x.id===id)))throw Error(lt('移すものを選び直してください'));
   this.tokens.delete(token);
-  const id=randomUUID(),name=`ProjectHub 削除 ${new Date().toISOString().replace(/[:.]/g,'-')} ${id}`,selected=[...d.optional,...d.keep.filter(x=>x.external&&x.selectable)].filter(x=>optional.includes(x.id)),files=[...d.move,...selected.filter(x=>!selected.some(y=>y!==x&&containsPath(y.path,x.path)&&(!containsPath(x.path,y.path)||selected.indexOf(y)<selected.indexOf(x))))];
+  const selected=[...d.optional,...d.keep.filter(x=>x.external&&x.selectable)].filter(x=>optional.includes(x.id)),files=[...d.move,...selected.filter(x=>!selected.some(y=>y!==x&&containsPath(y.path,x.path)&&(!containsPath(x.path,y.path)||selected.indexOf(y)<selected.indexOf(x))))];
+  return this.transfer(d,files,'削除');
+ }
+ transfer(d,files,label,extra={}){
+  const id=randomUUID(),name=`ProjectHub ${label} ${new Date().toISOString().replace(/[:.]/g,'-')} ${id}`;
   const destinations=new Map(files.map((x,i)=>{const trash=this.trashFor(x.path);noLinks(trash);fs.mkdirSync(trash,{recursive:true,mode:0o700});return [x.path,x.external?path.join(trash,name,'external',String(i),path.basename(x.path)):path.join(trash,name,'workspace',path.relative(this.store.root,x.path))];}));
-  const r={id,at:new Date().toISOString(),kind:d.task?'task':'project',project:d.project,task:d.task,title:d.title,entries:files.map(x=>({from:x.path,to:destinations.get(x.path),moved:false,restored:false,fingerprint:x.fingerprint,...(x.external?{external:true,id:x.id}:{}),...(x.copy?{copy:x.copy}:{})})),error:''};
+  const r={id,at:new Date().toISOString(),kind:d.task?'task':'project',project:d.project,task:d.task,title:d.title,...extra,entries:files.map(x=>({from:x.path,to:destinations.get(x.path),moved:false,restored:false,fingerprint:x.fingerprint,...(x.external?{external:true,id:x.id}:{}),...(x.copy?{copy:x.copy}:{})})),error:''};
   r.confirmedExternal=r.entries.filter(e=>e.external).map(e=>({id:e.id,from:e.from,to:e.to,fingerprint:e.fingerprint}));if(r.confirmedExternal.length)r.externalSeal=this.seal(r);
   this.save(r);const failed=[];
   for(const e of r.entries){try{noLinks(e.from);noLinks(e.to);fs.mkdirSync(path.dirname(e.to),{recursive:true});e.moving=true;this.save(r);this.moveEntry(r,e);e.moved=true;e.moving=false;this.save(r);}catch(err){r.error=err.code==='EXDEV'?lt('同じディスクにないため移せません'):err.message;failed.push({path:e.from,why:r.error});this.save(r);break;}}
   return {ok:!failed.length,record:r.id,moved:r.entries.filter(e=>e.moved).map(e=>e.from),failed};
+ }
+ // 完了した作業を残したまま、作業だけが使う一時物をゴミ箱へ移す。コピー・専用フォルダ・成果から参照される物は残す。
+ tidyDescribe(project,task){
+  const p=this.store.readProject(project);if(!p)throw Error(lt('プロジェクトがありません'));const t=task&&p.tasks.find(x=>x.id===task);if(!t)throw Error(lt('作業がありません'));
+  if(p.kind==='freetalk')throw Error(require('./freetalk').PROTECTED);
+  const all=this.store.listProjects(),d={project:p.id,task:t.id,title:t.title,move:[],keep:[],blockers:[]};
+  if(t.state!=='完了')d.blockers.push(lt('完了した作業だけ片付けられます'));
+  // 完了の印だけでは、成果の保存・受領・統合を証明できない。
+  try{
+   const {readResults,verifyResults}=require('./task-results'),rows=readResults(this.store.taskFile(p.id,t.id));
+   if(!rows.length)throw Error(lt('成果の記録がありません'));
+   const body=p.folders.find(f=>f.label==='本体'),base=body?path.resolve(p.dir,expandHome(body.path)):p.dir;
+   verifyResults(rows,p,base);
+   for(const r of rows.filter(r=>r.kind==='ファイル')){
+    const f=path.resolve(r.value.startsWith('body:')?base:p.dir,r.value.replace(/^(body|project):/,''));
+    noLinks(f);if(!fs.statSync(f).isFile())throw Error(lt('成果の保存を確認できません'));
+   }
+   if(require('../public/project-order').ancestorsOf(p,t,all).length||t.parent||t.derivedFrom)throw Error(lt('子作業の片付けは親の最終統合で行ってください。未受領の内容を残します'));
+   const copy=path.join(this.workRoot(p),t.id);if(exists(copy))this.copyInfo(p,copy);
+   for(const dir of ['task-handoffs','task-integrations']){
+    const root=path.join(this.store.root,'_hub',dir);noLinks(root);if(!exists(root))continue;
+    for(const name of fs.readdirSync(root).filter(n=>/^[a-f0-9]{64}\.json$/.test(n))){
+     const f=path.join(root,name);noLinks(f);const r=JSON.parse(fs.readFileSync(f,'utf8'));
+     if(!r||typeof r!=='object'||Array.isArray(r))throw Error(lt('統合・受領記録を読めません'));
+     const own=r.project===p.id&&r.task===t.id,target=r.targetProject===p.id&&r.targetTask===t.id;
+     const item=r.items?.some(x=>x.project===p.id&&x.task===t.id);
+     if((own||target||item)&&(!r.complete||r.auto&&r.auto.main?.state!=='done'))throw Error(lt('未受領・未統合の内容があります。受領と統合を済ませてから片付けてください'));
+    }
+   }
+  }catch(e){d.blockers.push(e.message);}
+
+  if(this.reviewBusy(p.id))d.blockers.push(lt('AIが共有を確認中です。終わってから操作してください'));
+  if(this.locked(p.id))d.blockers.push(lt('整理・確認が実行中です。終わってから操作してください'));
+  if(this.busy(p.id,t.id))d.blockers.push(lt('AIが作業中です。終わってから操作してください'));
+  const q=path.join(p.dir,'.ai/chat',t.id+'.queue.json');if(exists(q))try{const v=JSON.parse(fs.readFileSync(q,'utf8'));if(!Array.isArray(v)||v.length)d.blockers.push(lt('順番待ちを取り消してから操作してください'));}catch{d.blockers.push(lt('順番待ちを取り消してから操作してください'));}
+  const candidate=(f,what)=>{try{snapshot(f);if(this.referenced(f,p,t,all,{own:true}))throw Error(lt('成果・作業・会話から参照されているため残します'));d.move.push({id:path.relative(p.dir,f),path:f,what});}catch(e){d.keep.push({path:f,why:e.message});}};
+  const temp=path.join(p.dir,'.ai/work',t.id);if(exists(temp))candidate(temp,lt('この作業の専用一時フォルダ'));
+  const hdir=path.join(p.dir,'.ai/handoff');
+  if(exists(hdir)){noLinks(hdir);for(const name of fs.readdirSync(hdir).sort())if(name.startsWith(t.id+'-')&&/^\d{8}-\d{6}-(claude|codex|agy|grok)\.md$/.test(name.slice(t.id.length+1)))candidate(path.join(hdir,name),lt('この作業のAI交代引継ぎ記録'));}
+  for(const f of [path.join(p.dir,'attachments',t.id),path.join(p.dir,'作業',t.id)])if(exists(f))d.keep.push({path:f,why:lt('専用フォルダは残します。不要なら［削除…］で選んでください')});
+  const copy=path.join(this.workRoot(p),t.id);if(exists(copy))d.keep.push({path:copy,why:lt('作業用コピーは［本体に取り込む］か親の最終統合で片付けます')});
+  for(const x of d.move)try{x.fingerprint=snapshot(x.path);}catch(e){d.blockers.push(e.message);}
+  d.blockers=[...new Set(d.blockers)];return d;
+ }
+ tidyPreview(project,task){const d=this.tidyDescribe(project,task),token=randomUUID();for(const [k,v] of this.tokens)if(Date.now()-v.at>600000)this.tokens.delete(k);if(!d.blockers.length&&d.move.length)this.tokens.set(token,{at:Date.now(),d,tidy:true});return {...d,token:d.blockers.length||!d.move.length?'':token};}
+ tidyApply({token,ids,confirm}){
+  const old=this.tokens.get(token);if(confirm!==true||!old?.tidy||Date.now()-old.at>600000)throw Error(lt('もう一度片付け内容を確認してください'));
+  const d=this.tidyDescribe(old.d.project,old.d.task);if(d.blockers.length)throw Error(d.blockers.join(' / '));if(JSON.stringify(d)!==JSON.stringify(old.d))throw Error(lt('確認中に変わりました。もう一度確認してください'));
+  if(!Array.isArray(ids)||!ids.length||new Set(ids).size!==ids.length||ids.some(id=>!d.move.some(x=>x.id===id)))throw Error(lt('移すものを選び直してください'));
+  this.tokens.delete(token);
+  return this.transfer(d,d.move.filter(x=>ids.includes(x.id)),'片付け',{tidy:true});
  }
  recover(r){
   // rename後、完了記録の保存前に止まった場合も、確認済みの内容から復元できる。
@@ -332,7 +398,7 @@ class Removal {
   }
   if(changed)this.save(r);return r;
  }
- history(){try{noLinks(this.records);return fs.readdirSync(this.records).filter(n=>/^[\da-f-]{36}\.json$/.test(n)).map(n=>this.recover(JSON.parse(fs.readFileSync(path.join(this.records,n),'utf8')))).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,100).map(r=>({id:r.id,at:r.at,title:r.title,project:r.project,task:r.task,count:r.entries.filter(e=>e.moved).length,external:r.entries.filter(e=>e.external&&e.moved).map(e=>e.from),restored:r.entries.filter(e=>e.moved).every(e=>e.restored),error:r.error}));}catch(e){if(e.code==='ENOENT')return [];throw e;}}
+ history(){try{noLinks(this.records);return fs.readdirSync(this.records).filter(n=>/^[\da-f-]{36}\.json$/.test(n)).map(n=>this.recover(JSON.parse(fs.readFileSync(path.join(this.records,n),'utf8')))).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,100).map(r=>({id:r.id,at:r.at,title:r.title,project:r.project,task:r.task,tidy:r.tidy===true,count:r.entries.filter(e=>e.moved).length,external:r.entries.filter(e=>e.external&&e.moved).map(e=>e.from),restored:r.entries.filter(e=>e.moved).every(e=>e.restored),error:r.error}));}catch(e){if(e.code==='ENOENT')return [];throw e;}}
  restore(id,confirm){
   if(confirm!==true||!/^[\da-f-]{36}$/.test(id))throw Error(lt('記録を確認してください'));const file=path.join(this.records,id+'.json');noLinks(file);const r=this.recover(JSON.parse(fs.readFileSync(file,'utf8')));
   if(this.locked(r.project)||this.busy(r.project))throw Error(lt('AI・整理・確認が動いています。終わってから元に戻してください'));
@@ -347,4 +413,4 @@ class Removal {
   return {ok:!skipped.length,restored,skipped};
  }
 }
-module.exports={Removal,snapshot,noLinks,inside,exists};
+module.exports={Removal,snapshot,noLinks,readNoLinks,noLink,inside,exists};

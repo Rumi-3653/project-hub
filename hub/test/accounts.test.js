@@ -155,6 +155,19 @@ test('external Terminal markers reserve the account and are removed after a harm
   execFileSync('/bin/bash', ['-c', login.command]); a.assertIdle('codex', x.id);
   assert.deepEqual(fs.readdirSync(a.termDir), []);
 });
+test('CLI-wide external Terminal checks include every account and preserve account/auth filters', () => {
+  const a = fixture(), x = a.add('codex', 'one'), work = a.terminalCommand('codex', x.id, 'true', launch.sq);
+  try {
+    assert.equal(a.terminalBusy('codex'), true); assert.equal(a.terminalBusy(), true);
+    assert.equal(a.terminalBusy('claude'), false); assert.equal(a.terminalBusy('codex', 'default'), false);
+    assert.equal(a.terminalBusy('codex', x.id, true), false);
+  } finally { work.cancel(); }
+  assert.equal(a.terminalBusy('codex'), false);
+  const marker = path.join(a.termDir, 'invalid.json'); fs.writeFileSync(marker, '{broken');
+  assert.equal(a.terminalBusy('codex'), true); assert.equal(a.terminalBusy('claude'), true);
+  fs.writeFileSync(marker, JSON.stringify({ ai: 'codex', account: x.id, pid: -1 }));
+  assert.equal(a.terminalBusy('codex'), true); assert.equal(a.terminalBusy('claude'), false);
+});
 test('delete moves complete profile to trash and never deletes the default home', () => {
   const a = fixture(), x = a.add('codex', 'one'); fs.writeFileSync(path.join(x.dir, 'auth.json'), 'fixture-token');
   a.remove('codex', x.id); assert.equal(fs.existsSync(x.dir), false);
@@ -233,10 +246,10 @@ test('Fable holds and usage observations persist and clear only the selected acc
   assert.equal((await a.status('agy', 'default')).status, 'logged-in');
   for (const [r, status] of [
     [{stdout:'',stderr:'Please sign in'}, 'logged-out'],
-    [{stdout:'secret arbitrary output',stderr:''}, 'unknown'],
-    [{stdout:'gemini-3x1-pro-high gemini-3.1-pro-high-extra',stderr:''}, 'unknown'],
-    [{stdout:'gemini-3.1-pro-high',stderr:'',error:{code:1}}, 'unknown'],
-    [{stdout:'',stderr:'Not signed in',error:{killed:true}}, 'unknown'],
+    [{stdout:'secret arbitrary output',stderr:''}, 'logged-out'],
+    [{stdout:'gemini-3x1-pro-high gemini-3.1-pro-high-extra',stderr:''}, 'logged-out'],
+    [{stdout:'gemini-3.1-pro-high',stderr:'',error:{code:1}}, 'logged-out'],
+    [{stdout:'',stderr:'Not signed in',error:{killed:true}}, 'logged-out'],
     [{stdout:'',stderr:'',error:{code:'ENOENT'}}, 'not-installed'],
   ]) { response = r; const result = await a.status('agy', 'default'); assert.equal(result.status, status); assert.ok(!JSON.stringify(result).includes('secret')); }
   const file = path.join(a.home, '.gemini/antigravity-cli/settings.json'); fs.mkdirSync(path.dirname(file), {recursive:true});
@@ -251,8 +264,125 @@ test('Fable holds and usage observations persist and clear only the selected acc
  test('Gemini status reader and auth terminal protect the same default account', async () => {
    let finish; const a = fixture({execute: () => new Promise(r => finish = r)});
    const waiting = a.status('agy', 'default'); assert.throws(() => a.assertIdle('agy', 'default'), /作業中/);
-   finish({stdout:'gemini-3.1-pro-high',stderr:''}); await waiting; a.assertIdle('agy', 'default');
+   finish({stdout:'gemini-3.1-pro-high\tGemini 3.1 Pro (High)',stderr:''}); await waiting; a.assertIdle('agy', 'default');
    const term = a.terminalCommand('agy', 'default', "'agy'", launch.sq, 'auth');
-   assert.throws(() => a.assertIdle('agy', 'default')); assert.equal((await a.status('agy', 'default')).status, 'unknown');
-   term.cancel(); a.assertIdle('agy', 'default');
+   try {
+     const pending = a.status('agy', 'default');
+     assert.throws(() => a.assertIdle('agy', 'default'));
+     assert.throws(() => a.available('agy', 'default'), /処理中/);
+     finish({stdout:'gemini-3.1-pro-high\tGemini 3.1 Pro (High)',stderr:''});
+     assert.equal((await pending).status, 'logged-in');
+     assert.throws(() => a.assertIdle('agy', 'default'));
+   } finally { term.cancel(); }
+   a.assertIdle('agy', 'default');
  });
+
+test('Gemini work may start beside its login Terminal while auth mutations and logout remain protected', () => {
+  const a = fixture(); fs.mkdirSync(a.termDir, {recursive:true});
+  const file = path.join(a.termDir, 'auth.json');
+  const row = {ai:'agy',account:'default',kind:'auth',pid:process.pid};
+  for (const action of [undefined, 'login']) {
+    fs.writeFileSync(file, JSON.stringify({...row, ...(action ? {authAction:action} : {})}));
+    const before = fs.readFileSync(file, 'utf8');
+    a.available('agy', 'default', {forWork:true});
+    assert.throws(() => a.available('agy', 'default'), /処理中/);
+    assert.throws(() => a.assertIdle('agy', 'default'));
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    a.locks.add('agy:default');
+    assert.throws(() => a.available('agy', 'default', {forWork:true}), /処理中/);
+    a.locks.delete('agy:default');
+  }
+  for (const action of ['logout', 'unknown']) {
+    fs.writeFileSync(file, JSON.stringify({...row, authAction:action}));
+    assert.throws(() => a.available('agy', 'default', {forWork:true}), /処理中/);
+  }
+  fs.writeFileSync(file, JSON.stringify({...row, authAction:'login',pid:-1}));
+  assert.throws(() => a.available('agy', 'default', {forWork:true}), /処理中/);
+  fs.writeFileSync(file, '{invalid');
+  assert.throws(() => a.available('agy', 'default', {forWork:true}), /処理中/);
+  for (const ai of ['claude','codex','grok']) {
+    fs.writeFileSync(file, JSON.stringify({...row,ai,authAction:'login'}));
+    assert.throws(() => a.available(ai, 'default', {forWork:true}), /処理中/);
+  }
+});
+
+test('Gemini login can finish with its Terminal still open; status refresh leaves auth protected', async () => {
+  let response = {stdout:'',stderr:'Please sign in'}, calls = 0;
+  const a = fixture({execute: async () => { calls++; return response; }});
+  const term = a.terminalCommand('agy', 'default', 'true', launch.sq, 'auth');
+  const marker = fs.readFileSync(path.join(a.termDir, fs.readdirSync(a.termDir)[0]), 'utf8');
+  try {
+    assert.equal((await a.status('agy', 'default')).status, 'logged-out');
+    response = {stdout:'gemini-3.1-pro-high\tGemini 3.1 Pro (High)',stderr:''};
+    assert.equal((await a.status('agy', 'default')).status, 'logged-in');
+    const observed = await a.readOnly('agy', 'default', () => a.status('agy', 'default', {models:true}));
+    assert.equal(observed.status, 'logged-in'); assert.equal(observed.modelObservation.models.length, 1);
+    assert.equal(calls, 3);
+    const row = a.list().find(r => r.ai === 'agy'); assert.equal(row.busy, true); assert.equal(row.authTerminal, true);
+    assert.throws(() => a.assertIdle('agy', 'default')); assert.throws(() => a.available('agy', 'default'));
+    assert.equal(fs.readFileSync(path.join(a.termDir, fs.readdirSync(a.termDir)[0]), 'utf8'), marker);
+    a.locks.add('agy:default');
+    assert.equal((await a.status('agy', 'default')).status, 'unknown'); assert.equal(calls, 3);
+    await assert.rejects(a.readOnly('agy', 'default', () => 'unexpected'), /処理中/);
+    a.locks.clear();
+    const broken = path.join(a.termDir, 'broken.json'); fs.writeFileSync(broken, '{invalid');
+    assert.equal((await a.status('agy', 'default')).status, 'unknown'); assert.equal(calls, 3);
+    fs.unlinkSync(broken);
+    fs.writeFileSync(broken, JSON.stringify({ai:'agy',account:'default',kind:'auth',pid:-1}));
+    assert.equal((await a.status('agy', 'default')).status, 'unknown'); assert.equal(calls, 3);
+  } finally { term.cancel(); }
+});
+
+for (const ai of ['claude', 'codex', 'grok']) test(`${ai} status still waits for its authentication Terminal`, async () => {
+  let calls = 0;
+  const a = fixture({execute: async () => { calls++; return {stdout:'unexpected',stderr:''}; }});
+  const term = a.terminalCommand(ai, 'default', 'true', launch.sq, 'auth');
+  try {
+    const result = await a.status(ai, 'default');
+    assert.equal(result.status, 'unknown'); assert.match(result.message, /認証処理中/); assert.equal(calls, 0);
+    await assert.rejects(a.readOnly(ai, 'default', () => 'unexpected'), /処理中/);
+  } finally { term.cancel(); }
+});
+
+test('Gemini login read does not bypass an explicit logout Terminal', async () => {
+  let calls = 0; const a = fixture({execute: async () => { calls++; return {stdout:'gemini-3.1-pro-high',stderr:''}; }});
+  const term = a.terminalCommand('agy', 'default', 'true', launch.sq, 'auth', 'logout');
+  try {
+    const result = await a.status('agy', 'default');
+    assert.equal(result.status, 'unknown'); assert.equal(calls, 0);
+    await assert.rejects(a.readOnly('agy', 'default', () => 'unexpected'), /処理中/);
+  } finally { term.cancel(); }
+});
+
+test('Agy login evidence is separate from approved model availability', async () => {
+  const a = fixture({execute: async ()=>({stdout:'gemini-other\tOther',stderr:''})});
+  for (const models of [false,true]) {
+    const result=await a.status('agy','default',{models});
+    assert.equal(result.status,'logged-in');assert.equal(result.message,undefined);
+    assert.deepEqual(result.modelObservation.models,[{id:'gemini-other',label:'Other'}]);
+  }
+});
+test('auth Terminal focus lookup validates live PID, ignores exited/work markers', () => {
+  const a=fixture();assert.equal(a.authTerminalPid('agy','default'),null);
+  const terminal=a.terminalCommand('agy','default','true',launch.sq,'auth','login');
+  try {assert.equal(a.authTerminalPid('agy','default'),process.pid);assert.equal(a.authTerminalPid('codex','default'),null);}
+  finally {terminal.cancel();}
+});
+
+test('resuming auth Terminal selects its TTY without running any login command', async () => {
+  const vm=require('node:vm'), req=require('node:module').createRequire(require.resolve('../lib/launch'));
+  let tty='ttys123', scriptError=false; const calls=[];
+  const context={module:{exports:{}},process,require:name=>name==='child_process'?{execFile:(file,args,cb)=>{
+    calls.push({file,args}); cb(scriptError && file==='osascript'?Error('not found'):null,file==='/bin/ps'?tty+'\n':'');
+  }}:req(name)};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../lib/launch'),'utf8'),context);
+  const focus=context.module.exports.focusAuthTerminal;
+  assert.equal((await focus(123,false)).existingTerminal,true);
+  assert.equal(calls[0].file,'/bin/ps');assert.equal(calls[0].args.join(' '),'-p 123 -o tty=');
+  assert.equal(calls[1].file,'osascript');assert.match(calls[1].args[1],/\/dev\/ttys123/);
+  assert.doesNotMatch(calls[1].args[1],/do script|\/login|\/logout/);
+  tty='??';await assert.rejects(focus(123,false),/見つけられません/);assert.equal(calls.length,3);
+  await assert.rejects(focus(-1,false),/記録/);assert.equal(calls.length,3);
+  assert.equal((await focus(123,true)).dry,true);assert.equal(calls.length,3);
+  tty='ttys123';scriptError=true;await assert.rejects(focus(123,false));
+});

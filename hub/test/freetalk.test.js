@@ -8,7 +8,7 @@ const { Freetalk, TOPIC_RULE, guard } = require('../lib/freetalk');
 const { Removal } = require('../lib/remove');
 const { ProjectOrder, siblings, integrators, finished } = require('../lib/project-order');
 function fixture(t) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-freetalk-unit-'));
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-freetalk-unit-')));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   const store = new Store(path.join(tmp, 'root')), ft = new Freetalk(store, path.join(tmp, 'home'));
   return { tmp, store, ft };

@@ -1,0 +1,985 @@
+{
+  "acceleration.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "f9a8542d8af29eb6da2544ff1ee0f1dd7f31a5e09f3fff8f680e36a6e9b4cf88",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee",
+      "db2fccbd7d838f77f3ad46960311f3c3d661004ca7defc8fe806504051121789"
+    ]
+  },
+  "accounts.js": {
+    "reason": "_hub/accountsおよびCLI専用HOMEの認証設定。台帳外。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "bc203d74af1477c5887d05be71cf6a3a5723ac79597ad98c69d3abfcfcc59392",
+      "e454bf1c18959a4d78d1ebb9a1f44b2d239bae4222dfb787206cff473aa937c4",
+      "59dbf84580800dc332b4ce22dfbadb44cb2ec69544aa6e12d64c55798732e148",
+      "35e245f2d7970c0145894847bdf82605b656aeb3c7f6a58f0ffd03e2d9334bb5",
+      "00fcee162192c3247b3889afc65320c8f562bdbb525f23bdccdd79db5bcc7209",
+      "4c3eb76e2e21b8b9e57c9175834f8d1f9d6237f684ef117d07d3c6f4086e4bfb",
+      "cefdeb246678f7e7a98bfd7dd7d525366fcb71824c858b42f981152b2096a5c1",
+      "b443680c32f2bdf24380914cb8f02afd034affcd517b32547505f5e329f04b35",
+      "2d5cfaf8b9c16fe9159cbf0b431d566f3ef0dfce59efc22e668f07aff63df234",
+      "3c411bf71ca35597ddbfb54dcf0d45c77d39cfe0ef6cd188f44376f7be5965f8",
+      "fa4c278d75e1003971fd4ec7f0d7ed54037e6096b795a74c69b6d71dcd47d19b",
+      "a5c8fa42b8d3f90250bd7e267d1edea65ae823e1752ca7504113813fff732d19",
+      "976eb0cfc53535da2e38c816127b9dd123cf9329f191dfc87fb2e76546d4fd77"
+    ]
+  },
+  "ai-tools.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "01b6f6ace962644e25bbeccade158e48413896db0b965abfa17077ad60f4bf49",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee",
+      "f9623236353c4e3504053338656d8783459a6da98d835f4fd87b1ecd375e69aa",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "ba247d6a629d76d061aba141ee5505a7cdbddc7101b12e341053a1e85eb85217"
+    ]
+  },
+  "ai-updates.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "144c0d7857b818906c56814930b030e7709880beff9926775f67eb9258620eab",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee",
+      "3ef6def7fc76770c06f34d7a28fe40c30fbba2d64b9fe00bf204a0618dad4124"
+    ]
+  },
+  "app-shell.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "app-update-workflow.js": {
+    "reason": "隔離した更新checkoutとPRの一時原稿。Product台帳の直接更新なし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "27dca0f34323580de8036c5aef6f7e77b92fb630d2bc435e574d999bcf2da0c4",
+      "d2625f4ffe6d2aeed504e6ee2b9d047ef5a075e536abed65be2d94244a3522f0",
+      "6315ecb340f2fbd36a3c8f95920aca720c3081a915d90594157b4445ccf41f15",
+      "c0f23581cda869202397704cf31fab7ffc0c08768213f0c7af2a55642b952bc9",
+      "d07fd6877dd370d63f39ee964219d696980ad9ebdbb41faaac8ef395bf43746a",
+      "511e27e96c336d8f43df58605093759e7c35a68e433ffb75f6944468d232c795",
+      "aa0063e101fb0dcc92e9d443fcd83d7bc2e7f79550fb028f1d7799424dc355e3",
+      "bd0b2ad80823d1dfd17eeebf4eb3fb3a3e610cd06fcf696b539781c7190d2ea9",
+      "285b937cfb8576b17828e902c81f6ce05d6488cee39d96974b860f5ce9262a4f",
+      "cd85068f291d6adca6ce036d4967e1c05a53aae7ff53efb3217083d9c26373f3",
+      "8824a0e5c970908a24fada588b9c8b107e82b2d795d6e96a45134841aea2627d",
+      "5a7a6eb1b6b5973d3fc71f426c863052f5c3592ee6e9f7b19e8d598c8d780839"
+    ]
+  },
+  "app-update.js": {
+    "reason": "_hubの更新状態とアプリbundleの入替。台帳外。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "c04c481594f6f5dbad1879ead0766d2a17cb325513afcfd4c2d91812e7ac2858",
+      "e9acd852b30125fdae3e1299291ad7524b1200a8d90e90f9e09b939772ad135b",
+      "174048d3e19da7443ff95ead9070b890573c9949a7bd26f1273dfac6d2e3ddb0",
+      "01a6282b2a8b55481b28589db2782ba434020ad73a00679098f186fbc7892522",
+      "7dcf0d519e4b536c3a1dcf373cb3176aa8a6510a0698e1f89919d128577774fc",
+      "3f0d7ee4682d7d86ca47acb12d768db7dcd949923df66b2055a448e7c7fe11f4",
+      "59564e1c45ed65ce29dc2278aa9c0e438b52a111aad3611c67b2981fd523d353",
+      "ec5d3fd13e4a909fb89bab1e99167505e73017bb5b63c728b4149b78fb73ab6a",
+      "da8624aa6118c01394823a2e9495cdb1ca42824f9f1c934447a15c8f5cb3fe0b",
+      "8ed34a19335d627ab9e7f1fe84f0f3abdaf60da02cc98a09cc78da8a833f4374",
+      "0cd33fe75147d9374718132d37aa0b8307984344f4e6f9adfe2300359dbb2acf",
+      "67574564348f0a0e162b165aae9fae846cc2b7398fac14fe7c282ef3af8b6c8c",
+      "fcf69a189b09902882ab34760e754e541bdfaa93e749e0ac31201333682d5046",
+      "7cf072613abd39347f551d5af97c6745c784f6dd0eba884c7342087c14325763"
+    ]
+  },
+  "chat-images.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "chat.js": {
+    "reason": "会話原文/metaはintegration-writes経由。queue/intentはsafe-fileのwrite経由で耐久公開し、照合後の自分のintentだけ削除。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "58512ee07690b9e8b6290f9961ebe0c0e5035a200311bbc97ab2fc4ea052b2ec",
+      "5229732ad3da2debe0347df658241abbcbc2dbab91f76f75651a76534cb20c7b",
+      "58512ee07690b9e8b6290f9961ebe0c0e5035a200311bbc97ab2fc4ea052b2ec",
+      "8f99eb366f415cb32a978ad0565a5d40c715d99c35e15790a5f95edc2fabc8f9",
+      "4fd78e33b9ec39db549493ddc163eed620b93abad83673fd712468acc3d749c6",
+      "64a422eb7446cb463dfc7abfd491824951044e02ac77cd4b9015002cf1b45072",
+      "40a341aea3ffc13bd97abc35b09b38bccf3d2b9d69ebca199a15737d7cf1707d"
+    ]
+  },
+  "chatgpt.js": {
+    "reason": "設定は_hub。ツールによる人指定ファイル変更は製品編集として未保存保護を維持。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "c53a005ababd9cec570bb59fa046d1059f6604262b6b1beff12c54447034b3a1",
+      "d8ef5f884f43433f2829b422c3d61dda366cd80ba74c1a5de514669649b2dacf",
+      "58512ee07690b9e8b6290f9961ebe0c0e5035a200311bbc97ab2fc4ea052b2ec",
+      "26db2772419d42d9e749934e88871226fe1421ef2e3ce070cc8558836fcbbb12",
+      "87a430d39ca5d5d24b560b6f3494cc5c220ec65a1ab7a4c663b3d51013778cb7",
+      "d05629b964fbbbab4c65b5b58f09c8aaed676dfa36876cd93f8d087e3329a60e"
+    ]
+  },
+  "cli-spool.js": {
+    "reason": "_hub/cli-runs の所有・監督コード・出力・完了証拠だけ。owned-processes.cjsも同一run dir内。通常台帳の保存はchat経由。",
+    "sites": [
+      "c94281f620f51c4b13a8daa0f2780d039b71be6d423db3e1b7ca65d6d15d7e0d",
+      "96c6d0531f6d584a0573773d4237d1b63f9ac4c79b08fd1e346c6d70ccfcaf95",
+      "0deeb0f6b007ed151f404a291e68c1079baa7942331dbf53964d82b619941f4a",
+      "cff399b37f6c5b23f9c471822e34c4a6a73fd91c4f5f2ad1d88d68d40d31d1e5",
+      "81744c6323bff82be361db8468970cbbc1e160e3c0a33013f04a0f056afe2104",
+      "310f612785279089060fee09b263b174e541b7f58ffdafc1998cff8c7a671c0a",
+      "985c9bd514e9c812042ad2a6b28fc2c3904aa99750009283166cf886ba58d38c",
+      "781076b88495a16fe2969bda1bfc4d302d7b4a0fdbbd313c3143062f52e0fcbf",
+      "f067d63eae7e57e4af8417f73c90c351b03933b07afdb4ead72e9b4faf631378",
+      "57b06dd3ed9d6d6dbaac9ded778c97bde9ba3461f92fb2a4c0c260497c35eb75",
+      "065dad0a9b5a85b81458a9f8fcbc1688c22ad0936026166ed3be594a4187c530",
+      "5972d6eff2a1330f81be9eb5c9fd95676833b9e6a6f451ef584e023077a3df9e",
+      "14a6cf6ce8d070279fac52bde2c35c3b7032dde56d326091d05a8e573db0da95"
+    ]
+  },
+  "cli-spool-archive.js": {
+    "reason": "明示承認した固定計画だけで _hub/cli-runs の終了実行原物を同階層 cli-runs-archive/<batch> へ rename 保全。batch内planと指定result/一時resultのみ排他作成・置換。原文/queue/通常Product台帳は読取のみ。今回の登録では退避処理を実行しない。",
+    "sites": [
+      "78639fc256d86a2c7e43b24e79fb811173aa083bc21d089d394dd00ee0a6bef2",
+      "d8b3f5f592616e952e88946fe0e80b72a88579fba76e6a8517e975cbda350019",
+      "eee4ad37563f18c5d1f5414edd580c4894d1ac375ca4230452e5c9b5108c2094",
+      "b2c9d5376753be7ad150785973151b4d9e13ffc4a6e71e3e622fdb5edc0cb8c9",
+      "98635774001714e0cc025581594849253575b6b3bb184dc3ea4f1ef579c21ac6",
+      "496c4a8e687cc7fa0d7348d1807ccbe31f6a41db0eaf3893175c9c3e81b196cb",
+      "4df08771cd4cff3c48bbed72a050922b19c88da03acf517a8a6d6146b6f15de9"
+    ]
+  },
+  "completion.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "71737de922980dd3c7835a073395b21aaa02d2ade966ccb6c88ee07d940674b3",
+      "8c6c854383481a04f6e69431fbdab1bc9852f8fc388e00675ba0e6ba92561499",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "19c0360845c114dff56eca3404caa131b11960c0da2d9c4dfade1b445f369fd8"
+    ]
+  },
+  "empty.js": {
+    "reason": "人確認後の空プロジェクト/一時物移動。未保存記録の信頼には使わない。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "a130c85c218db83bd41f2ce36bba88ff048694813ee7d7f39164c56fe6129ea4",
+      "1ab0cbea4d2c635c8cf6497d3ba452c15a1115633a9fa5963c2f22dc986c02b3",
+      "ee4b025d12e737c8287259986fd8d32df68544652ad3e02578234b333a44c493"
+    ]
+  },
+  "freetalk-attachments.js": {
+    "reason": "自由対話HOMEの人提供素材と派生素材。Product台帳外。",
+    "sites": [
+      "243bc3637c453cd4a2ab247ccb2d474162739331a2c5841023df2e3485b1b67a",
+      "e65a2555119e1b29d325a98319f17973292668ccab67adc6ae2736980592eef1",
+      "053ea41b581c19e6125a98b45e7130c14f31baf823ce0b96db80f81926557ed8",
+      "590dcb830a7b867d285ce45e14940b534754ad9056acb1925a0150b857b9f96d",
+      "d5f3d72715e31a427c8105ec3adaa0b8523af6cc4bde2a827e5e887746300842",
+      "24baef4b90d8f1d9d10d6e0d7d82688fa8b55e5511decb7078804d8c2e174c75",
+      "f194bf05f893c73cfda4604b3541c7e612f21fe6d863109a0acc1e4c8baa0a7f",
+      "924990370d7fa0f90abeecdef8b07a7ebf0ad065f4c7e659f0008bc0ff4574ce",
+      "d245dd3a48df861833b3aa803f598dc5a8a9482d29575a6a3e2672ad92b8ee87",
+      "ccfed238d4e2b74f023850689daebb155a8bfbc6d6b0e24d4c6af935579c7ab9",
+      "81c12113550fc28247fc9d3d9fc10f8402531b40c42a429df38bb6545bf768e0",
+      "b2650fea9c19a8aafac85340c782ce080219d74a0035307f127842cea36d0c62",
+      "b3d52b7a6b9f51d76648db7f50b14bd97e4eea24156f2a85e40d75fa1e6da148",
+      "d5a54b6d767f65d5e7d744c3c2a985386f02eefcfa0e2cc219845de2cc671e4a",
+      "da3dd3294a092e7b1ef32ff432ac9b873eee4de4a4c3926050a9e29b24d60b94"
+    ]
+  },
+  "freetalk-history.js": {
+    "reason": "自由対話専用HOMEの原文とゴミ箱manifest。通常Product台帳外。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "a5fc9d1f8cf8f2d8a8fe1c8a441e88793b15ef7450088c900ea86389b887e92b",
+      "7af11a3d5c129e0bbc4e03cae00bcfe3da1f908c7d32b6b196cc9c44f89cb1b0",
+      "675e4760fbac67897dd61c7ca23202e6f10abb2bf170727040548983524f3a0b",
+      "6942947467e2763b4add043903fe671db78b8023a9be9ca950ca159def5a70f6",
+      "ae4adedc2fd73dca33e8ba759db33028236aa27af9172b16ec401511de92cc25",
+      "2b9da3066f132644aa7f93bb7e9993f0fe738a59d0f67babfb5d1dae6bb91c45",
+      "bd701defcde83a4a730022ea7d931fa3f9b90ae6563f5e63a11af94c9a7fc4cb",
+      "d7a8a97e3fbca866c9ffdf7b6ea7f98689e11e1438ed52cf8ec377ce5efff352",
+      "ad5297609e172fdc56b036282fb725986eec5a3716f18e32bfe2bb084a6f5f37",
+      "a8784dfb55c19193f7c538e6543295d1bc671bae0ffe4722f20bd0815858919f"
+    ]
+  },
+  "freetalk-lifecycle.js": {
+    "reason": "明示されたfreetalkプロジェクト化ボタンで新規projectの未公開stageへ原文・話題添付を保存し、公開を既存の照合経路で確定。成功後は既存の話題削除と同じ対象だけをHOME/Trashへrename。削除計画と元状態をTrashへ保存し、中断再開・失敗復元を照合する。元台帳には会話を含まない移行先receiptだけを既存history.save経路で保存。別話題・共通資料・AI設定は変更しない。opendir/O_RDONLY/O_NOFOLLOWは上限付き読み取り検査。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "c1d6c84c9775c1653aa42afb417394201815e62b27b1035f87700679caee5235",
+      "6963bedd5ea6674b40a2dd25a914eb7db833d9b7b6c190350cd528ee0f29a3e3",
+      "76a8837694ad31525c3efbd1ca6de0f8d760ebc3e507073d24b0cdc02b5c3195",
+      "076a1979499a23ffcfdf4fa89428f6111b0d2cbdb7cfacf35f5b71ae9ea94abb",
+      "7ce6da233d46612deec71b0c3d5f293076d9d0d9741e3150e6c22ba62f5ddc9c",
+      "da701f8a54f86b3bc21979743c8e42a298f67770ab1b096ef9712d792c0de618",
+      "5dd9254d1aa6c9566a6e4a4b47e0c9e5d906385e244cbaeb1019d259cd366199",
+      "0e68d78d16757fb8cbfe250de9f52cdf749ede96a0d383cdbad5ae4587d09647",
+      "db09401a7fd0733d338fe946cb9fe6b321163bc5ad66c2eec43f7a1d8eb67b4b",
+      "2f392c05cc50e6de0ece39150f9cffa211cb029862b576c93f4fea6fcd2f0369",
+      "07ffceac59213e28dc74476436e819543ca12af211dd6bc6019e37e5737d7835",
+      "d88fa5b767c78872e9f1c04a3d822d717d28e08195deffc409e31ffc4178019e",
+      "d088d6b2c933924712543fe8a423f13366e6f8ab0b3adb18cea2f97f96972c5f",
+      "2e2505b981c3e227d03a2d4252a3b6cafed601c08ecc351cecc18576ea043569",
+      "58ff721cd624a0311003d0373e6fb7b0f59d980e59141b373c4062125cc4c15b",
+      "14b4fcbed6a63204b100defb50c1c6ebaab6072dc760d251d5261884ce17f4c7",
+      "0cce16fa3874a11bfab512393116aeae2b8b4424559a03469d78b60d9ac8e23f",
+      "aecb609eeeff6eea072606520b420846581751c84dac32478525cdff6fc8363c",
+      "7b9207c61e5ede0a77d2ceebc45863cf9e9a72887fc5dd80f640131e1604764b",
+      "2aea64947bb89621c614839dc4eb01933edc53d1c4b1014baffb6ad679354769",
+      "c69ff47632847bcdb9ea7002ef6b8c4a4aaba9e48a751a9a271d241e314a41c4",
+      "cfcd0566eccb87be73b4e86ab4d5dbad253c60f702c1b39923f057715bd65364",
+      "3566e84355dc26bf277cdf87726efae5078ab2b6f65968f26ea0417b19acc3c8",
+      "6142f5489b37c2f462b6d8c778a57ddf79a054b723ed760ed0088586b7fc8c6a",
+      "8d1566c0ed0a4699c38607504e5e99999390588e633be41125b5689e5c2387e4",
+      "8005c69ec8b6f26eae29d384b2461c1252b765c8f553f1399f545198a3a5b517",
+      "51a5400d2551a6207397d0f6c0260298b7141ff3b0bc986d6ef39f4ef58374e8",
+      "68d32bcc9a0105994a172d3290e3744f26703a9d4bda1892bc6868e59bf632c3"
+    ]
+  },
+  "freetalk.js": {
+    "reason": "freetalk専用本体とProduct/freetalkの登録・話題台帳。createTopicは所有印をverifyし予約IDの新規ファイルだけwxで作成、任意の既存作業や通常Productには書かない。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "2fe8bde577832bb73d354a11997ea99c0690e67882bda74463d7580409582fe8",
+      "436a2b822b82d456f32880e5838b0b627e2be8877bb563375d6a7ad4bb349258",
+      "9ab628beb546460cca7d54d3402d1fb3dcb25705087e8d74d5e9d789356e1606",
+      "6d6c8bb3a5c5e01cf2711ee6a306f46b6110aa42eefdad63ac5ff2ef31a39483",
+      "2961fa7b9fe6e66433e9d5cdcb9876dfc73b942296d80d945855c60a9b3d4aeb",
+      "7ec4eb005611ce814315852fc628f21c5ce5dfe1faff7dd38e3d10b8cf4afd03",
+      "0c0c8f04b2bcc954d0115fab773959a97890d781f765eb1649224d89e909c210",
+      "ddde614264949e31c30ef092f375810b35b5ad150bd325d702ec9d35b3969337",
+      "d00e3ccdf4dccfe0c53898f583f6503d0dda9bcecaeaa7fd3a0e06d04087b0f1",
+      "987f0f7e12455a6a98a5cb6fc5a9cc03c077aad11c58298533c1e6cc32bca93e",
+      "d27638f3ce78400e2617c8d8a9271ea13c78ce42465ac6e41223d83549970312"
+    ]
+  },
+  "git.js": {
+    "reason": "正式Git保存・merge・worktree・製品ローカル素材コピーの既存経路。自動信頼するHub記録ではない。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "57f0ae641dc4f9b07ff5e33bb9132f3fb52ecc6fc91c36e2e2c75b8908f438fd",
+      "03f88e03866bd0bc67d9a4df844b04f115508ef91e27121f022dae19080c8de8",
+      "743964aa229ef1256a4b32a1399e786cf3e8cd757c451cb37ecae688720d14c2",
+      "7069c454b047fdfa366a86bedc68e235e6440db04a5a8fced888f4d0f6cb7394",
+      "113d76f8993a6487ba8f75973e0c81943d4a6986bc4572d45f8dec265bba6de8",
+      "bbebd42b694af9be4c1e76fb858b9397e720ac8ffa8f5280eb21600fc7a112df",
+      "fa3accb46b1042d74252aa403f41859156e61ba3ee48713c9e6be289f03ef2b3"
+    ]
+  },
+  "github.js": {
+    "reason": "GitHub設定の_hub/github.jsonと、接続表示対象の_hub/github-projects.jsonおよび同じ場所の.pid.tmpだけを書込む。接続対象フォルダは値として保持し、通常Product台帳・本体設定への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "3b78ae78ad53d026912aa742929ff717a7815ef4fe7e8d4c9a9a61a66dc02294",
+      "bb9d5e701feb7bd4bd6a296cb17ba5d9b4e5b81ca4924480f2e92f301df33564",
+      "c8e0eec16b0fdac7e35205cd74edaff5c9ce9ae4661a6eb885c5891f87e1b062",
+      "7949d7f996d7f21710814ccec33efbed534d89de312c7967ec0ec66a12b291e5",
+      "ed5a9aee72296caec25370ca9b8f89ae6b1e55db248ef0f523bbe5db441e0801"
+    ]
+  },
+  "gpt-children.js": {
+    "reason": "人指定の成果ファイル出力。Hub記録として自動信頼せず製品変更を保護。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "7d29fd16a9858acf51c7f1dbef8ec79a7d8c8daf90c37d491aa9ccf784dad88c",
+      "60a21c2a774722c7827819c3de5194a14b8cb6a0eba415a8972d1d27dd475eb2"
+    ]
+  },
+  "handoff-card.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "handoff.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "58512ee07690b9e8b6290f9961ebe0c0e5035a200311bbc97ab2fc4ea052b2ec",
+      "084b00010cf81b13163a5c6903971718a3b095bbf7ba3b5f46aca98c86178660"
+    ]
+  },
+  "hierarchy.js": {
+    "reason": "PROJECT/作業の修復・親子更新・rollbackはwrite経由。backupは_hub、tmp削除は未公開生成物だけ。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "687ad870731f1da6080b926f0f98e1ab5237cc47a6726294ea8fc51481ae0eb6",
+      "0327ffedf54ac2ed74f89cebfbb315931dd85fbe480fc37130cdd10b6643ad65",
+      "d7e8613a29aa4faf5301ab278210d23ea71ebbe64bc61bea7849d29054ff3c51",
+      "9aae00352c83fbcd404c2a6d22ba31d87e9f72cdb8cbc4ed697912bad408130a",
+      "9bf8dac9373fab192de5f0e4fe924c02704282d612e7bb2fa91575205b6fcd2a",
+      "88d27e78a8ffed6988800568f04c4d9ce87f047dde613160395bed39afe0a82f"
+    ]
+  },
+  "instructions.js": {
+    "reason": "台帳rules公開renameはwrite経由。直前の一時ファイルは公開前の作成のみ。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "c04c481594f6f5dbad1879ead0766d2a17cb325513afcfd4c2d91812e7ac2858",
+      "fe998c415cd2e67698b8934ebaf23827062ca8811de4f382335ec510cf500aeb"
+    ]
+  },
+  "integration-delivery.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "201323dab2a01352e86f9a50ceecae9971da5649ba5590fddfaf59c6576e97b9"
+    ]
+  },
+  "integration-log.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "integration-question.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "0547102cc9523f3b990cec6a2019b591ab651e1ec75b7ef867eb9842a0ecf99a"
+    ]
+  },
+  "integration-record-save.js": {
+    "reason": "R1限定保存の事前検査は一時dir内の私有Git indexだけ。復元は専用Git index.lockを排他的に作り、HEADと自分の準備後index SHAが一致する場合だけ元index bytes/権限を同期して戻す。Product台帳の原物へfsで書かない。受領制御記録は証拠経由。",
+    "sites": [
+      "19e15bfe1890da002d5d9c1ba222be9e47ba65ee2afdac9488b4b36511270023",
+      "9d3942e0a27ddc8325758dc840a2de64b545209a6a39e5302acd6fae3adee402",
+      "c2fdf01f43c85fdc7d13b7e784b64daf3aa192b84ddc0aac745934ded0436382",
+      "c4342d7733b051e0894c7a8756ba999d042da909dea385db084c30ba5f1cccd3",
+      "eae7981f3dd064ca93fd48d46fd513286da8a4ecbc5d64bf65a507b5e12816cf",
+      "d1cdc4ac133be455fe2ef3605169283949aa2fe5a958d4b174f8ad868b922a35"
+    ]
+  },
+  "integration-review.js": {
+    "reason": "同Gitの成果チェックは証拠付きHub記録だけを除外し、.ai/chatの固定チェック入力もintegration-writes.write経由で保存する。既存原物の改変・リンク・製品dirtyは拒否。",
+    "sites": [
+      "c5966b2adb73a15d78c4874761091b1063673feaed39a229b3e530ed7e13e6e4",
+      "99d336315e6fb48e7f3c7a518c2f9fc5e238641ec013c5cb2b86b513bc6355f2",
+      "411f882965dcee6a1b363bb335c636d2b6a292fc5e494f9dff557922e48553b2"
+    ]
+  },
+  "integration-safety.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "201323dab2a01352e86f9a50ceecae9971da5649ba5590fddfaf59c6576e97b9"
+    ]
+  },
+  "integration-simple.js": {
+    "reason": "移行成果の公開はwrite経由。一時ファイルは原物照合後にwriteで公開。",
+    "sites": [
+      "78639fc256d86a2c7e43b24e79fb811173aa083bc21d089d394dd00ee0a6bef2",
+      "99d336315e6fb48e7f3c7a518c2f9fc5e238641ec013c5cb2b86b513bc6355f2",
+      "e0ccf3cde76d891ed1965334920c479cf7e92ec3b0778df36ef053f72427fa68",
+      "9e13cf2e5ed5dad01c8e1f9d65deb4ab112566e3fa187d3dd4bcb32e20607603"
+    ]
+  },
+  "integration-writes.js": {
+    "reason": "専用証拠/途中印を_hubにfsync保存。製品ファイルへ直接書かず操作を監督する。",
+    "sites": [
+      "27c3d6d4f0d29fbc1e66dd59c10d2324348fdf34ddb06c616662291ad808bbcd",
+      "aea05899ee907b83e3b13c042b57ee0fc4190b56826fe11f42e52354b508b1a1",
+      "4a9a66924c3b9749c08b004b8beb11e89cbbc553a04d60e1b7d6f2d0b3a5c2e8",
+      "77baa3deb569a4f41506d5ab7c78ed794ae9a29a4264a1c940e2b5811269dc67",
+      "bd7a0fcf25aa15cba3fef8305a8005932ccf55e9729ad0d52d26963e24e020ee",
+      "7fa4e1fa18080f53a4b629a695d8d48222d9a6d158087b2ce45d1aeacc4969a6",
+      "0143d1b429d6f1b7829382d1a208a53968dbd923e14c55c1b660a6bd9a24891f",
+      "7cafcc771bb453e8481dd87ae9584dbb6be6f20b6826f4b1ea9f25122d47f1e2",
+      "a5baa6861fd6c042c6cd47ea53bec2ef07ecbaf78730cc6a20637bd96256f15e",
+      "0923344e5e248453078fd16b39bd5eb16a9d545db78bda0029eb1004362b6248"
+    ]
+  },
+  "langpack.js": {
+    "reason": "_hubの言語設定とlangpacks公開stage。台帳外。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "67f634f5ff4168235333938ab4c5c25cd274c4396b30310d68fe99fca4953a2c",
+      "9b115065c5790415a23135b7c71a7d4cd41e586e98a9183b6913e75cd6a87b4c",
+      "174048d3e19da7443ff95ead9070b890573c9949a7bd26f1273dfac6d2e3ddb0",
+      "097bdc14d5242e84ac35fcd8974b83fec74166b6ae8b95e718014dd6a33b383f",
+      "794794a7f4066a80db8322703050bd530d84b2595ee8f8e38f8a952d8f522a77",
+      "e65a2555119e1b29d325a98319f17973292668ccab67adc6ae2736980592eef1",
+      "c8f75f4c6f7389dee550c1df8076d34f97ddf9e360663665ea501a1b839a3d66",
+      "45c7b6722f5a6c59ce451125908b917063a5006f50f5f7832f9f54349a9973fc",
+      "4cdacb7268c9af811b7129b07b15f1a08c6cea1117d7855aac167bc865c99eac",
+      "c44e9060a75bfe46a1f321a43869983e112b42dde35e34eb29b459f5ff732c7b",
+      "39a21a23feb4dad4a6ee9ff54d9f44d23a770bf868cf1ab91b1e97d6b8b4af20",
+      "9775bd1ae5deccd7d960f62c6efb00fc7d12d88a78b8e09be06a3bd354533f06",
+      "e592eb35b20d1b3187ceccde8679b9f242f05e2a4687518a380c18bae07bbea0",
+      "fcd1952655ca4028278328b280898dc6a0c1d344f32f7f8dbda33fb641ee3cb5",
+      "be53b09243bf022e92eafcaf8ec2dc4f989ed6b78a3e425bd19520e7428951c2"
+    ]
+  },
+  "launch.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。 Windows の外部Terminal（openTerminal）だけ、OSの一時フォルダ（os.tmpdir()）に実行後自己削除する起動用シェルスクリプトを書く。台帳・_hubには書かない。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "ab35ae93790ffe92749f25c951f15dd53c99a768406d5078f2eadc2fb70bf830"
+    ]
+  },
+  "limit-evidence.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "dd27cd4bb008a41d6fa9a5732cbc104b1981b5caab17c686492bf0730525d033",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee"
+    ]
+  },
+  "maintenance.js": {
+    "reason": "_hubの保全記録と人確認後の移動・復元。未保存の記録として自動除外しない。",
+    "sites": [
+      "a0e11746e470c0387c3159d0d16622e8a03f7a992a3da5fe092526a14b1551b7",
+      "9dbd62b3a9024978c7dd7968cdd5d29351941daa656fc05b881b18f0517a1379",
+      "bd6e23ae68dd11c60299133e26f9d3338e2f2463dc5b5ead2ab0b1eaad53c3ce",
+      "1ad28e864c912ace38db66d012261d0789f1662bc76cba433018bcd804e618bf",
+      "54c3450bd729f457583a226b3d002746ad499f2f984583507decbc25f47bfd13",
+      "3011332cfb529e0f0f1f075c5a6161bac0befc1459f14c107a6d4e456477af17",
+      "fcc43ae1ad751655063a67fad19a559b1eec2f6e8b23ebe136e7e104294d6058"
+    ]
+  },
+  "model-limits.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "f44c92162a5ee63465de58532c9dd40eeb1731b4c6ef131af19184720e4f1f7c"
+    ]
+  },
+  "model-view.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "718cac2e6d47d0519f5a15e7feb2d9ee5a528279e6d38a67632444f9d2f9ea42",
+      "8b52d108e54047f7b6023b59b6648af2bf8517e4c7bc565650d9f1524065b161"
+    ]
+  },
+  "onboarding.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "459c9f8dbe3abc5cb7597ecede2f7b2a9ff3dab4aff0f3f8e49df60bcfef3e46",
+      "a89a198ad361e2b6a476e6b5b9ae01df5da76e104735b184d9074e9ef1e79ebc"
+    ]
+  },
+  "partial-receipt.js": {
+    "reason": "選択成果のtmpコピーだけ。公開renameはwrite経由。",
+    "sites": [
+      "c5e40767ca88427ed5dca20fd826d75b0c55a7fab9638f93eeabeb8993d2a642",
+      "9815b47c785d405eefb1968c789bbc1e7484543e3d941ea847f7915ceb4bcab5",
+      "83224eb20de9e40fc3e45c4f2e37ee99a3ba5083244ef94de9f0a7911809c9f2"
+    ]
+  },
+  "procwatch.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942"
+    ]
+  },
+  "project-notes.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "cfb69363fa340111bb8ed0d3bc682a7489a88f2f14762b7a727e30453361535e",
+      "eef30ac64ce98d1d437da43f075172a7e005f7fb73f0bc1f906cf391e1d3165f"
+    ]
+  },
+  "project-order.js": {
+    "reason": "_hubの並び順設定。台帳外。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "c04c481594f6f5dbad1879ead0766d2a17cb325513afcfd4c2d91812e7ac2858",
+      "74b2bed6f3a50252cbcadb6f11ba92d10060885633be8ed585fb826bd1c8266b",
+      "828307528219abd3a6c315c3682e680b70a800e1e6369c7a90d606568821b814",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "3c2328cc773b13eadf227c6485cb56198c0361222cb8275ad372c50c540a69e4",
+      "828307528219abd3a6c315c3682e680b70a800e1e6369c7a90d606568821b814"
+    ]
+  },
+  "remote.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "013e1d5ffcfbd311a34e911ea2923af3201933916b509242cf523718291061a9",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee"
+    ]
+  },
+  "removal-review.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "8674469da1b8022ab37d61d1f410ccc7c2dfbba2fda1077ed49d0ec8e25b8d10",
+      "0723bad8a5d2f4fade3e026a7de407c4af4fe83307375d3e4af84e971dc90f16"
+    ]
+  },
+  "remove.js": {
+    "reason": "_hubの秘密署名と削除記録。ファイル移動はRemoval/正式統合treeの既存保全経路。",
+    "sites": [
+      "c5e40767ca88427ed5dca20fd826d75b0c55a7fab9638f93eeabeb8993d2a642",
+      "cbae48826cbea6c506ebf6eeec0f21f1d9a83be2f2466c3abe6bb8af10acbaf4",
+      "0e565bb2cb29a45d1a043f4464487d04ce9093c787871a274db2b434bb73cd6f",
+      "1e2520f5666b7d691922608fd224c5f8d1e9faed2f2b91ed59312ee2518bdcc8",
+      "d2b4a1411e6288a7328939a566c4e0f9564483e6f67fcb128cfbf1b6ae99a56b",
+      "0be01f9e8afb6716eb6bf2c85e7f4172bc83640c2ada41f6171da360e371468a",
+      "245a7cc7aef89ca81613abce6372d48dcfac915b3b156c0c2d00de84c5dd95b1",
+      "1ff31decbb05627d4d675ae865a29925cc89a68110d767b4cf680d1ea289b7aa",
+      "69e39a652e15c93d3919636f645ca85c865ac780979a129180c8a82379a172cd",
+      "da494c73b7ef7a9bd60b9aabae60a4cb5e63229b2c307162918ac1c4d9c1291d",
+      "36ee8914503a7c77fc6109d3832b2fda1291fe30493c078bc280a418e84962ac"
+    ]
+  },
+  "reset-tickets.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "ed3e160b6a354992d692640099189be96a632f2df6e9cf21a4e47835801656ca",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee"
+    ]
+  },
+  "resource-scope.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e"
+    ]
+  },
+  "results-gate.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "8de60dcc97d3a78213925eee8a19bf57ecd1e6f49bd4f71c64cb6d3dc2294ffd",
+      "c2293b24158da6c7cae7a3011ea3a6900236d34c2ebd911a6f70956746c73764"
+    ]
+  },
+  "roles.js": {
+    "reason": "_hub/roles.yamlの人確認設定。変更・復元はrole-historyの全体原子置換へ接続し、Product台帳へは書かない。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942"
+    ]
+  },
+  "runtime-generation.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "0547102cc9523f3b990cec6a2019b591ab651e1ec75b7ef867eb9842a0ecf99a"
+    ]
+  },
+  "safe-file.js": {
+    "reason": "本文/PROJECT/queueのatomic/recoverAtomicはintegration-writes経由。Buffer復旧も同じ証拠とbyte比較を維持。他はGit外の制御記録。",
+    "sites": [
+      "0547102cc9523f3b990cec6a2019b591ab651e1ec75b7ef867eb9842a0ecf99a",
+      "f8e6c784663fc52787c52b2e8f7a9b8e199471255562ac61d66fff113a918dd6",
+      "63fac46e9feaceb631d8f2368175267e854b4a816e34bf66035ee59dbed024df",
+      "a57febcf58b43921d999ab983924f1d2f83e54eea35522564df8ac9fc835392c",
+      "3eaf4a246ab5751558a4f8e046982cc6ab3bf64d6e0e47544e6cd0ee1f9cc4bd",
+      "0eb840e9ccd25f2f1726b08939a9a91f6e5192d9702c28fe5f47babc37a0adc2"
+    ]
+  },
+  "sessions.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "8ae4d3494885b5fc5531f2e05f487b1a87b03af40ad9c8d9b56b6745cdb49171"
+    ]
+  },
+  "skills.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "b133a5c3d37e75dc3deb70f4c84bbbe87ab9a28a08a616ba3964521900f49487",
+      "ba1d1d5224d3f651f27613269370b5f6310623920f7a2471ff15f8492d6e2e66"
+    ]
+  },
+  "start.js": {
+    "reason": "start-specはwrite経由。添付画像とattachmentsは人提供の素材で、記録とは別の成果候補として保護する。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "546456fdd1a849b003e6cb5ffc21c12be7c14d45d14e17102db295aa652a4a93",
+      "90c3ddf129ba6e62e7e5c8497703ed99b4578100300ce702dfc21f481b50704c",
+      "ccc1c651bc41bb5f6683bbdec67583b9da2cccf4881d2b478278a4d88edf4bf8",
+      "3cd1d84c52283e594dcd234178b4473219041e3e80093f84e82f82a8bfe47353",
+      "b2f79ea4666c75abafa516d627f814e0a09b7dabe3cb4f266859eedf747fcf7c",
+      "46d71aaed948e47457d3c22ccbfc8a7e47dd5997058dad7c925191e4fcec8b5e",
+      "815d87e79dbbbb9bd2aba02eb053bdc488b8a8d8bd6a18a423790ce82da25cc5"
+    ]
+  },
+  "state-offers.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e"
+    ]
+  },
+  "static-files.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "acacd63c16d689812d3c3432451c6ea16da3dd7f2d01f75e21033f5069e1bbd6",
+      "fcc98146639106b89c610e0d39f11dec67df98659154604bbfc985efb9460382"
+    ]
+  },
+  "store.js": {
+    "reason": "PROJECT.md・既知作業ファイル：全てintegration-writes.writeで囲む。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942",
+      "d00e3ccdf4dccfe0c53898f583f6503d0dda9bcecaeaa7fd3a0e06d04087b0f1",
+      "ff210322ed2e42adec61d0a8a5da579fa6c8e9edb3543ae02de44c2997ff19c7",
+      "9ed1427342bc9b2b223d137816358797d72121e19f3d194e09c2acefc50e3543",
+      "302f6753bdb931fa5492828980022cbe4a8bcce778e1e6dd66a72da332042ef5",
+      "4f3d2c1629a56fc409f05922f4d4ef6e8900bc98c471872691fc811ff975aeee",
+      "036b44c477b03f815c20330adf7ba43d11e44b98eda252c706d0557d39f4c891",
+      "036b44c477b03f815c20330adf7ba43d11e44b98eda252c706d0557d39f4c891",
+      "036b44c477b03f815c20330adf7ba43d11e44b98eda252c706d0557d39f4c891",
+      "5b54da3694974cdc624334141f3a58032a09cc2be3d0eb43af5d5351bda57303",
+      "e39f066434c6a7f67551996f125890ada20ac4e5e08c35f357cf4bbf80643b75",
+      "036b44c477b03f815c20330adf7ba43d11e44b98eda252c706d0557d39f4c891",
+      "baf3861ab108e879d4e334bfce842903a1db8d164a330e07b1bb30fc82b68f12",
+      "036b44c477b03f815c20330adf7ba43d11e44b98eda252c706d0557d39f4c891",
+      "3b325fa762909ae5af70db432c4eb56da77af3c15f3b26b7a3a81d621121d53c",
+      "19904690e1bbf751f70d39dfd4108c244279dc19df13490d147cbb02f2a4156b"
+    ]
+  },
+  "task-continuation.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "5e54530ef0b19cd8fa698890228f43fa2bc51d8e0e0795144db66b0700e2fa34",
+      "ac19189aff96aec186af3ed6196e75796df0cfcfec72affd5dae7c6f81a10cd9"
+    ]
+  },
+  "task-history.js": {
+    "reason": "台帳原文・archive・世代置換はatomicのwrite経由。jf削除は_hub/task-historyのjournalだけ。",
+    "sites": [
+      "0547102cc9523f3b990cec6a2019b591ab651e1ec75b7ef867eb9842a0ecf99a",
+      "44b38f4820b38af0b76808981d829fe3522c580ebb347d24769d62ac1f4ff3d4",
+      "8619be3e820ee793efb4e17065d2486c0fe2cb25991f6f1e86d0932d92562bde",
+      "004519da9b44fabc38afd6e6a30345a25d853d70301116583fceb257c41992ee",
+      "3d12bb8199a9b6c6d306ea5b708c2c9a1571ae4342c0e4a684b1046e4033ab98",
+      "39356e93533c0814dbc307ea46c93cd85b00a44089ed9734c4a208850860da9c",
+      "0819d7766aaca7f2cdac7fb35544fe3fd07ee342c46c27655c8a290879d9a731",
+      "1afe8d880db1523a9004a24cda887755f7c021b6fffa6d040119c4f89874985f",
+      "1ec84f89ede1515414930a0e5989caad5ecef0e8315714109a7760ea5f1a0757"
+    ]
+  },
+  "task-ids.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "56f03a9ae717e7098ed95a3541c86c96b7f51f0e72d7181c5b903a64129e1a8e",
+      "d349470f06c6d19d63f15d259c33af207f4f2b3a6f312867ad90ba581dda715c",
+      "560554883b8a9d7d6c48faebcadb2ed5735affacf2d8162a930cf0a5fcf70f93"
+    ]
+  },
+  "task-integrate.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "243bc3637c453cd4a2ab247ccb2d474162739331a2c5841023df2e3485b1b67a",
+      "4a93408cd65234d6b9f01a3d1793a9dbf69c82a14c543cad8d39606b4ee1602d"
+    ]
+  },
+  "task-results.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e"
+    ]
+  },
+  "task-transfer.js": {
+    "reason": "_hub/task-handoffs管理。成果公開renameはwrite、片付けはtree経由。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "f3a3f0497242c0218ebc68c73274521620ea2e88bc9a03ef224388348af98758",
+      "4e50f194c77bc0ef869eeee2db087b3db26e6fe7452f02eaf8d2d3d06a414132",
+      "09272471f6974b0fb6c93805394eef11264bf055dba4e9b8438403f71ea7df92",
+      "e3ae5249720cd841d5763b0600d79a66ecb9efbb5520c36bcc7f876c41d2a503",
+      "6b6568a6f4a633faa91a7d0dc33e6873eb07d7fcad224979f4892ba74d24b389",
+      "7e0702fb5ef0f6489e82b5c7182f255eb7d3996fd003ef5f1b08ace635546c08"
+    ]
+  },
+  "terminal-limits.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "c7d76fca6e2b098419580053e99a75683587b78137934aefe110d4d7fbbf2b9c"
+    ]
+  },
+  "text-budget.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "cfb69363fa340111bb8ed0d3bc682a7489a88f2f14762b7a727e30453361535e",
+      "d389cd75072edc251ef5f74d857a9229aa88449e5796165cc0e857c6013fdfd9",
+      "5bc0c9eb55c232a776d66b40fedfbdd0985322f60c41bcfe9ec43d621864ebe0",
+      "02b2cca4f17b9f0c71eb2c97219cd9e81ed39db983c3bce526b41afceea2e235"
+    ]
+  },
+  "transcript.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942"
+    ]
+  },
+  "trash.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "unread.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "update-check.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "webchat-client.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "webchat.js": {
+    "reason": "設定と送信記録は_hubのみ。会話は証拠経由chat.append。製品ファイルと子作業への書込み道具なし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "7d29fd16a9858acf51c7f1dbef8ec79a7d8c8daf90c37d491aa9ccf784dad88c",
+      "a774f9879c1fa5444ffd1dc115cc50db0ea6e9fa543adeb5cc6fcc6cc3f3cacd",
+      "bebd86f7bf772092d2ad8fd90592a46a505e17aeab174ad2855e2c59cd3ee0e5",
+      "51b8682e4ad64e998ee7471a26f79bc07d7dfd4e6637584d8b620d810ad3f4bc",
+      "e413d66f6b5e49d32e0b83ac40d66d20ab50003d91d67255493582bb5c9d00a3"
+    ]
+  },
+  "workspace-sandbox.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "integration-review-results.js": {
+    "reason": "Read-only saved-result review: declared commits, original task, bounded deliverable/test manifests. No filesystem writes.",
+    "sites": [
+      "c5966b2adb73a15d78c4874761091b1063673feaed39a229b3e530ed7e13e6e4"
+    ]
+  },
+  "integration-abandon.js": {
+    "reason": "Explicit abandon preview reads original records, audit, archives, queues and spool only; durable management writes use TaskIntegrate.save and continuation.archive. No direct ledger writes.",
+    "sites": [
+      "201323dab2a01352e86f9a50ceecae9971da5649ba5590fddfaf59c6576e97b9"
+    ]
+  },
+  "role-history.js": {
+    "reason": "_hub/roles.yamlに役割と変更履歴コメントを同じ原子置換で保存。通常ファイル・全体SHA/文字列・expectedRevisionを確認し、同じディレクトリの一意tmpとfsync/renameを使用。Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "5f9fcd15a1b7f93f8cb148ff6e586b2a4c99422b0856708ced4d761faa4f9cc1",
+      "014324bbec2d4bc8b73dcc11520db88b4c29db9614d844665b3d5c234ea577e3",
+      "51b8682e4ad64e998ee7471a26f79bc07d7dfd4e6637584d8b620d810ad3f4bc",
+      "5b8061826828de63eea251bf710c16f188c3adcaf8a1ad522c742b5725cb0031",
+      "cbe462b135658ad9a72b8f48ebce0391f10e6e47903c54256e33ca7058e35035"
+    ]
+  },
+  "discussion.js": {
+    "reason": "Only _hub/discussions.json and atomic sibling temp files: durable discussion turn reservations, results and previous choices; no Product ledger writes. Injected file path is test-only; runtime fixes it under ROOT/_hub.",
+    "sites": [
+      "de9dd5eb545a5be244a660c7e72ba973103dc30c17cce8e9e4804404c5d3b910",
+      "b5418c44ec6c8efb00013e47c74bb9a74bbc1e75e11cc2e13d88509d55ab5b38",
+      "51079d90f64843a87af0aa5b64daa8abcfff920d7a58ffa0d0191c447c80f8e1",
+      "7d5092dc2685cc76b5f45be065910cecc18bfb543c73f99f21e582d85ac8bc9d",
+      "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee",
+      "65352c318e6b1a1a3411d4eba98931a606cfd91c9e97138120ac7a78818ec363"
+    ]
+  },
+  "idea-dispatch.js": {
+    "reason": "fs importのみ。原物のstrict読取り。台帳更新はIdeasのwriter/限定patch経由。",
+    "sites": [
+      "353813f8638b49d72bfe2b35246ebfa0aebbb05bf7cb35b30ea5d30f3b415134"
+    ]
+  },
+  "idea-lane.js": {
+    "reason": "fs importのみ。実行先の実体を読み、設定保存はIdeas経由。",
+    "sites": [
+      "45e5ef8be1b9102cb66953a80ca1d60be1e726d5723eba0efafce4964a9f82a1"
+    ]
+  },
+  "idea-lifecycle.js": {
+    "reason": "Git外controlRootのbackup/復元資料と保存先ディレクトリのみ。registry/正本はIdeasのwriterと候補/receipt経由、復元原物はsafe-file経由。既存mdは保全。",
+    "sites": [
+      "353813f8638b49d72bfe2b35246ebfa0aebbb05bf7cb35b30ea5d30f3b415134",
+      "673876e8e0744a8469c5b53b9b2088cc824f738a1a4874ef22ec24e5170ffe70",
+      "ce8835384ab7a0a1d2f5ffb5f50e7fb23f3ee70f008101f7f9f483850a42e4f3"
+    ]
+  },
+  "idea-release.js": {
+    "reason": "fs importのみ。Git操作は固定対象の共通Git lock経由、判定はIdeas経由。",
+    "sites": [
+      "7f8887539eae5d0b9757e61711683eb1262c29f303535b7d659f214a9ee8dc40"
+    ]
+  },
+  "idea-review.js": {
+    "reason": "Git外controlDir/reviews配下の不変資料だけ。wx/0400/fsyncで保存。Product台帳の直接変更なし。",
+    "sites": [
+      "8dfbf6a3992573b882a1636aa9d3cfce3322c2369405627552a5c96d4ebf15a6",
+      "f0d7f11655c44451de2bcb261ac3536adaba56ac08171b3ab22d18ace929c726",
+      "dc1bae70ee99a40e715037d020752ba10221ad8363369a96ac36f6f485ec7bcb"
+    ]
+  },
+  "idea-runner.js": {
+    "reason": "Git外controlDir/runsの依頼資料だけ。限定台帳更新はIdeas経由。Product作業frontmatter変更なし。",
+    "sites": [
+      "16db299adec6c110c3f984acbe1bcdf095dc13a259e10bd7686a4697982a3fce",
+      "0d31d6c86c2f0914b9e4b19f06b80195269cf3757ede0bcae17aa317098f0146"
+    ]
+  },
+  "idea-source.js": {
+    "reason": "fs importのみ。会話と世代を読取・捕捉する。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e"
+    ]
+  },
+  "idea-utils.js": {
+    "reason": "fs importのみ。strictRead/json/identityは読取、Gitは--no-optional-locksの照合。",
+    "sites": [
+      "f768a3c0bc9c2696d17b96d972ebe1ed3dbca091aa7c16f87c4e06e6363eba71"
+    ]
+  },
+  "idea-verification.js": {
+    "reason": "Git外controlDir/verification配下の専用stdout/stderrのみ。登録profileと所有leaseを照合。Product台帳更新はIdeas経由。",
+    "sites": [
+      "ce9cb47d2d55d3fbd3a804fa0f769ad986fe8b94025df3548599674445439f6b",
+      "147541ec5676f6ac23647f135166c461328647d0d5640811f47b6c046b73a7bf"
+    ]
+  },
+  "ideas.js": {
+    "reason": "io aliasで正本/registry/receiptを単一writer下の旧snapshot/候補/intent/fsync経由で保存。制御記録はGit外、Git同居時は正本もGit外。表示mdは人の変更を照合しsafe-file経由で保全。",
+    "sites": [
+      "243bc3637c453cd4a2ab247ccb2d474162739331a2c5841023df2e3485b1b67a"
+    ]
+  },
+  "main-merge-delivery.js": {
+    "reason": "既存のROOT/_hub/main-merge-deliveryだけ。mkdirとsafe-file経由の操作記録。今回ロジック変更なし、共通部確認に伴い未登録だった既存fs importを棚卸し。",
+    "sites": [
+      "6a2000d2262240e6d3d4c73e47169ce04c62db9bca4a4f9fe4708f855e9c50a3",
+      "1022229303d76158adac4c022cfd9678227280fb5c6e644bb3921022b91977c8"
+    ]
+  },
+  "main-merge-flow.js": {
+    "reason": "fs importは既存操作記録の読取りだけ。保存はmain-merge-delivery経由。今回ロジック変更なし。",
+    "sites": [
+      "00ce14f2fa272c074af92ae7a50ed73187d36854dc231fbcd09d959fd65e79bc"
+    ]
+  },
+  "idea-erase.js": {
+    "reason": "台帳完全削除専用。本文なしintentのUID/保存先/前後hashで束縛した資料の消去と予定出力prefixだけの一時書込み再構成。journalの不在→出力hashを排他mkdirで先に束縛し、未commit準備だけ安全に破棄。通常safe-fileの曖昧保護は維持。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e",
+      "9db6a8485cef6ca43d320c0d98f73e72f19d5e4212895f23ad27cd7cbbac963b",
+      "77d19ccc3dbaaa7d79d9abf40cfa4dc94f94acec310fc8f1f42a55ac09290c78",
+      "43a3705fac30f8b88926497c667e9a7353964b071ccd8343b14524335b816300",
+      "c1c4f047d5ee6f9da3fa65b1e5c777ccc824cc3bae0714f76517d1ce46b6e456",
+      "d84d0f4d2f54e193ceb731968276788fe7251ea6e48c0fb74a6dc9f41895bda3",
+      "391c1c9fa5d0b854bfd942e98d4766818fe3de36af553a051aaa90df2ff93f35",
+      "572b6ba3fa3f009b312327afd8c0f2f703a760958a6474372338652f98fffc2e",
+      "341d44f860c96734869c482a70d2ecb58aea274654c0e7537b99c56c4ec7ebba",
+      "095a3d5e891f74ad31f80ab18bd88bc99eeece187707dff6f73b3b4ca509fda6",
+      "fecdf2d7a2eefc10d05df1814ebe82f32347c453c8d88aabb9838c95afa926a6"
+    ]
+  },
+  "idea-images.js": {
+    "reason": "保持統合した画像機能。Git外controlDirのimages/hash原本・previewとimage-staging/opのみ。Ideas writerとnoLinks/容量/所属/内容hashを照合しsafe-fileで保存。sips変換の専用UUID一時PNGは両実体の同期確認後だけunlink。openSyncはO_RDONLY|O_NOFOLLOW。元会話・製品・他作業へ書かない。",
+    "sites": [
+      "1b4159f6521850f2f9d861784507bceeab5f71d0936f6dda8413561cec9c7178",
+      "e65a2555119e1b29d325a98319f17973292668ccab67adc6ae2736980592eef1",
+      "18353aa379a53b101dffdf27af623aae08b95eba586dc336b35c1473bb2cf3c1",
+      "8e3f867d1c8ea3fbbafff7ca9c6d458c2294364f4ecd2dc5585961b614459051",
+      "3e623ad08bce23aa7019caddfbdc75bcb39cb6caa34e1eb34821193c3c106be2"
+    ]
+  },
+  "app-update-packaged.js": {
+    "reason": "_hub/updates/packaged の取得・検証・journal、App bundle とその同階層の旧版/一時版だけ。securePath/siblingValid で範囲を検証し通常Product台帳へ書き込まない。今回実行せず静的に宛先を確認。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "73e61d509eb773dc49245b357af0da3f9a5cdc8bc4963b8d19dfd89432c58e86",
+      "a774f9879c1fa5444ffd1dc115cc50db0ea6e9fa543adeb5cc6fcc6cc3f3cacd",
+      "49fe23c367dd3eb48694af6b02eb978b925982f4aeadb38912eea0499d974ac8",
+      "51b8682e4ad64e998ee7471a26f79bc07d7dfd4e6637584d8b620d810ad3f4bc",
+      "b108d79f9f32a21d196ec33904b9ded34c2a0043ccf60779fe7713ad26b58ae9",
+      "5a88d279c0a00d3f38a15165a67fdb62fed250454d1308fb7b7104caf02e95c9",
+      "4b75f5e5a95ff66795be423c1739393a988dad89e65ea71240b7d52e52d766fd",
+      "de59e3533df014983995d964a2bf246e1dc4ca1f2fd9e8370fb112b5beee2eed",
+      "2a5f5526e822845cd42315b7b89744918871ff4e20f2983e372d6eb442d256f5",
+      "154aa274343f2cd81dab75bf471a5d773600004cb21ebf0d00f89e9c39215b0c",
+      "4b8519809e4de4247c3262645afc235b18d522b1e078f9d856a3a952abeb2678",
+      "af9826aca34c0272b6d45312140fb399259ac90efcd04fe93916721ed2612fc7",
+      "8a404c948e3b97eecbff2a6339186a1fe56dad29f40ecac538cbf60b2cce2676",
+      "50e9e7654efd954c06d437f9dfc794189a0d6651206a06e5dfd8f8316a6b83a9",
+      "59564e1c45ed65ce29dc2278aa9c0e438b52a111aad3611c67b2981fd523d353",
+      "0b73080c98dc84fda0237f17320b622da0765e7ef295569b59c5a8bc37e3de3f",
+      "84ebb4927bced6b2149c2131aa493a62b96968adab9166890db51a7eb172f2f9",
+      "a085ec304d1687a26d8e808eebfa258c77361b03ef91e1a34637bd23ba9ef027",
+      "3e355da0165f897100615ccac1e69486fc34e9625ab91a8830ac24128c300a71",
+      "8cf494e091e0ebf0f14e577917b3ccf2b0ae90bad070a332f6d2ff935f61492e",
+      "4fb923d5e4ed456cdd5846b2e40daa24859277b848539dab23bb584b0f29c53f",
+      "9a4b7c3563fc99840018ac63292b54fe46947b4578e3dae3c0c6fefc11ab6a7a",
+      "8f2e5a0d123902f8cbf8d497075b97e50452dd6a8c5198d575e2e70e7afdc42b",
+      "8cf494e091e0ebf0f14e577917b3ccf2b0ae90bad070a332f6d2ff935f61492e",
+      "865fbd1593d7fd8a09f0b64f5d503d280f0821eef3599cdc7b655e9923e36847",
+      "03af57ff3a6c5ca88c942268f0a736bdafee54bf408af368e88d98c89d796514",
+      "5086851e83af97b92402979f1b441f065903be3fef0155668cbe3c1ed01df444"
+    ]
+  },
+  "chat-continuation.js": {
+    "reason": ".ai/chat/<task>.unfinished.json の親フォルダ作成のみ生fs。本文はsafe.recoverAtomic→integration-writes.writeで原文保存証拠を記録。",
+    "sites": [
+      "0547102cc9523f3b990cec6a2019b591ab651e1ec75b7ef867eb9842a0ecf99a",
+      "5e047cc34c8507fcf7ba28b19b6445e381913bb3b3e34636feb1d646beecade8"
+    ]
+  },
+  "queue-edit.js": {
+    "reason": "読取り専用fs importと添付存在確認だけ。生fs mutationなし。",
+    "sites": [
+      "ac82287e407d422e11e8937296377af0235ade3020be3d2df43615eb90b6212d"
+    ]
+  },
+  "queue-retreat.js": {
+    "reason": "読取り専用fs importと実行記録・添付確認だけ。変更はIdeasとChatRunnerの正式保存経路。",
+    "sites": [
+      "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e"
+    ]
+  },
+  "stop-control.js": {
+    "reason": "_hub/stop-control の停止状態・armed・intentのみ。通常Product台帳へ書き込まない。",
+    "sites": [
+      "e3bb611954b6ca6e87686b5edd29327736eab67d137a0ba25d192d51b2df8bf1",
+      "cda9d3c2a6faf8b010bc78bc8f7ac90f44e53a9234338824da831be1a24ed5ce",
+      "4d01232ef4b3061e98d4176a1ac4f3e0ad9fc68eb114beb88c30ccaf5aa71d1f",
+      "faa9cad1b16929878c92d9178a82dd62831257766623a30fa2b9ff2a444d9605",
+      "be620539d3bc1741d47d9e3917c4af9f2f0f88f97c810e66dda2096be9676679",
+      "ca59a339cec4a987953a5142df71f4df60f682ee2d44206c404961c24363fa3a"
+    ]
+  },
+  "integration-abandon-recovery.js": {
+    "reason": "人の一回確認後の中止保存回復専用。_hub/task-integrations/history/<id>.json を hash 付き .torn 別名へ link+fsync+unlink で原物保全し、既存別名との全内容一致を照合。finalize の現記録保存は TaskIntegrate.save 経由。通常Product台帳・会話・製品には書かず依頼も送信しない。read-only openSync も棚卸対象。",
+    "sites": [
+      "201323dab2a01352e86f9a50ceecae9971da5649ba5590fddfaf59c6576e97b9",
+      "05ba51c7644b9afbe687a23a20aae543d333a2c3926d9d59014366fc4a72ad91",
+      "25429c7942874efd0e340c5de5a4f7cb6f53b73b4da574b50f342275f0ef0b77",
+      "8780579a5aa90c22190c8c6c371ff096ae80df084a77b80b4e6879cc8d033eb2"
+    ]
+  },
+  "move.js": {
+    "reason": "14-129/14-130で独立確認済みの引っ越し専用処理。書出しはホーム内ProjectHub-Moveの専用フォルダ、取込は検証済みstageとホーム内移行先、同一ディスクの退避改名、journal/path-map/既存Mac利用権の保持だけ。通常起動前またはAI・保存・統合を止めたbarrier内で実行し、元AI認証・秘密鍵・端末権を移送しない。取込は明示確認・全件hash・リンク境界・journal復旧を検査する。今回の統合では実データ移行は実行しない。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "3270bdfee5ec7bf8972117611949c0df748ccc7592ae5257b4a4fc10e22a229f",
+      "6a2c802028a5d2f9cfbed7fd231cfa9b136d58fbd27b7a0a71674a8af77a6eb3",
+      "9c5c0abd93b25ff64cbe3761c3fe34de838ae01a25eef8aaf66479596790bb9c"
+    ]
+  }
+}

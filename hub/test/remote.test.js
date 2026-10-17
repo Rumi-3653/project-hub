@@ -9,7 +9,7 @@ const path = require('path');
 const os = require('os');
 const { Remote, isRemote, whoOf, cookieOf } = require('../lib/remote');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-remote-'));
+const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'hub-remote-'));
 const root = path.join(tmp, 'workspace'), pdir = path.join(root, 'Product', 'サンプルアプリ');
 const FILE = path.join(root, '_hub', 'remote.json');
 const port = 49000 + Math.floor(Math.random() * 500);
@@ -52,11 +52,43 @@ test.after(async () => { sessions.stopAll(); await new Promise(resolve => server
 
 test('中継の印がある通信だけを外からとみなす', () => {
   assert.equal(isRemote({ headers: { host: '127.0.0.1:4545' } }), false);
-  for (const h of ['tailscale-user-login', 'x-forwarded-for', 'x-forwarded-host']) assert.equal(isRemote({ headers: { [h]: 'x' } }), true, h);
+  assert.equal(isRemote({ headers: {} }), false);
+  for (const h of ['tailscale-user-login', 'x-forwarded-for', 'x-forwarded-host', 'forwarded', 'x-real-ip', 'via']) {
+    for (const value of ['x', '']) assert.equal(isRemote({ headers: { [h]: value } }), true, h);
+  }
   assert.equal(whoOf({ headers: { 'x-forwarded-for': '100.1.1.1, 127.0.0.1' } }), '100.1.1.1');
   assert.equal(whoOf({ headers: { 'tailscale-user-login': 'a@b', 'x-forwarded-for': '1.1.1.1' } }), 'a@b');
   assert.equal(cookieOf({ headers: { cookie: 'a=1; hub_session=tok%2B; b=2' } }), 'tok+');
 
+});
+
+test('接続元はアカウント・転送元・Forwarded・X-Real-IPの順で取得し、200文字までにする', () => {
+  const headers = { 'tailscale-user-login': 'owner', 'x-forwarded-for': '100.1.1.1, 127.0.0.1', forwarded: 'for=203.0.113.5;proto=https', 'x-real-ip': '203.0.113.6, 127.0.0.1' };
+  assert.equal(whoOf({ headers }), 'owner');
+  delete headers['tailscale-user-login']; assert.equal(whoOf({ headers }), '100.1.1.1');
+  delete headers['x-forwarded-for']; assert.equal(whoOf({ headers }), '203.0.113.5');
+  for (const [value, expected] of [
+    ['for="[2001:db8::1]:4711";proto=https, for=127.0.0.1', '[2001:db8::1]:4711'],
+    ['by=proxy; FOR=  "203.0.113.7";proto=https', '203.0.113.7'],
+    ['notfor=wrong', '203.0.113.6'], ['for=""', '203.0.113.6'],
+    ['by=proxy, for=203.0.113.8', '203.0.113.6']
+  ]) assert.equal(whoOf({ headers: { ...headers, forwarded: value } }), expected, value);
+  delete headers.forwarded; assert.equal(whoOf({ headers }), '203.0.113.6');
+  assert.equal(whoOf({ headers: { via: 'proxy' } }), 'unknown');
+  assert.equal(whoOf({ headers: { 'x-real-ip': 'a'.repeat(250) } }).length, 200);
+});
+
+test('接続元を書き換えても全体20回の失敗で止まり、15分後に解除する', () => {
+  let now = Date.parse('2026-10-17T00:00:00Z');
+  const r = new Remote({ file: path.join(tmp, 'global-lock.json'), now: () => now });
+  r.update({ passcode: 'global-lock-pass', enabled: true });
+  for (let i = 0; i < 20; i++) {
+    const who = whoOf({ headers: { forwarded: 'for=203.0.113.' + i } });
+    assert.equal(r.login('wrong', who).status, i === 19 ? 423 : 401);
+  }
+  assert.equal(r.login('global-lock-pass', 'new-source').status, 423);
+  now += 15 * 60000 + 1;
+  assert.equal(r.login('global-lock-pass', 'new-source').ok, true);
 });
 
 test('合言葉は scrypt で保存し、5回まちがえると15分止まる（時間が過ぎれば戻る）', () => {
@@ -93,6 +125,11 @@ test('オフの間は外からの通信をすべて断る', async () => {
   let res = await remoteReq('/api/state'); assert.equal(res.status, 403); assert.equal((await res.json()).error, '外からの利用はオフです');
   res = await remoteReq('/'); assert.equal(res.status, 403); assert.match(res.headers.get('content-type'), /text\/html/); assert.match(await res.text(), /外からの利用はオフです/);
   assert.equal((await remoteReq('/api/login', { body: { passcode: 'x' } })).status, 403);
+  for (const name of ['Forwarded', 'X-Real-IP', 'Via']) {
+    const headers = { [name]: 'proxy' };
+    assert.equal((await call('/api/state', { headers })).status, 403, name);
+    assert.equal((await call('/', { headers })).status, 403, name);
+  }
 });
 
 let cookie = '';
@@ -120,9 +157,30 @@ test('オンにすると合言葉でログインし、札（Cookie）が無け�
   res = await remoteReq('/api/state', { cookie }); assert.equal(res.status, 200); assert.equal((await res.json()).remote.enabled, true);
   assert.equal((await remoteReq('/', { cookie })).status, 200);
   assert.equal((await remoteReq('/app.js', { cookie })).status, 200);
+  for (const route of ['/api/app/rebuild']) assert.equal((await remoteReq(route, { cookie, body: {} })).status, 403);
+  assert.equal((await remoteReq('/api/chatgpt/plan/login', { cookie, body: {} })).status, 410);
   const r = await (await local('/api/remote')).json();
   assert.equal(r.sessions.length, 1); assert.equal(r.sessions[0].ua, 'iPhone Safari'); assert.equal(r.url, `https://${HOST}`);
   assert.doesNotMatch(JSON.stringify(r), new RegExp(cookie.split('=')[1]));
+});
+
+test('追加した中継の印だけでも認証を要求し、認証後も変更元の確認とローカル専用制限を守る', async () => {
+  for (const [name, value] of [['Forwarded', 'for=203.0.113.10;proto=https'], ['X-Real-IP', '203.0.113.11'], ['Via', '1.1 proxy']]) {
+    const headers = { Host: HOST, [name]: value };
+    assert.equal((await call('/api/state', { headers })).status, 401, name);
+    const page = await call('/', { headers }); assert.equal(page.status, 302); assert.equal(page.headers.get('location'), '/login');
+    assert.equal((await call('/api/state', { headers: { ...headers, Cookie: 'hub_session=forged' } })).status, 401);
+    const auth = { ...headers, 'X-Hub': '1', Origin: `https://${HOST}` };
+    const res = await call('/api/login', { method: 'POST', headers: auth, body: { passcode: 'iphone-pass-1' } });
+    assert.equal(res.status, 200, name);
+    const authenticated = { ...auth, Cookie: res.headers.get('set-cookie').split(';')[0] };
+    assert.equal((await call('/api/state', { headers: authenticated })).status, 200);
+    assert.equal((await call('/api/roles', { method: 'POST', headers: { ...authenticated, Origin: 'https://evil.example' }, body: {} })).status, 403);
+    assert.equal((await call('/api/app/rebuild', { method: 'POST', headers: authenticated, body: {} })).status, 403);
+    assert.equal((await call('/api/move/status', { headers: authenticated })).status, 403);
+    assert.equal((await call('/api/logout', { method: 'POST', headers: authenticated, body: {} })).status, 200);
+  }
+  assert.equal((await local('/api/state')).status, 200);
 });
 
 test('ログイン後は作業と設定をMacと同じ条件で操作し、未認証・別サイトからの変更は断る', async () => {
@@ -170,6 +228,15 @@ test('同じ相手から5回まちがえると423で15分止まり、別の相�
   assert.equal((await remoteReq('/api/login', { body: { passcode: 'iphone-pass-1' }, headers: other })).status, 423);
   assert.equal((await remoteReq('/api/login', { body: { passcode: 'iphone-pass-1' } })).status, 200);
   assert.equal(JSON.stringify(JSON.parse(fs.readFileSync(FILE, 'utf8')).failures).includes('guest@example.com'), true);
+});
+
+test('ForwardedとX-Real-IPだけの接続にも同じ相手の5回制限を適用する', async () => {
+  for (const headers of [{ Forwarded: 'for=203.0.113.20' }, { 'X-Real-IP': '203.0.113.21' }]) {
+    const request = passcode => call('/api/login', { method: 'POST', headers: { Host: HOST, 'X-Hub': '1', Origin: `https://${HOST}`, ...headers }, body: { passcode } });
+    for (let i = 0; i < 4; i++) assert.equal((await request('wrong')).status, 401);
+    assert.equal((await request('wrong')).status, 423);
+    assert.equal((await request('iphone-pass-1')).status, 423);
+  }
 });
 
 test('ログアウトはその端末だけ、すべての端末から出るは Mac から', async () => {

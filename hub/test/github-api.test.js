@@ -80,3 +80,48 @@ for (const failed of [false, true]) test(`HTTP start/verify share GitHub lock ac
   assert.equal((await post('/api/term/start',{project:'P',task:'direct',ai:'codex'})).status,200);
   assert.equal((await post('/api/maintenance/verify',{project:'Alias'})).status,200);
 });
+
+test('existing connection HTTP requires guards and confirmation, targets product and displays it in state and fresh link', async () => {
+  sessions.stopAll();
+  if(git('remote').split('\n').includes('origin'))git('remote','remove','origin');
+  const product=path.join(projectDir,'product');fs.mkdirSync(product,{recursive:true});
+  execFileSync('git',['-C',product,'init','-q']);
+  let lookups=0;
+  const repository={full_name:'kieiken/existing',private:true,permissions:{push:true},archived:false,default_branch:'main'};
+  const mocked=makeGithub({...githubOptions,dry:false,exec:async(file,args,opts)=>{
+    if(file==='git')return realExec(file,args,opts);
+    if(args[0]==='--version')return {stdout:'gh mock',stderr:''};
+    if(args[0]==='auth'&&args[1]==='status')return {stdout:'Logged in to github.com account kieiken\nActive account: true',stderr:''};
+    if(args[0]==='auth'&&args[1]==='token')return {stdout:'ghp_MOCK_ONLY',stderr:''};
+    if(args[0]==='api'){lookups++;return {stdout:JSON.stringify(repository),stderr:''};}
+    throw Error('Unexpected gh mutation');
+  }});Object.assign(githubHandle,mocked);
+  const preview=await(await post('/api/github/connect-preview',{project:'P',target:'product'})).json();
+  assert.equal(preview.folder,product);assert.deepEqual(preview.blockers,[]);
+  const body={project:'P',target:'product',account:'kieiken',repository:'kieiken/existing',expectedFolder:product,expectedHead:preview.head};
+  assert.equal((await post('/api/github/connect',body)).status,400);
+  assert.equal((await post('/api/github/connect',{...body,confirm:true},{})).status,403);
+  assert.equal((await post('/api/github/connect',{...body,confirm:true},{'X-Hub':'1',Origin:'https://evil.example'})).status,403);
+  assert.equal(lookups,0);
+  const listed=await(await post('/api/github/repositories',{account:'kieiken',query:'existing'})).json();assert.equal(listed.repositories[0].name,'kieiken/existing');
+  const connected=await post('/api/github/connect',{...body,confirm:true});assert.equal(connected.status,200);assert.equal((await connected.json()).pushed,false);
+  assert.equal(git('remote'),'');
+  const link=await(await fetch(base+'/api/project/github?project=P')).json();assert.equal(link.url,'https://github.com/kieiken/existing');assert.equal(link.target,'product');
+  const state=await(await fetch(base+'/api/state')).json();assert.equal(state.projects.find(p=>p.id==='P').github.target,'product');
+  assert.equal(JSON.stringify(state).includes('ghp_MOCK_ONLY'),false);
+});
+
+test('an active product ledger blocks outer-project connection without overwriting either origin',async()=>{
+  sessions.stopAll();
+  const product=path.join(projectDir,'product'),alias=path.join(root,'Product/ProductAlias');fs.mkdirSync(path.join(alias,'.ai/tasks'),{recursive:true});
+  fs.writeFileSync(path.join(alias,'PROJECT.md'),`---\nname: ProductAlias\nfolders:\n  本体: ${product}\n---\n`);
+  fs.writeFileSync(path.join(alias,'.ai/tasks/live.md'),`---\nid: live\ntitle: live\nstate: 実行中\nworkspaceMode: direct\nworkdir: ${product}\n---\n`);
+  const active={project:'ProductAlias',task:'live',running:true},list=sessions.list;
+  sessions.list=()=>[active];
+  try{
+    const preview=await(await post('/api/github/connect-preview',{project:'P',target:'product'})).json();
+    const response=await post('/api/github/connect',{project:'P',target:'product',account:'kieiken',repository:'kieiken/existing',expectedFolder:preview.folder,expectedHead:preview.head,confirm:true});
+    assert.equal(response.status,409);assert.match((await response.json()).error,/同じ本体でAI/);
+    assert.equal(execFileSync('git',['-C',product,'remote','get-url','origin'],{encoding:'utf8'}).trim(),'https://github.com/kieiken/existing.git');assert.equal(git('remote'),'');
+  }finally{sessions.list=list;}
+});

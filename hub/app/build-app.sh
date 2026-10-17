@@ -9,6 +9,19 @@ if [ -n "${HUB_STORAGE_GUARD:-}" ]; then
   "$HUB_STORAGE_GUARD" || exit $?
 fi
 HERE="$(cd "$(dirname "$0")/.." && pwd)"        # hub/
+if [ "${HUB_BUNDLE_RUNTIME:-0}" = "1" ] && [ -e "$HERE/lib/license/owner-edition.js" ]; then
+  echo "一般配布物には製作者版の印を含められません。公開用に抽出した本体から作成してください"
+  exit 1
+fi
+PACK=""
+if [ "$HUB_LANG" != "ja" ]; then
+  PACK="$(node - "$HERE" <<'NODEJS'
+const needs = process.env.HUB_BUNDLE_RUNTIME === '1' ? ['native', 'templates', 'seed', 'docs'] : ['native'];
+console.log(require(process.argv[2] + '/lib/locale').activePack(needs)?.directory || '');
+NODEJS
+)"
+  [ -n "$PACK" ] || export HUB_LANG=ja
+fi
 DEST="${HUB_APP_DIR:-$HOME/Applications}"
 VER="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$HERE/package.json" | head -n 1)"   # package.json の版
 TARGET="$DEST/Project Hub.app"
@@ -16,8 +29,8 @@ mkdir -p "$DEST"
 STAGE="$(mktemp -d "$DEST/.ProjectHub-build-XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 APP="$STAGE/Project Hub.app"
-BUILD_LOG="$HOME/Library/Logs/ProjectHub-build.log"
-mkdir -p "$HOME/Library/Logs"
+BUILD_LOG="${HUB_BUILD_LOG:-$HOME/Library/Logs/ProjectHub-build.log}"
+mkdir -p "$(dirname "$BUILD_LOG")"
 
 # 先に組み立てる。失敗したら、今のアプリには触らない（壊れたアプリを残さない）
 BIN=""
@@ -49,11 +62,11 @@ else
   fi
   # 開発ツールが無い時の代わり：台本で本体を起動してブラウザで開く
   EXEC="launch"
-  node - "$HERE" "$APP/Contents/MacOS/launch" "${HUB_ROOT:-}" "${HUB_STORAGE_GUARD:-}" "${HUB_UPDATE_APP:-$TARGET}" "$HUB_LANG" <<'NODE'
+  node - "$HERE" "$APP/Contents/MacOS/launch" "${HUB_ROOT:-}" "${HUB_STORAGE_GUARD:-}" "${HUB_UPDATE_APP:-$TARGET}" "$HUB_LANG" "$PACK" <<'NODE'
 const fs = require('fs');
-const [hub, file, root, guard, app, language] = process.argv.slice(2);
+const [hub, file, root, guard, app, language, pack] = process.argv.slice(2);
 const sq = s => "'" + s.replaceAll("'", "'\\''") + "'";
-const env = { HUB_LANG:language, HUB_DIR:hub, HUB_UPDATE_SOURCE:require('path').dirname(hub), HUB_UPDATE_APP:app };
+const env = { HUB_LANG:language, HUB_DIR:hub, HUB_UPDATE_SOURCE:require('path').dirname(hub), HUB_UPDATE_APP:app, HUB_LANGPACK_DIR:pack };
 if (root) env.HUB_ROOT = root;
 if (guard) env.HUB_STORAGE_GUARD = guard;
 fs.writeFileSync(file, '#!/bin/bash\n' + Object.entries(env).map(([k,v]) => 'export ' + k + '=' + sq(v)).join('\n') + '\nexec /bin/bash ' + sq(hub + '/app/run.sh') + '\n');
@@ -66,20 +79,44 @@ fi
 HUB_LOCATION="$HERE"
 APP_ROOT="${HUB_ROOT:-}"
 APP_GUARD="${HUB_STORAGE_GUARD:-}"
+APP_PACK="$PACK"
 if [ "${HUB_BUNDLE_RUNTIME:-0}" = "1" ]; then
   RUNTIME="$APP/Contents/Resources/runtime"
   mkdir -p "$RUNTIME/hub" "$RUNTIME/docs/project-hub"
-  for item in lib public locales node_modules server.js mcp.js package.json package-lock.json; do
+  for item in app lib public node_modules server.js mcp.js package.json package-lock.json; do
     [ -e "$HERE/$item" ] || { echo "同梱する本体がありません: $item"; exit 1; }
     cp -R "$HERE/$item" "$RUNTIME/hub/"
   done
   cp -R "$HERE/../docs/project-hub/templates" "$RUNTIME/docs/project-hub/"
+  # Embed the Keychain/continuous-clock bridge so recipients need no Swift compiler.
+  swiftc "${SWIFT_ARGS[@]}" -o "$RUNTIME/hub/lib/license/mac-native" "$HERE/lib/license/mac-native.swift"
   for item in README.md README.zh-TW.md LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.zh-TW.md; do
     cp "$HERE/../$item" "$RUNTIME/"
   done
-  for item in README.md README.zh-TW.md CHANGELOG.md CHANGELOG.zh-TW.md seed seed-zh-TW; do
+  for item in README.md CHANGELOG.md seed; do
     cp -R "$HERE/$item" "$RUNTIME/hub/"
   done
+  if [ -n "$PACK" ]; then
+    mkdir -p "$RUNTIME/langpacks/$HUB_LANG"
+    node - "$PACK" "$RUNTIME/langpacks/$HUB_LANG" <<'NODEPACK'
+const fs = require('node:fs'), path = require('node:path');
+const [source, destination] = process.argv.slice(2);
+const files = new Set(['pack.json', 'ui.json', 'backend.json', 'native.json', 'README.md']);
+function copy(directory, parts = []) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const next = [...parts, entry.name], file = path.join(directory, entry.name);
+    if (entry.isDirectory() && (parts.length || ['docs', 'templates', 'seed'].includes(entry.name))) copy(file, next);
+    else if (entry.isFile() && (next.length === 1 ? files.has(entry.name) : /(?:\.(?:json|md|yaml|yml|txt)|^\.gitkeep)$/.test(entry.name))) {
+      const target = path.join(destination, ...next);
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 });
+      fs.writeFileSync(target, fs.readFileSync(file), { mode: 0o644 });
+    }
+  }
+}
+copy(source);
+NODEPACK
+    APP_PACK="@bundle/runtime/langpacks/$HUB_LANG"
+  fi
   HUB_LOCATION="@bundle/runtime/hub"
   # Recipient workspace/guard are provided at launch, not copied from CI.
   APP_ROOT=""
@@ -87,23 +124,25 @@ if [ "${HUB_BUNDLE_RUNTIME:-0}" = "1" ]; then
 fi
 
 # 起動設定をXMLとしてエスケープして保存する（パスの & や引用符を保持）。
-node - "$HERE/package.json" "$APP/Contents/Info.plist" "$EXEC" "$HUB_LOCATION" "${HUB_PORT:-4545}" "$APP_ROOT" "$APP_GUARD" "$HUB_LANG" <<'NODE'
+node - "$HERE/package.json" "$APP/Contents/Info.plist" "$EXEC" "$HUB_LOCATION" "${HUB_PORT:-4545}" "$APP_ROOT" "$APP_GUARD" "$HUB_LANG" "$HERE/app/window.swift" "$APP_PACK" "$PACK" <<'NODE'
 const fs = require('fs');
-const [pkg, file, executable, hub, port, root, guard, language] = process.argv.slice(2);
+const [pkg, file, executable, hub, port, root, guard, language, shell, packDir, sourcePack] = process.argv.slice(2);
 const version = JSON.parse(fs.readFileSync(pkg)).version;
 const xml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
-const tr = (ja, zh) => language === 'zh-TW' ? zh : ja;
+const native = language !== 'ja' ? JSON.parse(fs.readFileSync(require('path').join(sourcePack, 'native.json'))) : {};
+const tr = ja => native[ja] || ja;
 const values = {
  CFBundleName:'Project Hub', CFBundleDisplayName:'Project Hub', CFBundleIdentifier:'local.projecthub',
- CFBundleVersion:version, CFBundleShortVersionString:version, CFBundleDevelopmentRegion:language === 'zh-TW' ? 'zh-TW' : 'ja',
+ CFBundleVersion:version, CFBundleShortVersionString:version, CFBundleDevelopmentRegion:language,
  CFBundlePackageType:'APPL', CFBundleExecutable:executable, CFBundleIconFile:'AppIcon', LSMinimumSystemVersion:'12.0',
- NSDocumentsFolderUsageDescription:tr('書類フォルダにあるプロジェクトの台帳と本体を読み書きするために使います。', '用於讀寫文件資料夾中的專案台帳與本體。'),
- NSDesktopFolderUsageDescription:tr('デスクトップにある資料を開くために使います。', '用於開啟桌面上的資料。'),
- NSAppleEventsUsageDescription:tr('Finder に、フォルダやファイルの場所を開いてもらうために使います。', '用於透過 Finder 開啟資料夾或檔案位置。'),
- NSDownloadsFolderUsageDescription:tr('ダウンロードフォルダにある資料を開くために使います。', '用於開啟下載資料夾中的資料。'),
- HubDir:hub, HubPort:port, HubRoot:root, HubStorageGuard:guard, HubLanguage:language
+ NSDocumentsFolderUsageDescription:tr('書類フォルダにあるプロジェクトの台帳と本体を読み書きするために使います。'),
+ NSDesktopFolderUsageDescription:tr('デスクトップにある資料を開くために使います。'),
+ NSAppleEventsUsageDescription:tr('Finder に、フォルダやファイルの場所を開いてもらうために使います。'),
+ NSDownloadsFolderUsageDescription:tr('ダウンロードフォルダにある資料を開くために使います。'),
+ HubShellHash:require('crypto').createHash('sha256').update(fs.readFileSync(shell)).digest('hex'),
+ HubDir:hub, HubPort:port, HubRoot:root, HubStorageGuard:guard, HubLanguage:language, HubLangpackDir:packDir
 };
-fs.writeFileSync(file, '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n' + Object.entries(values).map(([k,v]) => '<key>'+k+'</key><string>'+xml(v)+'</string>').join('\n') + '\n<key>CFBundleLocalizations</key><array><string>ja</string><string>zh-TW</string></array>\n<key>NSHighResolutionCapable</key><true/>\n<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>\n</dict></plist>\n');
+fs.writeFileSync(file, '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n' + Object.entries(values).map(([k,v]) => '<key>'+k+'</key><string>'+xml(v)+'</string>').join('\n') + '\n<key>CFBundleLocalizations</key><array><string>ja</string>' + (language !== 'ja' ? '<string>'+xml(language)+'</string>' : '') + '</array>\n<key>NSHighResolutionCapable</key><true/>\n<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>\n</dict></plist>\n');
 NODE
 
 # アイコン：app/icon.png（Codex が仕上げた 1024×1024）→ 無ければ見本の icon-concept.png から .icns を作る

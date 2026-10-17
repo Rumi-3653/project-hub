@@ -10,7 +10,7 @@ const chat = require('../lib/chat');
 const launch = require('../lib/launch');
 
 // 本物の CLI・利用者の台帳を呼ばず、渡された引数と会話を返す fixture で検証する。
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-delegate-'));
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-delegate-')));
 const root = path.join(tmp, 'workspace'), bin = path.join(tmp, 'bin');
 const dir = path.join(root, 'Product', '委任の試験');
 const key = { project: '委任の試験', task: 'existing' };
@@ -50,7 +50,10 @@ const ai=${JSON.stringify(ai)}, args=process.argv.slice(2);let input='';
 process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{
  const out=x=>console.log(JSON.stringify(x));
  // 入力中の質問形式のひな形を、fixture自身の質問として解釈させない。
- const text=JSON.stringify({ai,args,input:input.replaceAll('[[質問]]','（質問形式の説明）').replaceAll('[[/質問]]','（説明終わり）')});
+ // Keep the actual current prompt and previous requests, without recursively
+ // echoing earlier fixture responses' entire prompts into the conversation.
+ const echoed=input.split('\\n').map(line=>{try{const r=JSON.parse(line);if(typeof r.input==='string'&&Array.isArray(r.args))return JSON.stringify({...r,input:r.input.split('# 今回の依頼\\n').at(-1)});}catch{}return line;}).join('\\n');
+ const text=JSON.stringify({ai,args,input:echoed.replaceAll('[[質問]]','（質問形式の説明）').replaceAll('[[/質問]]','（説明終わり）')});
  setTimeout(()=>{
   if(ai==='claude'){
    out({type:'system',subtype:'init',session_id:'delegate-fixture'});
@@ -73,7 +76,7 @@ process.on('SIGTERM',()=>process.exit(143));
   const port = server.address().port;
   await new Promise(r => server.close(r));
   process.env.HUB_PORT = String(port);
-  delete require.cache[require.resolve('../server')];
+  require.cache[require.resolve('../server')]?.exports.stopControl.cleanExit();delete require.cache[require.resolve('../server')];
   ({ server, sessions } = require('../server'));
   await new Promise(r => server.listen(port, '127.0.0.1', r));
   base = `http://127.0.0.1:${port}`;
@@ -171,7 +174,7 @@ test('再起動後の保存済み委任は同じ作業の［始める］で再�
   await new Promise(r => server.close(r));
   fs.writeFileSync(queueFile, JSON.stringify([item]));
   const port = Number(process.env.HUB_PORT);
-  delete require.cache[require.resolve('../server')];
+  require.cache[require.resolve('../server')]?.exports.stopControl.cleanExit();delete require.cache[require.resolve('../server')];
   ({ server, sessions } = require('../server')); await new Promise(r => server.listen(port, '127.0.0.1', r));
   const result = await (await post('/api/chat/send', { fromQueue: item.id })).json();
   assert.equal(result.ok, true); assert.equal(result.model, 'Fable 5.1');
@@ -187,8 +190,12 @@ test('［止める］は現在の AI と委任の順番待ちを止め、勝手�
   assert.equal((await post('/api/chat/stop', {})).status, 200);
   const row = await waitReplies(6);
   assert.equal(row.ai, 'codex'); assert.equal(row.error, '止めました');
-  assert.deepEqual(JSON.parse(fs.readFileSync(queueFile, 'utf8')), []);
+  const held=JSON.parse(fs.readFileSync(queueFile,'utf8'));assert.equal(held.length,1);assert.equal(held[0].stopHeld,true);
   assert.equal(tasks().length, 2);
+  // This fixture explicitly releases the new stop barrier and cancels its
+  // retained request before the independent next scenario.
+  assert.equal((await post('/api/ai/resume',{confirm:true})).status,200);
+  require('../server').chats.setQueue(key.project,key.task,[]);
 });
 
 test('待っている間にモデル名が無効になっても、理由を表示して待ち順を保持し既定で起動しない', async () => {
@@ -410,7 +417,7 @@ test('統合画面の衝突解消は設定のコーディング担当へ既存�
  for(const title of ['A','B']){const c=store.createTask(project,{title,parent:parent.id,steps:['完成']}),w=git.prepare({base:body,workRoot:path.join(root,'Work',project),taskId:c.id});store.updateTask(project,c.id,{workdir:w.dir});store.setStep(project,c.id,0,true);fs.writeFileSync(path.join(w.dir,'base.txt'),title+'\n');git.save(w.dir,title);kids.push({...c,copy:w.dir});}
  const request=(route,b)=>post(route,{project,task:parent.id,...b});
  let res=await request('/api/task/integrate/preview',{}),d=await res.json();assert.equal(res.status,200);
- const select=kids.map(c=>{const i=d.items.find(i=>i.task===c.id);return {project,task:c.id,files:i.selected};});
+ const select=kids.map(c=>{const i=d.items.find(i=>i.task===c.id);return {project,task:c.id,disposition:'cleanup',review:{...i.review,confirmed:true,residual:'なし',undecided:'なし'},files:i.selected};});
  res=await request('/api/task/integrate',{token:d.token,selected:select,confirm:true});assert.equal(res.status,200);assert.equal((await res.json()).partial,true);
  res=await request('/api/task/integrate/preview',{});d=await res.json();
  const resolve={token:d.token,childProject:project,childTask:kids[1].id};
@@ -430,7 +437,7 @@ test('成果記録の無い完了子は画面の明示操作でOpusへ戻し、�
  // ゲート導入前に承認された旧子を再現する（現APIでは記録なしの新規承認は拒否）。
  assert.equal(store.decideTask(key.project,kid.id,'approve',store.readTask(store.taskFile(key.project,kid.id)).completionHash).state,'完了');
  // 稼働中のStoreとは承認メモリが別なので、旧承認の読込まで再現する。
- await new Promise(r=>server.close(r));delete require.cache[require.resolve('../server')];({server,sessions}=require('../server'));await new Promise(r=>server.listen(Number(process.env.HUB_PORT),'127.0.0.1',r));
+ await new Promise(r=>server.close(r));require.cache[require.resolve('../server')]?.exports.stopControl.cleanExit();delete require.cache[require.resolve('../server')];({server,sessions}=require('../server'));await new Promise(r=>server.listen(Number(process.env.HUB_PORT),'127.0.0.1',r));
  const before=tasks(),input={project:key.project,task:parent.id};
  let r=await post('/api/task/integrate/preview',input),d=await r.json();assert.equal(r.status,200,JSON.stringify(d));assert.equal(d.items[0].needsResults,true);assert.deepEqual(d.items[0].files,[]);
  const b={...input,childProject:key.project,childTask:kid.id,token:d.token};
@@ -458,7 +465,7 @@ test('成果ゲート：最後の手順から一度だけ整理し、古い承�
  r=await post('/api/task/results/organize',{...b,expectedHash:child.completionHash});assert.equal(r.status,200,JSON.stringify(await r.json()));
  for(let i=0;i<250&&responses().length<2;i++)await new Promise(r=>setTimeout(r,20));await new Promise(r=>setTimeout(r,80));assert.equal(responses().length,2);
  fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace('自由書式の成果','- なし：確認のみ'));
- all=await (await fetch(base+'/api/state')).json();child=all.projects.find(p=>p.id===key.project).tasks.find(t=>t.id===kid.id);assert.equal(child.completionPending,true);assert.equal(child.resultsPending,undefined);
+ for(let i=0;i<100;i++){all=await (await fetch(base+'/api/state')).json();child=all.projects.find(p=>p.id===key.project).tasks.find(t=>t.id===kid.id);if(child.completionPending)break;await new Promise(r=>setTimeout(r,20));}assert.equal(child.completionPending,true);assert.equal(child.resultsPending,undefined);
  r=await post('/api/task/completion',{...b,action:'approve',confirm:true,expectedHash:child.completionHash});assert.equal(r.status,200,JSON.stringify(await r.json()));
 });
 
@@ -472,3 +479,49 @@ test('AI番終了でも成果整理を起動し、読込だけ・質問待ち・
  const q=make('質問待ち子');store.updateTask(key.project,q.id,{state:'返事待ち',question:'選ぶ'});
  r=await post('/api/task/step',{project:key.project,task:q.id,index:0,done:true});assert.equal(r.status,200);await new Promise(r=>setTimeout(r,80));assert.equal(chat.read(dir,q.id).filter(r=>r.role==='assistant').length,0);
 });
+
+ test('特殊モード：未指定は選んだAI、明示指定は一度優先、続きは特殊AI、解除で役割へ戻る', async () => {
+  const setMode = mode => fetch(base + '/api/special-mode', { method: 'POST', headers: { 'X-Hub': '1', 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify(mode) });
+  const rolesFile = path.join(root, '_hub/roles.yaml'), originalRoles = fs.readFileSync(rolesFile);
+  const request = async body => {
+    const count = replies().length;
+    const res = await delegate(body); assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    const row = await waitReplies(count + 1);
+    for (let i = 0; i < 150 && sessions.list().some(s => s.running); i++) await new Promise(r => setTimeout(r, 20));
+    // The manager can still be finalizing its reply at this point.
+    for (let i = 0; i < 150; i++) { const state = await (await fetch(base + '/api/state')).json(); if (!state.chatting.length) break; await new Promise(r => setTimeout(r, 20)); }
+    return { row, received: JSON.parse(row.text) };
+  };
+  assert.equal((await setMode({ enabled: true, ai: 'codex' })).status, 200);
+  let result = await request({ ai: 'claude', role: '文章' });
+  assert.equal(result.row.ai, 'codex'); assert.equal(result.row.model, 'GPT-6.1-Sol');
+  assert.match(result.received.input, /特殊モード.*通常の役割分担より優先/);
+  let full = fs.readFileSync(path.join(dir, '.ai/chat/existing.rules.md'), 'utf8');
+  assert.match(full, /同じAI内のモデル・思考は作業に合わせてAIが選んでよい/);
+  assert.match(full, /特殊モード中は別のAIへ自動交代せず/);
+  assert.doesNotMatch(full, /mainの上限ではbackupへ/);
+  assert.match(full, /同じ作業のcodex・gpt-6.1-solへ確認範囲/); // the checker slot follows the special AI in the new template
+  result = await request({ ai: 'claude', model: 'claude-fable-5-1' });
+  assert.equal(result.row.ai, 'claude'); assert.equal(result.row.model, 'Fable 5.1');
+  result = await request({ ai: 'claude', role: 'チェック' }); assert.equal(result.row.ai, 'codex');
+  assert.equal((await setMode({ enabled: true, ai: 'claude' })).status, 200);
+  result = await request({ ai: 'codex', role: 'コーディング' }); assert.equal(result.row.ai, 'claude'); assert.equal(result.row.model, 'Opus 5.5');
+  assert.equal((await setMode({ enabled: false, ai: 'claude' })).status, 200);
+  result = await request({ ai: 'codex', role: 'コーディング' }); assert.equal(result.row.ai, 'codex');
+  full = fs.readFileSync(path.join(dir, '.ai/chat/existing.rules.md'), 'utf8'); assert.doesNotMatch(full, /【特殊モード/);
+  assert.deepEqual(fs.readFileSync(rolesFile), originalRoles);
+ });
+
+ test('特殊モードの上限保持：会話・ターミナルとも起動せず、解除後に同じAIで再開', async () => {
+  const mode = enabled => fetch(base + '/api/special-mode', { method: 'POST', headers: { 'X-Hub': '1', 'Content-Type': 'application/json', Connection: 'close' }, body: JSON.stringify({ enabled, ai: 'codex' }) });
+  assert.equal((await mode(true)).status, 200);
+  const limits = new (require('../lib/model-limits').ModelLimits)(path.join(root, '_hub/limits.json'));
+  limits.record({ ai: 'codex', model: 'GPT-6.1-Sol', project: key.project, task: key.task, request: 'fixture', limitError: 'Usage limit reached' });
+  const before = replies().length;
+  let r = await delegate({ ai: 'codex', model: 'gpt-6.1-sol' }); assert.equal(r.status, 409); assert.match((await r.json()).error, /特殊モード.*上限中/);
+  r = await post('/api/term/start', { ai: 'codex' }); assert.equal(r.status, 409); assert.match((await r.json()).error, /特殊モード.*上限中/);
+  assert.equal(replies().length, before);
+  for (const model of ['gpt-6.1-sol', 'gpt-6-astra']) limits.clear('default', model);
+  r = await delegate({ ai: 'codex', model: 'gpt-6.1-sol' }); assert.equal(r.status, 200); assert.equal((await waitReplies(before + 1)).ai, 'codex');
+  assert.equal((await mode(false)).status, 200);
+ });

@@ -11,12 +11,22 @@ if [ -n "${HUB_STORAGE_GUARD:-}" ]; then
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${HUB_ROOT:-$HOME/Documents/AI-Workspace}"
+FRESH_SEED=0
+[ -e "$ROOT" ] || FRESH_SEED=1
 export HUB_LANG="${HUB_LANG:-ja}"
+PACK=""
+if [ "$HUB_LANG" != "ja" ]; then
+  PACK="$(node - "$HERE" <<'NODE'
+const { activePack } = require(process.argv[2] + '/lib/locale');
+console.log(activePack(['templates', 'seed'])?.directory || '');
+NODE
+)"
+fi
 TPL="$HERE/../docs/project-hub/templates"
 SEED="$HERE/seed"
-if [ "$HUB_LANG" = "zh-TW" ]; then
-  TPL="$TPL/zh-TW"
-  SEED="$HERE/seed-zh-TW"
+if [ -n "$PACK" ]; then
+  TPL="$PACK/templates"
+  SEED="$PACK/seed"
 fi
 
 mkdir -p "$ROOT/_hub" "$ROOT/Product" "$ROOT/Work"
@@ -38,6 +48,14 @@ for seed in "$SEED"/*/; do
   find "$dest" -name .gitkeep -delete
   echo "作成: $name"
 done
+
+# Only a newly created, untouched seed can be automatically replaced by a move.
+# Never refresh the receipt over existing user data.
+if [ "$FRESH_SEED" = "1" ]; then
+  node - "$HERE" "$ROOT" <<'NODE'
+require(process.argv[2] + '/lib/move').writeSeedReceipt(process.argv[3]).catch(e => { console.error(e.message); process.exitCode = 1; });
+NODE
+fi
 
 # 画面の中の作業画面に使う部品
 if [ "${HUB_SKIP_NPM:-0}" != "1" ]; then

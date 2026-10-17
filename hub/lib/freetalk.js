@@ -4,11 +4,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { scalar, setScalar, parseDoc } = require('./frontmatter');
-const { noLinks, exists } = require('./remove');
+const { noLinks, readNoLinks, exists } = require('./remove');
 const ID = 'freetalk';
 const PROTECTED = lt('freetalk は常設の会話枠です。解除・並べ替え・完了・削除・統合・取り込みはできません');
 const TOPIC_RULE = lt('話題が変わったと感じたら「別の話題に分けますか」と一言提案し、自動では分けない。');
 const SETTINGS = lt`# freetalk\n自由対話の場所です。人の相談に答えてください。\n${TOPIC_RULE}\n手順・フェーズ・完了承認・成果引渡し・作業用コピーは使いません。\n別の話題の会話・記録を自動で読み込まないでください。\nAI の設定を変更せず、ファイル作成や整理は人の依頼の範囲で行ってください。\n担当モデルは Hub が今回の起動で指定したものを使ってください。\n`;
+function attachmentName(name) {
+  const safe=path.basename(String(name || 'file')).replace(/[^\p{L}\p{N}._-]/gu,'_'),ext=path.extname(safe).slice(0,10);
+  return safe.length>80 ? safe.slice(0,80-ext.length)+ext : safe;
+}
 // Macで同じフォルダを指す表記も保護する。会話は正規IDだけで扱う。
 function isTarget(value) {
   return typeof value === 'string' && (value.toLowerCase() === ID || value.toLowerCase().startsWith(ID + '/'));
@@ -26,8 +30,8 @@ function guard(route, body) {
   if (route === '/api/project/new' && typeof body.name === 'string' && isTarget(body.name.trim())) return PROTECTED;
   if (hasTarget(body, true)) return lt('freetalk は正規の名前「freetalk」で指定してください。') + PROTECTED;
   if (!hasTarget(body)) return '';
-  if (['/api/freetalk/project-preview','/api/freetalk/promote','/api/freetalk/clean','/api/freetalk/delete','/api/freetalk/summary','/api/freetalk/rotate','/api/chat/send','/api/chat/note','/api/chat/stop','/api/chat/unqueue','/api/delegate','/api/task/read',
-    '/api/task/attach','/api/acceleration/task','/api/accounts/select','/api/chatgpt/prompt','/api/chatgpt/result'].includes(route)) return '';
+  if (['/api/freetalk/project-start','/api/freetalk/project-preview','/api/freetalk/promotion-intent','/api/freetalk/promote','/api/freetalk/clean','/api/freetalk/delete','/api/freetalk/summary','/api/freetalk/rotate','/api/chat/send','/api/chat/note','/api/chat/stop','/api/chat/unqueue','/api/webchat/retry','/api/webchat/stop','/api/delegate','/api/task/read',
+    '/api/task/attach','/api/reveal','/api/acceleration/task','/api/accounts/select','/api/chatgpt/prompt','/api/chatgpt/result','/api/roles/review','/api/discussion/start','/api/discussion/summary'].includes(route)) return '';
   if (route === '/api/task' && !Object.keys(body).some(k => !['project','task','state','question','memo','owner','model','effort'].includes(k)) && body.state !== '完了') return '';
   return PROTECTED;
 }
@@ -37,12 +41,13 @@ class Freetalk {
     this.dir = path.join(this.home, 'Documents', ID);
     this.ledger = path.join(store.product, ID);
     this.result = { ready: false, reason: '' };
+    this.uploads = new Map();
   }
   status() { return { ...this.result }; }
   verify() {
-    noLinks(this.dir); noLinks(this.ledger);
-    for (const file of ['AGENTS.md', 'CLAUDE.md', '.ai/rules.md', '.ai/freetalk.json']) noLinks(path.join(this.dir, file));
-    noLinks(path.join(this.ledger, 'PROJECT.md'));
+    readNoLinks(this.dir); readNoLinks(this.ledger);
+    for (const file of ['AGENTS.md', 'CLAUDE.md', '.ai/rules.md', '.ai/freetalk.json']) readNoLinks(path.join(this.dir, file));
+    readNoLinks(path.join(this.ledger, 'PROJECT.md'));
     const p = this.store.readProject(ID);
     const marker = JSON.parse(fs.readFileSync(path.join(this.dir, '.ai/freetalk.json'), 'utf8'));
     const meta = parseDoc(fs.readFileSync(path.join(this.ledger, 'PROJECT.md'), 'utf8')).data;
@@ -80,13 +85,13 @@ class Freetalk {
     }
     return this.status();
   }
-  createTopic(pick) {
+  createTopic(pick, { title } = {}) {
     if (!this.result.ready) throw Error(this.result.reason || lt('freetalk をまだ作成できていません'));
     const p = this.verify(), day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const id = require('./task-ids').reserveTaskId(this.store, ID, p.dir, day);
     const file = path.join(p.dir, '.ai/tasks', id + '.md');
     noLinks(path.dirname(file)); fs.mkdirSync(path.dirname(file),{recursive:true});
-    fs.writeFileSync(file, `---\nid: ${id}\ntitle: ${lt('新しい話題')}\nfreetalk: true\ntitleAssigned: false\nstate: 未着手\nworkspaceMode: direct\nworkdir: ${scalar(this.dir)}\nowner: ${scalar(pick.ai === 'claude' ? 'Claude Code' : pick.ai === 'chatgpt' ? 'ChatGPT' : pick.ai === 'agy' ? 'Agy CLI' : pick.ai === 'grok' ? 'Grok' : 'Codex')}\nmodel: ${scalar(pick.model)}\neffort: ${scalar(pick.effort)}\nquestion:\nupdated: ${new Date().toISOString()}\n---\n# 自由対話\n`, { flag: 'wx' });
+    fs.writeFileSync(file, `---\nid: ${id}\ntitle: ${scalar(title || lt('新しい話題'))}\nfreetalk: true\ntitleAssigned: ${Boolean(title)}\nstate: 未着手\nworkspaceMode: direct\nworkdir: ${scalar(this.dir)}\nowner: ${scalar(pick.ai === 'claude' ? 'Claude Code' : pick.ai === 'chatgpt' ? 'ChatGPT' : pick.ai === 'agy' ? 'Agy CLI' : pick.ai === 'grok' ? 'Grok' : 'Codex')}\nmodel: ${scalar(pick.model)}\neffort: ${scalar(pick.effort)}\nquestion:\nupdated: ${new Date().toISOString()}\n---\n# 自由対話\n`, { flag: 'wx' });
     return this.store.readTask(file);
   }
   nameTopic(task, speech) {
@@ -102,11 +107,31 @@ class Freetalk {
     if (!fs.existsSync(topic)) throw Error(lt('話題が見つかりません'));
     const dir = path.join(this.dir, 'topics', task); noLinks(dir);
     fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, randomUUID() + '-' + path.basename(String(name || 'file')).replace(/[^\p{L}\p{N}._-]/gu, '_').slice(0, 80));
-    fs.writeFileSync(file, data, { flag: 'wx' }); return file;
+    const file = path.join(dir, randomUUID() + '-' + attachmentName(name));
+    const tmp = file + '.uploading';
+    try { fs.writeFileSync(tmp, data, { flag: 'wx' }); fs.renameSync(tmp, file); }
+    catch (e) { if (exists(tmp)) fs.unlinkSync(tmp); throw e; }
+    return file;
+  }
+  uploadReason(task) {
+    return (task ? this.uploads.get(task) : this.uploads.size) ? lt('添付ファイルを追加中です。終了後に操作してください') : '';
+  }
+  checkGeneration(task, generation) {
+    this.history.topic(task);
+    const state = this.history.state(task);
+    if (state.migrated) throw Error(lt('移行済みの話題は読み取り専用です'));
+    if(state.summary?.intent==='promote' && state.summary.automatic && !state.summary.automatic.error)throw Error(lt('プロジェクトへの移行中です。完了までお待ちください'));
+    if (!Number.isSafeInteger(generation) || generation !== state.generation) throw Error(lt('会話が切り替わりました。新しい会話を開いてください'));
+    if (this.lifecycle?.operating) throw Error(lt('プロジェクト化・掃除の途中です。終了後に操作してください'));
+  }
+  holdUpload(task, generation) {
+    this.checkGeneration(task, generation);
+    this.uploads.set(task, (this.uploads.get(task) || 0) + 1);
+    let released = false;
+    return () => { if (released) return; released = true; const n = this.uploads.get(task) - 1; if (n) this.uploads.set(task, n); else this.uploads.delete(task); };
   }
   prompt(p, t) {
     return `自由対話「${t.title}」。人の相談に答えてください。\ncwd=${this.dir}。AI 設定は AGENTS.md・CLAUDE.md・.ai/rules.md。\n${TOPIC_RULE}\nこの話題以外の会話・作業ファイル・メモリは自動で読みません。手順・フェーズ・完了承認・成果引渡し・作業用コピーは使いません。新しい話題は人が［新しい話題］から作ります。\n台帳=${p.dir}。話題ファイル=${this.store.taskFile(p.id, t.id)}。必要なメモは同じ話題ファイルと台帳/.ai/memory/${t.id}/だけに記録し、state・question・workdir は書き換えません。`;
   }
 }
-module.exports = { Freetalk, ID, PROTECTED, TOPIC_RULE, guard, hasTarget };
+module.exports = { Freetalk, ID, PROTECTED, TOPIC_RULE, guard, hasTarget, attachmentName };

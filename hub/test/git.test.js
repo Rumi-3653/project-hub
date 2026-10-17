@@ -15,6 +15,23 @@ process.env.HUB_TRASH = path.join(tmp, 'Trash');
 const sh = (dir, ...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 const W = path.join(tmp, 'Work', 'P');
 
+test('同じtreeのnoChangesは両向きの祖先を認め、分岐した未受領の履歴は除外する', () => {
+  const main = repo('same-tree-preview'), workRoot = path.join(tmp, 'Work', 'same-tree-preview');
+  const copy = g.prepare({ base: main, workRoot, taskId: 'copy' }).dir;
+  const preview = () => g.preview({ dir: copy, workRoot });
+  assert.strictEqual(preview().noChanges, true);
+  sh(copy, 'commit', '--allow-empty', '-qm', 'copy history');
+  assert.strictEqual(preview().noChanges, true);
+  sh(main, 'merge', '--no-ff', '-qm', 'received', sh(copy, 'rev-parse', 'HEAD'));
+  assert.strictEqual(g.isAncestor(copy, sh(main, 'rev-parse', 'HEAD')), false);
+  assert.strictEqual(preview().noChanges, true);
+  sh(main, 'commit', '--allow-empty', '-qm', 'main history');
+  sh(copy, 'commit', '--allow-empty', '-qm', 'unreceived history');
+  assert.strictEqual(sh(main, 'rev-parse', 'HEAD^{tree}'), sh(copy, 'rev-parse', 'HEAD^{tree}'));
+  assert.strictEqual(preview().files, 0);
+  assert.strictEqual(preview().noChanges, false);
+});
+
 function repo(name) {
   const d = path.join(tmp, name);
   fs.mkdirSync(d, { recursive: true });
@@ -263,4 +280,16 @@ test('1MiBを超える未追跡一覧と保存待ちを照合し、秘密設定�
   assert.notStrictEqual(saved, before);
   assert.strictEqual(g.save(main, 'secret-only change'), false);
   assert.strictEqual(read('rev-parse', 'HEAD'), saved);
+});
+
+test('一覧のremoteSummaryは同期gitと識別設定を呼ばず、期限切れも保持値を返す',async t=>{
+ const dir=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'hub-remote-summary-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ execFileSync('git',['init','-q',dir]);execFileSync('git',['-C',dir,'remote','add','origin','git@github.com:owner/example.git']);
+ const first=g.remoteSummary(dir);assert.deepEqual(first,{value:null,hasOrigin:false});
+ for(let n=0;n<100&&!g.remoteInfoCache.has(dir);n++)await new Promise(r=>setTimeout(r,10));
+ const ready=g.remoteSummary(dir);assert.equal(ready.hasOrigin,true);assert.equal(ready.value.url,'https://github.com/owner/example');
+ execFileSync('git',['-C',dir,'remote','set-url','origin','https://github.com/owner/changed.git']);ready.at=0;
+ assert.equal(g.remoteSummary(dir).value.url,'https://github.com/owner/example');
+ for(let n=0;n<100&&g.remoteInfoCache.get(dir)===ready;n++)await new Promise(r=>setTimeout(r,10));
+ assert.equal(g.remoteSummary(dir).value.url,'https://github.com/owner/changed');
 });

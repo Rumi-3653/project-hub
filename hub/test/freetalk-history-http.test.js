@@ -59,10 +59,11 @@ test('2段目HTTP：待機中拒否・確認済クリア後旧セッション不
  const response=JSON.parse(chat.read(pdir,a.id).at(-1).text);assert.doesNotMatch(response.input,/人が確認・編集した旅行計画|まだ作業中/);
 });
 
-test('2段目HTTP：ChatGPTは貼る経路で要約、人の確認前は元会話を保持',async()=>{
- await post('/api/chatgpt/result',{project:'freetalk',task:b.id,text:'ChatGPTの元の相談'});
- const r=await post('/api/freetalk/summary',{project:'freetalk',task:b.id});assert.equal(r.status,200);const body=await r.json();assert.equal(body.manual,true);assert.match(body.text,/要約/);
- assert.match(chat.read(pdir,b.id)[0].text,/他の話題/);
- await post('/api/chatgpt/result',{project:'freetalk',task:b.id,text:'貼って受け取った要約'});const h=await status(b.id);assert.equal(h.draft,'貼って受け取った要約');
- const done=await post('/api/freetalk/rotate',{project:'freetalk',task:b.id,confirm:true,revision:h.revision,summaryId:h.summaryId,summary:'人が編集したChatGPTの要約'});assert.equal(done.status,200);assert.equal(chat.read(pdir,b.id).length,1);assert.match(chat.read(pdir,b.id)[0].text,/人が編集したChatGPT/);
+test('旧ChatGPTの要約と貼付APIを拒否し、元会話と要約予約を変更しない',async()=>{
+ chat.append(pdir,b.id,{role:'assistant',ai:'chatgpt',text:'ChatGPTの元の相談'});
+ const rows=chat.read(pdir,b.id),before=await status(b.id);
+ const r=await post('/api/freetalk/summary',{project:'freetalk',task:b.id});assert.equal(r.status,410);
+ assert.match((await r.json()).error,/選び直してください/);
+ for(const route of ['/api/chatgpt/prompt','/api/chatgpt/result']) assert.equal((await post(route,{project:'freetalk',task:b.id,text:'new'})).status,410);
+ assert.deepEqual(chat.read(pdir,b.id),rows);assert.deepEqual(await status(b.id),before);
 });

@@ -4,15 +4,16 @@ process.env.HUB_LANG = 'ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),vm=require('vm');
 function app() {
   const events={},elements=new Map(),messages=[],calls=[];
-  function el(s) {if(!elements.has(s))elements.set(s,{innerHTML:'',hidden:true,style:{},dataset:{},scrollTop:100,addEventListener(){},setAttribute(){},querySelector:()=>({focus(){}}),querySelectorAll:()=>[],getBoundingClientRect:()=>({top:0,bottom:500})});return elements.get(s);}
-  const document={querySelector:el,querySelectorAll:()=>nodes,body:{classList:{contains:()=>false,remove(){}}},addEventListener:(type,fn,capture)=>{(events[type]||=[]).push({fn,capture});}};
+  function el(s) {if(s==='.work-compact .work-attention')return null;if(!elements.has(s))elements.set(s,{innerHTML:'',hidden:true,style:{},dataset:{},scrollTop:100,addEventListener(){},setAttribute(){},querySelector:()=>({focus(){}}),querySelectorAll:()=>[],getBoundingClientRect:()=>({top:0,bottom:500})});return elements.get(s);}
+  const document={querySelector:el,querySelectorAll:s=>s==='.project-drop-before,.project-drop-after'?nodes:[],body:{classList:{contains:()=>false,remove(){}}},addEventListener:(type,fn,capture)=>{(events[type]||=[]).push({fn,capture});}};
   const context=vm.createContext({document,window:{},navigator:{userAgent:''},console,innerWidth:1024,innerHeight:700,URLSearchParams,location:{hostname:'127.0.0.1'},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>new Promise(()=>{}),setInterval(){},clearInterval(){},setTimeout(){},clearTimeout(){},requestAnimationFrame(){},matchMedia:()=>({matches:false}),ModelOrder:require('../public/model-order'),ProjectOrder:require('../public/project-order')});
   const nodes=[];
+  context.window.HubChatHistory = require('../public/chat-history');
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'),context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/hierarchy.js'),'utf8'),context);
   context.stubApi=async(route,body)=>{calls.push({route,body:JSON.parse(JSON.stringify(body))});if(context.fail)throw Error('fixture save failed');return{};};
   context.stubToast=text=>messages.push(text);
-  vm.runInContext(`api=stubApi;toast=stubToast;load=async()=>{};state={projects:['a','b','c','d'].map((id,i)=>({id,name:id,parent:i>1?'a':'',phases:[],tasks:[],status:'進行中'})),sessions:[],chatting:[],unread:[],projectOrder:{'':['b','a'],a:['d','c']}};view={kind:'project',project:'a'};`,context);
+  vm.runInContext(`api=stubApi;toast=stubToast;load=async()=>{};state={roles:{roles:[],models:{},permissions:{}},projects:['a','b','c','d'].map((id,i)=>({id,name:id,parent:i>1?'a':'',phases:[],tasks:[],status:'進行中'})),sessions:[],chatting:[],unread:[],projectOrder:{'':['b','a'],a:['d','c']}};view={kind:'project',project:'a'};`,context);
   function node(id,task=false) {
     const own=new Set();const n={dataset:{p:id,...(task?{t:'task'}:{})},classList:{add:x=>own.add(x),remove:(...xs)=>xs.forEach(x=>own.delete(x)),contains:x=>own.has(x)},getBoundingClientRect:()=>({top:100,height:40}),contains:()=>false,closest:selector=>selector==='#list' || (!task&&selector.includes('.node.p')) ? n : null};nodes.push(n);return n;
   }
@@ -65,7 +66,7 @@ test('phone uses saved terminal mode and renders file/completion/mode controls w
 test('一覧で子だけ下階層、分岐の元名を文字表示、子/派生に共通の引渡しを出す',()=>{
  const a=app();a.context.EventSource=class{close(){}};a.run(`state.projects=[{id:'p',name:'親',phases:[],status:'進行中',tasks:[{id:'base',title:'本作業',kind:'main',steps:[],skills:[]},{id:'kid',title:'小作業',parent:'base',kind:'main',steps:[],skills:[]},{id:'fork',title:'別案',parent:'base',kind:'derived',derivedFrom:'p/base',steps:[],skills:[]}]},{id:'child',name:'子',parent:'p',phases:[],tasks:[]},{id:'branch',name:'分岐案',parent:'p',derivedFrom:'p',phases:[],tasks:[]}];state.projectOrder={};open.add('p');open.add('t:p/base');renderTree();`);
  const html=a.el('#list').innerHTML;assert.match(html,/⑂ 分岐：親から/);assert.match(html,/⑂ 分岐：本作業から/);assert.ok(html.indexOf('data-t="base"')<html.indexOf('data-t="fork"'));assert.equal(a.run('displayParent(proj("branch"),state.projects)'),'');assert.equal(a.run('treeTasks(proj("p")).find(x=>x.id==="fork").parent'),'');
- a.run(`state.roles={models:{codex:[]},roles:[]};state.efforts=[];view={kind:'work',project:'p',task:'kid'};renderWork();`);assert.doesNotMatch(a.el('#main').innerHTML,/data-act="handup"/);
+ a.run(`state.roles={models:{codex:[]},roles:[]};state.efforts=[];view={kind:'work',project:'p',task:'kid'};renderWork();`);assert.match(a.el('#main').innerHTML,/成果を渡す（途中）/);
  a.run(`proj('p').tasks[1].state='完了';proj('p').tasks[1].copy=true;renderWork();`);assert.match(a.el('#main').innerHTML,/成果を渡す/);assert.doesNotMatch(a.el('#main').innerHTML,/data-act="merge"/);
  a.run(`view.task='fork';proj('p').tasks[2].state='完了';renderWork();`);assert.match(a.el('#main').innerHTML,/成果を渡す/);
 });
@@ -179,4 +180,12 @@ test('R4 祖先が統合する対象外の子には戻す操作だけを残し�
  let html=a.el('#main').innerHTML;assert.match(html,/data-act="mergeinclude"/);assert.doesNotMatch(html,/data-act="merge"|data-act="mergeexclude"/);
  await a.context.act({dataset:{act:'mergeinclude',p:'p',t:'kid'}});assert.deepEqual(a.calls.at(-1),{route:'/api/task/merge-exclusion',body:{project:'p',task:'kid',excluded:false}});
  a.run(`proj('p').tasks[1].mergeExcluded=false;renderWork();`);html=a.el('#main').innerHTML;assert.doesNotMatch(html,/data-act="merge"|data-act="mergeinclude"|data-act="mergeexclude"/);assert.match(html,/成果を渡す/);
+});
+
+test('途中offerを親に表示し、受領後も子の保存数と継続案内を表示する',()=>{
+ const a=app();a.run(`state.projects=[{id:'p',name:'親',tasks:[{id:'parent',title:'本作業',steps:[]},{id:'kid',title:'続き',parent:'parent',steps:[{done:false}],question:'実試験'}]}];state.taskOffers=[{project:'p',task:'kid',targetProject:'p',targetTask:'parent',pending:true,receiptChecked:true,partial:true,handedUp:true,received:{head:'123456789',at:'2026-10-09',pendingCommits:2}}];`);
+ const offered=a.run('kidsDoneBar(proj("p"),proj("p").tasks[0])');assert.match(offered,/統合…/);assert.equal((offered.match(/data-act="integrate"/g)||[]).length,1);
+ assert.match(a.run('partialReceiptBar(proj("p"),proj("p").tasks[1])'),/途中受領済み：1234567.*保存 2 件/);
+ a.run('state.taskOffers[0].handedUp=false;state.taskOffers[0].pending=false');const received=a.run('kidsDoneBar(proj("p"),proj("p").tasks[0])');assert.doesNotMatch(received,/data-act="integrate"/);
+ const row=a.run('msgHtml({role:"user",from:"subtask",partialReceipt:"r",child:"kid",childProject:"p",text:"途中受領済み"})');assert.doesNotMatch(row,/data-act="absorb"/);
 });

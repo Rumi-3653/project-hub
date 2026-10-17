@@ -1,9 +1,10 @@
 'use strict';
 const { lt } = require('./locale');
-// 契約CLIの状態だけを読む。user prompt / thread / turn は送らず、秘密・生出力は公開しない。
+// 契約CLIの状態を読み、確認済みの無料チケットだけ使用する。user prompt / thread / turn は送らず、秘密・生出力は公開しない。
 const { spawn } = require('node:child_process');
 const os = require('node:os');
 const { executable } = require('./ai-tools');
+const { ResetTickets, checkTicket, validId, outcomes } = require('./reset-tickets');
 
 const TTL = 5 * 60 * 1000;
 const COOLDOWN = 30 * 1000;
@@ -34,15 +35,20 @@ function providerPlan(ai, data) {
 // 表示用の許可項目だけを返す。チケットID・説明・アカウント情報は公開しない。
 function codexExtras(data) {
   const result = {}, reset = data.rateLimits?.rateLimitResetCredits ?? data.rateLimitResetCredits;
-  if (Array.isArray(reset?.credits)) {
-    const available = reset.credits.slice(0, 1000).filter(item => item?.status === 'available');
-    const count = Number.isSafeInteger(reset.availableCount) && reset.availableCount >= 0 ? reset.availableCount : available.length;
-    if (count > 0 && available.length) result.resetCredits = {
-      count: Math.min(count, 1000),
-      items: available.slice(0, 20).map(item => ({ title: label(item.title, lt('リセット')), expiresAt: resetTime(item.expiresAt) })),
-    };
+  if (Array.isArray(reset?.credits) || reset?.credits === null) {
+    if (reset.credits === null) {
+      if (Number.isSafeInteger(reset.availableCount) && reset.availableCount > 0) result.resetCredits = { count: Math.min(reset.availableCount, 1000), items: [] };
+    } else {
+      const available = reset.credits.slice(0, 1000).filter(item => item?.status === 'available');
+      const count = Number.isSafeInteger(reset.availableCount) && reset.availableCount >= 0 ? reset.availableCount : available.length;
+      if (count > 0 && available.length) result.resetCredits = {
+        count: Math.min(count, 1000),
+        items: available.slice(0, 20).map(item => ({ title: label(item.title, lt('リセット')), expiresAt: resetTime(item.expiresAt) })),
+      };
+    }
   }
   const credits = data.rateLimits?.credits ?? data.credits;
+  if(credits?.hasCredits===false)result.credits={hasCredits:false};
   if (credits?.hasCredits === true) {
     const balance = typeof credits.balance === 'string' && credits.balance.length <= 80 && credits.balance.trim() === credits.balance && /^\d+(?:\.\d+)?$/.test(credits.balance) ? credits.balance : null;
     if (credits.unlimited === true || balance !== null) result.credits = { ...(balance !== null ? { balance } : {}), unlimited: credits.unlimited === true };
@@ -82,8 +88,26 @@ function claudeWindows(data) {
   return windows;
 }
 
-// stdoutは上限付きJSONL。CLIが要求するツールや認証操作には応答せず、固定の状態要求だけを送る。
+// 確認ONの要求だけで使う。Claudeの月間追加利用枠は実残高ではない。
+function creditStatus(ai, data) {
+  if (ai === 'codex') {
+    const credits = codexExtras(data).credits;
+    if (credits?.hasCredits === false) return { availability: 'empty' };
+    if (credits?.unlimited === true) return { availability: 'available', prepaid: false };
+    if (credits?.balance !== undefined) return { availability: /[1-9]/.test(credits.balance) ? 'available' : 'empty', prepaid: /[1-9]/.test(credits.balance) };
+    return { availability: 'unknown', reason: 'not-provided' };
+  }
+  const extra = data.rate_limits?.extra_usage ?? data.extra_usage;
+  if (extra?.disabled_reason === 'out_of_credits') return { availability: 'empty', reason: 'out-of-credits' };
+  return { availability: 'unknown', reason: 'balance-not-provided',
+    ...(typeof extra?.is_enabled === 'boolean' ? { extraUsageEnabled: extra.is_enabled } : {}),
+    ...(percent(extra?.utilization) !== null ? { monthlyLimitReached: extra.utilization >= 100 } : {}) };
+}
+
+// stdoutは上限付きJSONL。固定の状態要求と、確認済みチケットの使用だけ。ツール・認証要求には応答しない。
 function readCli(ai, file, options = {}) {
+  const consume = options.consume;
+  if (consume && (ai !== 'codex' || !validId(consume.idempotencyKey) || !validId(consume.accountId) || consume.creditId !== undefined && !validId(consume.creditId))) return Promise.reject(error('format'));
   const start = options.spawn || spawn;
   const timeoutMs = options.timeoutMs || 20000;
   const args = ai === 'claude' ? ['--print', '--input-format','stream-json','--output-format','stream-json','--verbose',
@@ -94,11 +118,11 @@ function readCli(ai, file, options = {}) {
     let child;
     try { const x = require('./launch').exeArgv(file, args); child = start(x.file, x.args, { stdio:['pipe','pipe','pipe'], cwd: os.tmpdir(), env: require('./launch').accountEnv(ai, options.account || 'default', options.env || process.env) }); }
     catch { reject(error('start')); return; }
-    let bytes = 0, buf = '', stopped = false, settled = false, value, failure, killTimer;
+    let bytes = 0, buf = '', stopped = false, settled = false, value, failure, killTimer, consumeSent = false;
     const finish = () => {
       if (settled) return;
       settled = true; clearTimeout(timer); clearTimeout(killTimer);
-      if (failure) reject(failure); else if (value) resolve(value); else reject(error('response'));
+      if (failure) { failure.consumeSent = consumeSent; reject(failure); } else if (value) resolve(value); else { const e = error('response'); e.consumeSent = consumeSent; reject(e); }
     };
     const stop = (err, result) => {
       if (stopped) return;
@@ -129,7 +153,7 @@ function readCli(ai, file, options = {}) {
             send({ type:'control_request', request_id:'hub-usage', request:{ subtype:'get_usage', skip_behaviors:true } });
           } else stop(null, r.response);
         } else {
-          const id = { init:0, account:1, usage:2 }[stage];
+          const id = { init:0, account:1, usage:2, consume:3 }[stage];
           if (m.id !== id) continue;
           if (m.error) { stop(error('response')); continue; }
           if (stage === 'init') {
@@ -139,6 +163,16 @@ function readCli(ai, file, options = {}) {
             if (m.result?.account?.type !== 'chatgpt') { stop(error('subscription')); continue; }
             accountPlanType = m.result.account.planType;
             stage = 'usage'; send({ id:2, method:'account/rateLimits/read' });
+          } else if (stage === 'usage' && consume) {
+            try {
+              checkTicket(m.result, consume, options.now?.() ?? Date.now());
+              consume.beforeSend(); // 保存と認証世代確認に失敗したら使用要求は送らない。
+              stage = 'consume'; consumeSent = true;
+              send({ id:3, method:'account/rateLimitResetCredit/consume', params:{ idempotencyKey:consume.idempotencyKey, ...(consume.creditId ? { creditId:consume.creditId } : {}) } });
+            } catch (e) { stop(error(e.usageCode || 'journal')); }
+          } else if (stage === 'consume') {
+            if (!outcomes.has(m.result?.outcome)) stop(error('response'));
+            else stop(null, { outcome:m.result.outcome });
           } else stop(null, m.result && { ...m.result, accountPlanType });
         }
       }
@@ -156,6 +190,11 @@ const messages = {
   subscription:lt('契約アカウントの利用枠を取得できません'), unavailable:lt('利用枠の情報が提供されていません'),
   format:lt('CLIの利用情報を読み取れませんでした'), unsupported:lt('このCLIでは利用情報を取得できません'),
   response:lt('CLIから利用情報を取得できませんでした'), dry:lt('テスト中のため取得していません'),
+  'account-changed':lt('アカウントが変わりました。利用状況を再確認してください'),
+  'ticket-changed':lt('このチケットは現在使えません。利用状況を再確認してください'),
+  uncertain:lt('使用結果が不明です。利用状況を再確認してください'),
+  journal:lt('使用の記録を保存できませんでした。再確認してください'),
+  busy:lt('このアカウントの利用状況を確認中またはチケットを使用中です'),
 };
 class Usage {
   constructor(options = {}) {
@@ -166,8 +205,12 @@ class Usage {
     this.observe = options.observe || null;
     this.beforeRead = options.beforeRead || null;
     this.accounts = options.accounts || null;
+    this.tickets = new ResetTickets({ file:options.resetFile, now:this.now });
+    this.consume = options.consume || ((file, options) => readCli('codex', file, options));
+    this.onReset = options.onReset || (() => {});
+    this.resetBusy = new Set();
     this.visible = new Map(); this.authCache = new Map(); this.authInflight = new Map(); this.revisions = new Map(); this.authBusy = new Map();
-    this.cache = {}; this.inflight = new Map(); this.lastAttempt = new Map();
+    this.cache = {}; this.inflight = new Map(); this.lastAttempt = new Map(); this.creditRequested = new Set();
   }
   key(ai, account = 'default') { return account === 'default' ? ai : ai + ':' + account; }
   revision(key) { return this.revisions.get(key) || 0; }
@@ -183,7 +226,7 @@ class Usage {
     })().finally(() => { if (this.authInflight.get(key) === attempt) this.authInflight.delete(key); });
     this.authInflight.set(key, attempt); return attempt;
   }
-  async targets(selection) {
+  async targets(selection, only) {
     if (!this.accounts) return ['codex','claude'].map(ai => ({ ai, account: selection[ai] || 'default' }));
     const rows = this.accounts.list().filter(r => ['codex','claude'].includes(r.ai));
     const keys = new Set(rows.map(r => this.key(r.ai, r.id)));
@@ -191,7 +234,7 @@ class Usage {
       if (!keys.has(key)) { const [ai, account = 'default'] = key.split(':'); this.invalidate(ai, account); this.authBusy.delete(key); }
     }
     const files = Object.fromEntries(['codex','claude'].map(ai => [ai, this.find(ai)]));
-    return (await Promise.all(rows.map(async r => {
+    return (await Promise.all(rows.filter(r => !only || r.ai === only.ai && r.id === only.account).map(async r => {
       const ai = r.ai, account = r.id, key = this.key(ai, account);
       const busy = Boolean(this.accounts.terminalBusy?.(ai, account, true) || this.accounts.locks?.has(ai + ':' + account));
       if (this.authBusy.has(key) && this.authBusy.get(key) !== busy) this.invalidate(ai, account);
@@ -207,11 +250,13 @@ class Usage {
       this.visible.set(key, target); return target;
     }))).filter(Boolean);
   }
-  async status(force = false, selection = {}) {
+  async status(force = false, selection = {}, options = {}) {
     const now = this.now();
-    const targets = this.accounts ? await this.targets(selection) : ['codex','claude'].map(ai => ({ ai, account: selection[ai] || 'default' }));
+    const only = options.only;
+    const targets = this.accounts ? await this.targets(selection, only) : ['codex','claude'].map(ai => ({ ai, account: selection[ai] || 'default' })).filter(r => !only || r.ai === only.ai && r.account === only.account);
     await Promise.all(targets.map(({ ai, account, file: installed, revision = this.revision(this.key(ai, account)) }) => {
       const key = this.key(ai, account), cached = this.cache[key];
+      if (this.resetBusy.has(key)) return;
       // 他アカウントの認証待ち中に破棄されたtargetは、共有・試行時刻の更新より先に拒否する。
       if (revision !== this.revision(key)) return;
       if (this.inflight.has(key)) return this.inflight.get(key);
@@ -229,7 +274,13 @@ class Usage {
           const windows = (ai === 'codex' ? codexWindows(data) : claudeWindows(data)).filter(w => w.usedPercent !== null || w.resetsAt !== null);
           if (!windows.length) throw error('unavailable');
           const plan = providerPlan(ai, data);
-          if (revision === this.revision(key)) this.cache[key] = { account, status: 'ok', windows, ...(plan ? { plan } : {}), ...(ai === 'codex' ? codexExtras(data) : {}), fetchedAt: new Date(this.now()).toISOString(), attemptedAt, message: '' };
+          if (revision === this.revision(key)) {
+            const extras = ai === 'codex' ? codexExtras(data) : {};
+            if (ai === 'codex') this.tickets.decorate(account, data, extras.resetCredits, revision);
+            const creditCheck = this.creditRequested.has(key) ? creditStatus(ai, data) : null;
+            this.cache[key] = { account, status: 'ok', windows, ...(plan ? { plan } : {}), ...extras,
+              ...(creditCheck ? { creditCheck } : {}), fetchedAt: new Date(this.now()).toISOString(), attemptedAt, message: '' };
+          }
         } catch (e) {
           if (revision === this.revision(key)) this.cache[key] = { account, status: 'unavailable', windows: [], fetchedAt: null, attemptedAt, message: messages[e.usageCode] || messages.response };
         }
@@ -238,9 +289,70 @@ class Usage {
     }));
     return this.snapshot(selection);
   }
+  async checkCredits(ai, account = 'default') {
+    if (!['claude', 'codex'].includes(ai)) return { availability: 'unknown', checkedAt: null };
+    const key = this.key(ai, account);
+    this.creditRequested.add(key);
+    try {
+      // 状態要求のみ。アカウント隔離・同時要求共有・30秒の再取得間隔を維持。
+      await this.status(true, { [ai]: account }, { only: { ai, account } });
+      return this.creditState(ai, account);
+    } finally { this.creditRequested.delete(key); }
+  }
+  creditState(ai, account = 'default') {
+    const cached = this.cache[this.key(ai, account)], now = this.now();
+    const fetched = Date.parse(cached?.fetchedAt), attempted = Date.parse(cached?.attemptedAt);
+    // 再起動・認証変更・失敗後はunknown。長くかかった読取も鮮度の範囲外にする。
+    if (cached?.status === 'ok' && cached.creditCheck && attempted <= fetched && fetched <= now && now - attempted < COOLDOWN) {
+      return { ...cached.creditCheck, checkedAt: cached.fetchedAt, attemptedAt: cached.attemptedAt };
+    }
+    return { availability: 'unknown', checkedAt: null, reason: cached?.status === 'ok' ? 'not-fresh' : 'unavailable' };
+  }
   invalidate(ai, account = 'default') {
     const k = this.key(ai, account); this.revisions.set(k, this.revision(k) + 1);
     delete this.cache[k]; this.lastAttempt.delete(k); this.authCache.delete(k); this.authInflight.delete(k); this.visible.delete(k);
+    if (ai === 'codex') this.tickets.discard(account);
+  }
+  async useReset(account, token, { confirmed, retry, selection = {} } = {}) {
+    const ai = 'codex', key = this.key(ai, account), revision = this.revision(key);
+    const fail = code => { throw Object.assign(error(code), { status:409, publicMessage:messages[code] || messages.response }); };
+    if (confirmed !== true || !validId(token)) fail('format');
+    if (this.dry) fail('dry');
+    if (this.resetBusy.has(key) || this.inflight.has(key)) fail('busy');
+    if (this.accounts && !this.visible.has(key) || this.cache[key]?.status !== 'ok') fail('ticket-changed');
+    let action;
+    try { action = this.tickets.get(account, token, revision, retry); } catch (e) { fail(e.usageCode); }
+    this.resetBusy.add(key);
+    let outcome, message, unknown = false;
+    try {
+      const run = async () => {
+        this.beforeRead?.(ai, account);
+        const file = this.find(ai); if (!file) throw error('missing');
+        const result = await this.consume(file, { account, now:this.now, consume:{ ...action, beforeSend:() => {
+          if (revision !== this.revision(key)) throw error('account-changed');
+          this.tickets.start(action);
+        } } });
+        if (!outcomes.has(result?.outcome)) throw Object.assign(error('response'), { consumeSent:true });
+        outcome = result.outcome;
+        // CLIの確定応答を先に保持し、保存失敗でも消費済みを失敗扱いにしない。
+        try { this.tickets.finish(action, outcome); } catch { message = messages.journal; }
+        if (outcome === 'reset') {
+          try { await this.onReset(account); } catch { message = lt('リセット済みですが、上限保持の解除を保存できませんでした'); }
+          // clearと同じミリ秒の取得は旧応答として除外されるため、再取得の開始を次の時刻へ。
+          await new Promise(resolve => setTimeout(resolve, 1));
+        }
+      };
+      if (this.accounts?.readOnly) await this.accounts.readOnly(ai, account, run); else await run();
+    } catch (e) {
+      unknown = e.consumeSent === true;
+      message = messages[unknown ? 'uncertain' : e.usageCode] || messages.response;
+    } finally {
+      this.resetBusy.delete(key);
+      if (revision === this.revision(key)) { delete this.cache[key]; this.lastAttempt.delete(key); }
+    }
+    // 確認の取得だけ。使用要求を自動で再送しない。
+    const snapshot = await this.status(true, selection);
+    return { outcome:outcome || null, unknown, message:message || '', usage:snapshot };
   }
   loginChecked(ai, account, status) {
     this.invalidate(ai, account);

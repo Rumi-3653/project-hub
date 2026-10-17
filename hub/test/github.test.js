@@ -16,6 +16,7 @@ const identity = { GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@local', GIT_
 let seq = 0;
 const git = (d, ...a) => execFileSync('git', ['-C', d, ...a], { encoding: 'utf8', env: { ...process.env, ...identity }, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const accounts = 'github.com\n  ✓ Logged in to github.com account kieiken (keyring)\n  - Active account: true\n  - Token: ' + token + '\n  ✓ Logged in to github.com account second (keyring)\n  - Active account: false\n';
+const existingRepo = { full_name: 'kieiken/existing', private: true, permissions: { push: true }, archived: false, default_branch: 'main' };
 function fixture({ none = false, execHook, init, idle, status = accounts } = {}) {
   const base = path.join(tmp, 'repo-' + ++seq); fs.mkdirSync(base);
   if (!none) { git(base, 'init', '-q'); fs.writeFileSync(path.join(base, 'a.txt'), 'a'); git(base, 'add', '.'); git(base, 'commit', '-qm', 'first'); }
@@ -214,4 +215,101 @@ for (const failed of [false, true]) test(`creation lock blocks base AI, allows e
   release(); await completion;
   assert.equal(f.gh.locked(f.base), false);
   assert.doesNotThrow(() => f.gh.assertStart(alias, {workspaceMode:'direct'}));
+});
+
+function connectInput(d, extra = {}) { return { account: 'kieiken', repository: existingRepo.full_name, target: d.target, expectedFolder: d.folder, expectedHead: d.head, confirm: true, ...extra }; }
+function existingFixture(extra = {}) {
+  return fixture({ ...extra, execHook: async (file, args, opts) => {
+    if (extra.execHook) { const r = await extra.execHook(file,args,opts); if (r !== undefined) return r; }
+    if (file === 'gh' && args[0] === 'api') return { stdout: JSON.stringify(existingRepo), stderr: '' };
+  } });
+}
+test('existing repositories search paginated authorized results without credentials or account switching', async () => {
+  const f = existingFixture({ execHook: (file,args) => {
+    if (file==='gh' && args[0]==='api') return {stdout:[existingRepo,{...existingRepo,full_name:'our-org/team'}, {...existingRepo,full_name:'kieiken/public',private:false}].map(r=>JSON.stringify(r)).join('\n'),stderr:''};
+  }});
+  const r = await f.gh.repositories({account:'second',query:'TEAM'});
+  assert.deepEqual(r.repositories.map(r=>r.name),['our-org/team']);
+  const call = f.calls.find(c=>c.args[0]==='api'); assert.ok(call.args.includes('--paginate'));
+  assert.equal(call.options.env.GH_TOKEN,token); assert.ok(!JSON.stringify(r).includes(token));
+  assert.ok(!f.calls.some(c=>c.args.includes('switch') || c.args.includes('push')));
+});
+test('existing connection targets nested product while preserving content, refs, index and outer Git', async () => {
+  const f=existingFixture(), nested=path.join(f.base,'product'); fs.mkdirSync(nested); git(nested,'init','-q');
+  fs.writeFileSync(path.join(nested,'a'),'local'); git(nested,'add','a'); git(nested,'commit','-qm','product');
+  fs.writeFileSync(path.join(nested,'dirty'),'unsaved');
+  const before=[git(f.base,'rev-parse','HEAD'),git(nested,'rev-parse','HEAD'),git(nested,'status','--porcelain'),git(nested,'show-ref')];
+  const d=await f.gh.connectPreview(f.project,{target:'product'}); assert.deepEqual(d.targets,['.','product']);
+  const r=await f.gh.connect(f.project,connectInput(d)); assert.equal(r.ok,true); assert.equal(r.pushed,false); assert.equal(r.existing,false);
+  assert.equal(git(f.base,'remote'),''); assert.equal(git(nested,'remote','get-url','origin'),r.url+'.git');
+  assert.deepEqual([git(f.base,'rev-parse','HEAD'),git(nested,'rev-parse','HEAD'),git(nested,'status','--porcelain'),git(nested,'show-ref')],before);
+  const shown=f.gh.projectRemote(f.project,{fresh:true}); assert.equal(shown.value.url,r.url); assert.equal(shown.target,'product');
+  assert.ok(!f.calls.some(c=>c.args.includes('fetch')||c.args.includes('push')||c.args.includes('merge')||c.args.includes('clone')||c.args[0]==='repo'));
+});
+test('same origin is preserved; differing fetch, push or additional origins are never overwritten',async()=>{
+  for(const mode of ['same','different','push','multi']) {
+    const f=existingFixture(); git(f.base,'remote','add','origin',mode==='different'?'https://github.com/u/other.git':'git'+'@github.com:kieiken/existing.git');
+    if(mode==='push')git(f.base,'config','remote.origin.pushurl','https://github.com/u/other.git');
+    if(mode==='multi')git(f.base,'config','--add','remote.origin.url','https://github.com/u/other.git');
+    const before=git(f.base,'config','--list'); const d=await f.gh.connectPreview(f.project);
+    if(mode==='same'){const r=await f.gh.connect(f.project,connectInput(d));assert.equal(r.existing,true);}
+    else await assert.rejects(f.gh.connect(f.project,connectInput(d)),e=>e.status===409&&/上書き/.test(e.message));
+    assert.equal(git(f.base,'config','--list'),before);
+    assert.ok(!f.calls.some(c=>c.args.includes('set-url')||c.args.includes('add')&&c.args.includes('origin')));
+  }
+});
+test('private, writable and active are freshly required; invalid confirmation, push, HEAD and escaped targets are refused',async()=>{
+  for(const change of [{private:false},{permissions:{push:false}},{archived:true},{full_name:'kieiken/other'}]) {
+    const f=existingFixture({execHook:(file,args)=>file==='gh'&&args[0]==='api'?{stdout:JSON.stringify({...existingRepo,...change}),stderr:''}:undefined});
+    const d=await f.gh.connectPreview(f.project); await assert.rejects(f.gh.connect(f.project,connectInput(d)),/非公開/); assert.equal(git(f.base,'remote'),'');
+  }
+  const f=existingFixture(),d=await f.gh.connectPreview(f.project);
+  for(const extra of [{confirm:false},{push:true},{repository:'x/../y'},{expectedHead:'old'},{expectedFolder:'/elsewhere'},{target:'../escape'}]) {
+    await assert.rejects(f.gh.connect(f.project,connectInput(d,extra))); assert.equal(git(f.base,'remote'),'');
+  }
+  const outside=path.join(tmp,'outside-'+ ++seq); fs.mkdirSync(outside);fs.symlinkSync(outside,path.join(f.base,'outside'));
+  await assert.rejects(f.gh.connectPreview(f.project,{target:'outside'}),/本体内/);
+  fs.mkdirSync(path.join(f.base,'inherited')); assert.ok((await f.gh.connectPreview(f.project,{target:'inherited'})).blockers.length);
+});
+test('connect rechecks origin, HEAD and idle after lookup and releases lock after failure',async()=>{
+  for(const mode of ['origin','head','idle']) {
+    let active=false; const f=existingFixture({idle:()=>{if(active&&mode==='idle')throw Error('AI active');},execHook:(file,args)=>{
+      if(file==='gh'&&args[0]==='api') {
+        assert.equal(f.gh.locked(f.base),true);
+        if(mode==='origin')git(f.base,'remote','add','origin','https://github.com/u/other.git');
+        if(mode==='head'){fs.writeFileSync(path.join(f.base,'a.txt'),'new');git(f.base,'commit','-qam','new');}
+        active=true;return {stdout:JSON.stringify(existingRepo),stderr:''};
+      }
+    }});
+    const d=await f.gh.connectPreview(f.project);await assert.rejects(f.gh.connect(f.project,connectInput(d)));
+    assert.equal(f.gh.locked(f.base),false); assert.ok(!f.calls.some(c=>c.args.includes('add')&&c.args.includes('origin')));
+  }
+});
+test('unique connected child is displayed read-only; multiple children need selection; root origin takes precedence',async()=>{
+  const f=existingFixture();
+  for(const name of ['one','two']) {const d=path.join(f.base,name);fs.mkdirSync(d);git(d,'init','-q');git(d,'remote','add','origin','https://github.com/kieiken/'+name+'.git');}
+  assert.equal(f.gh.projectRemote(f.project,{fresh:true}).value,null);
+  git(path.join(f.base,'two'),'remote','remove','origin'); assert.equal(f.gh.projectRemote(f.project,{fresh:true}).target,'one');
+  git(f.base,'remote','add','origin','https://github.com/kieiken/root.git');assert.equal(f.gh.projectRemote(f.project,{fresh:true}).target,'.');
+  const d=await f.gh.connectPreview(f.project,{target:'two'});await f.gh.connect(f.project,connectInput(d));
+  assert.equal(f.gh.projectRemote(f.project,{fresh:true}).target,'two');
+});
+test('connect masks failures without retry; registration survives display-save failure with partial result',async()=>{
+  const f=existingFixture({execHook:(file,args)=>{if(file==='gh'&&args[0]==='api'){const e=Error(token);e.stderr='lookup failed '+token;throw e;}}});
+  const d=await f.gh.connectPreview(f.project);await assert.rejects(f.gh.connect(f.project,connectInput(d)),e=>!e.message.includes(token));
+  assert.equal(f.calls.filter(c=>c.args[0]==='api').length,1);assert.equal(git(f.base,'remote'),'');
+  const partial=existingFixture();fs.mkdirSync(partial.settingsFile.replace(/\.json$/,'')+'-projects.json');
+  const p=await partial.gh.connectPreview(partial.project),r=await partial.gh.connect(partial.project,connectInput(p));
+  assert.equal(r.partial,true);assert.equal(r.connected,true);assert.equal(git(partial.base,'remote','get-url','origin'),r.url+'.git');
+});
+
+test('nested connection shares locks with both ledger aliases and passes the actual target to idle checks',async()=>{
+  let release,entering;const held=new Promise(r=>{release=r}),entered=new Promise(r=>{entering=r});const targets=[];
+  const f=existingFixture({idle:p=>targets.push(p.githubFolder),execHook:async(file,args)=>{if(file==='gh'&&args[0]==='api'){entering();await held;return {stdout:JSON.stringify(existingRepo),stderr:''};}}});
+  const product=path.join(f.base,'product');fs.mkdirSync(product);git(product,'init','-q');
+  const d=await f.gh.connectPreview(f.project,{target:'product'}),pending=f.gh.connect(f.project,connectInput(d));await entered;
+  assert.equal(f.gh.locked(f.base),true);assert.equal(f.gh.locked(product),true);
+  assert.throws(()=>f.gh.assertStart({...f.project,base:product},{workspaceMode:'direct'}),e=>e.status===409);
+  await assert.rejects(f.gh.connect(f.project,connectInput(d)),e=>e.status===409);
+  release();await pending;assert.deepEqual(targets,[product,product]);assert.equal(f.gh.locked(product),false);assert.equal(f.gh.locked(f.base),false);
 });

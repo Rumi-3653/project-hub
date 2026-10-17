@@ -63,7 +63,7 @@ async function refreshMaintenance() {
 }
 document.addEventListener('click',async e=>{
   const openBtn=e.target.closest('[data-maintenance]');
-  if(openBtn) {if(maintenancePending){toast(UI.text('操作が終わるまでお待ちください'));return;} maintenanceProject=openBtn.dataset.p;$('#maintenance-drawer').hidden=false;$('#maintenance-body').textContent=UI.text('取得しています…');
+  if(openBtn) {if(maintenancePending){toast(UI.text('操作が終わるまでお待ちください'));return;} maintenanceProject=openBtn.dataset.p;$('#maintenance-drawer').hidden=false;$('#maintenance-drawer').scrollTop=0;$('#maintenance-body').textContent=UI.text('取得しています…');$('#maintenance-body').scrollTop=0;
     try {await refreshMaintenance();if(openBtn.dataset.maintenance==='verify')$('#maintenance-verify-title')?.scrollIntoView({block:'center'});}catch(err){$('#maintenance-body').textContent=err.message;}return;}
   if(e.target.id==='maintenance-close'){$('#maintenance-drawer').hidden=true;return;}
   const btn=e.target.closest('[data-maint-action]');if(!btn || btn.disabled || maintenancePending)return;

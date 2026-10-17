@@ -8,13 +8,14 @@ const output = path.join(root, 'public-release', 'ProjectHub');
 const publicFiles = new Set([
   'README.md', 'CONTRIBUTING.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
   'README.zh-TW.md', 'CONTRIBUTING.zh-TW.md', 'THIRD_PARTY_NOTICES.zh-TW.md',
-  'scripts/export-public.js', 'scripts/public.gitignore', '.gitattributes',
+  'docs/idea-ledger.md', 'docs/idea-ledger-verification.md',
+  'scripts/export-public.js', 'scripts/public.gitignore',
 ]);
 const required = [...publicFiles, '.github/ISSUE_TEMPLATE/feedback.md',
   '.github/ISSUE_TEMPLATE/bug_report.md', '.github/ISSUE_TEMPLATE/config.yml',
   '.github/pull_request_template.md', 'hub/package.json', 'hub/CHANGELOG.md',
   'hub/server.js', 'hub/mcp.js', 'hub/public/index.html',
-  'hub/locales/zh-TW.json', 'hub/lib/locale.js', '.github/workflows/macos-app.yml'];
+  'hub/lib/langpack.js', 'hub/lib/locale.js', 'hub/lib/version-check.js', '.github/workflows/macos-app.yml'];
 const git = args => execFileSync('git', args, { cwd: root, maxBuffer: 32 * 1024 * 1024 });
 function commit(ref) {
   return git(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]).toString().trim();
@@ -27,26 +28,44 @@ function tree(ref) {
     return { name, mode, type, oid };
   });
 }
+function packPath(name) {
+  const match = /^langpacks\/([^/]+)\/(.+)$/.exec(name);
+  return match && match[1] !== 'ja' && /^[a-z]{2,3}(-[A-Z][A-Za-z]{1,3})?$/.test(match[1]) ? match : null;
+}
+function packAsset(name) {
+  const match = packPath(name);
+  if (!match) return false;
+  const file = match[2];
+  return ['pack.json', 'ui.json', 'backend.json', 'native.json', 'README.md'].includes(file)
+    || /^(?:docs|templates|seed)\//.test(file) && /(?:\.(?:json|md|yaml|yml|txt)|\/\.gitkeep)$/.test(file)
+    // Tests shipped with the repository are source code, never imported pack data.
+    || file.startsWith('test/') && /\.(?:js|json|md|yaml|yml|txt)$/.test(file);
+}
 function excluded(name) {
+  // Local DMG acceptance uses the private publisher and macOS-only fixtures.
+  if (['scripts/package-update.js', 'scripts/sign-update.js', 'scripts/release-license-build.sql', 'hub/test/release-candidate.test.js', 'hub/test/app-update-packaged.test.js'].includes(name)) return true;
+  if (name === 'hub/lib/license/owner-edition.js' || name.startsWith('hub/license-issuer/') ||
+      name === 'hub/test/license.test.js' || name === 'hub/test/fixtures/license-db.cjs') return true;
   const parts = name.split('/');
   if (parts.some(p => ['.git', 'node_modules', 'public-release', 'Inbox', '.DS_Store'].includes(p))) return true;
+  // Skills belong to the recipient's AI installation, never the distributed runtime.
+  if (parts.some(p => p.toLowerCase() === 'skills' || p.toLowerCase() === 'skill.md')) return true;
   if (parts.some(p => /^\.env(?:\.|$)/.test(p) && !['.env.example', '.env.sample'].includes(p)
     || /^(?:\.npmrc|\.dev\.vars(?:\..*)?|.*\.log|.*\.(?:pem|key))$/.test(p))) return true;
   // Only the templates and fictional seed may contain ledger metadata.
   if (parts.includes('.ai') && !name.startsWith('docs/project-hub/templates/project/.ai/')
-    && !name.startsWith('docs/project-hub/templates/zh-TW/project/.ai/')
-    && !name.startsWith('hub/seed/') && !name.startsWith('hub/seed-zh-TW/')) return true;
+    && !name.startsWith('hub/seed/') && !(packPath(name) && /^(?:seed\/|templates\/project\/\.ai\/)/.test(packPath(name)[2]))) return true;
   if (/\/\.ai\/(?:chat|handoff|work)(?:\/|$)/.test(name)) return true;
   if (parts.includes('_hub') && !name.startsWith('docs/project-hub/templates/_hub/')
-    && !name.startsWith('docs/project-hub/templates/zh-TW/_hub/')) return true;
+    && !(packPath(name) && packPath(name)[2].startsWith('templates/_hub/'))) return true;
   if (name.includes('/.claude/') || name.includes('/.codex/')) return true;
   return false;
 }
 function selected(name, isPublic) {
-  return isPublic ? publicFiles.has(name) || name.startsWith('.github/ISSUE_TEMPLATE/')
+  return isPublic ? publicFiles.has(name) || name === '.gitattributes' || name.startsWith('.github/ISSUE_TEMPLATE/')
     || name === '.github/pull_request_template.md' || name.startsWith('.github/PULL_REQUEST_TEMPLATE/')
     || name === '.github/workflows/macos-app.yml'
-    : name.startsWith('hub/') || name.startsWith('docs/project-hub/templates/')
+    : name.startsWith('hub/') || name.startsWith('docs/project-hub/templates/') || packAsset(name)
     || /^docs\/screenshots\/[^/]+-redacted\.png$/.test(name);
 }
 const rules = [
@@ -56,6 +75,7 @@ const rules = [
   ['API token', /\b(?:sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]+|AKIA[A-Z0-9]{16})\b/],
   ['private key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/],
   ['private service', /\bh[d]sl\b/i],
+  ['private specialty material', /h[u]man[ _-]?design|ヒューマンデザイ[ン]|人[類类][圖图]|人[類类][設设][計计]|\bh[d]sl\b|\bb[g]5\b|reference-gate-librar[y]/i],
   ['Discord webhook', /https:\/\/(?:discord(?:app)?\.com)\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+/],
   ['private IP', /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/],
   ['user path', /\/Users\/(?!me(?:[/'"\s]|$)|test(?:[/'"\s]|$)|example(?:[/'"\s]|$)|a(?:[/'"\s]|$))[A-Za-z0-9_.-]+/],
@@ -65,8 +85,9 @@ const safeLiterals = {
   'hub/lib/git.js': new Set(['git' + '@github.com']),
   'hub/lib/update-check.js': new Set(['claude-code' + '@latest.json']),
   'hub/test/accounts.test.js': new Set(['a' + '@example.test']),
+  'hub/test/move.test.js': new Set(['a' + '@example.test']),
   'hub/test/git.test.js': new Set(['git' + '@github.com', 'secret' + '@github.com']),
-  'hub/test/github.test.js': new Set(['password' + '@github.com']),
+  'hub/test/github.test.js': new Set(['password' + '@github.com', 'git' + '@github.com']),
   'hub/test/remote.test.js': new Set(['owner' + '@example.com', 'guest' + '@example.com']),
   'hub/test/procwatch.test.js': new Set(['sk-' + 'abcdefghijklmnop']),
 };
@@ -78,6 +99,8 @@ function inspect(entries) {
   const findings = [];
   for (const { name, content } of entries) {
     if (excluded(name) || name === '.git') findings.push(`${name}: excluded path`);
+    const specialty = rules.find(([label]) => label === 'private specialty material')[1];
+    if (specialty.test(name.normalize('NFC'))) findings.push(`${name}: private specialty path`);
     // Raster images are the reviewed redacted screenshots and product icons.
     if (reviewedImages.has(name)) continue;
     if (/\.(?:png|jpe?g|gif|webp|heic|pdf)$/i.test(name)
@@ -85,7 +108,7 @@ function inspect(entries) {
       findings.push(`${name}: binary file needs review`);
       continue;
     }
-    const text = content.toString('utf8');
+    const text = content.toString('utf8').normalize('NFC');
     for (const [label, re] of rules) {
       re.lastIndex = 0;
       const matches = [...text.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))];
@@ -114,8 +137,17 @@ function main() {
   const source = commit(ref), overlay = commit(publicRef || ref);
   const entries = [];
   for (const [sha, isPublic] of [[source, false], [overlay, true]]) {
-    for (const entry of tree(sha)) {
+    const tracked = tree(sha);
+    const packs = new Set();
+    if (!isPublic) for (const entry of tracked.filter(e => packPath(e.name)?.[2] === 'pack.json')) {
+      try {
+        if (entry.type === 'blob' && entry.mode === '100644'
+          && JSON.parse(git(['cat-file', 'blob', entry.oid])).id === packPath(entry.name)[1]) packs.add(packPath(entry.name)[1]);
+      } catch { /* Invalid folders are not language packs. */ }
+    }
+    for (const entry of tracked) {
       if (!selected(entry.name, isPublic) || excluded(entry.name)) continue;
+      if (entry.name.startsWith('langpacks/') && !packs.has(packPath(entry.name)?.[1])) continue;
       if (entry.type !== 'blob' || !['100644', '100755'].includes(entry.mode)) throw new Error(`Not a regular tracked file: ${entry.name}`);
       let content = git(['cat-file', 'blob', entry.oid]);
       if (entry.name === 'hub/CHANGELOG.md') {
@@ -129,11 +161,9 @@ function main() {
   }
   for (const name of required) if (!entries.some(e => e.name === name)) throw new Error(`Missing required public file: ${name}`);
   entries.push({ name: '.gitignore', content: entries.find(e => e.name === 'scripts/public.gitignore').content, mode: 0o644 });
-  const version = JSON.parse(entries.find(e => e.name === 'hub/package.json').content).version;
-  const changelog = entries.find(e => e.name === 'hub/CHANGELOG.md').content.toString();
-  const readme = entries.find(e => e.name === 'README.md').content.toString();
-  if (changelog.match(/^## (\d+\.\d+\.\d+)/m)?.[1] !== version
-    || !readme.includes(`開発中の版です（v${version}）`) || !readme.includes(`現行版（${version}）`)) throw new Error('Public version mismatch');
+  const checked = require('../hub/lib/version-check').checkVersion(name => { const e=entries.find(e=>e.name===name);if(!e)throw Error('Missing version file: '+name);return e.content.toString(); });
+  if(!checked.ok)throw Error('Public version mismatch: '+checked.error);
+  const version = checked.version;
   inspect(entries);
   // Build and inspect a sibling staging folder before replacing a previous export.
   const parent = path.dirname(output);

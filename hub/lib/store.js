@@ -1,5 +1,5 @@
 'use strict';
-const { lt, sectionNames, sectionName } = require('./locale');
+const { lt, sectionNames, sectionName, sectionPattern } = require('./locale');
 // 台帳（Product/<プロジェクト>/PROJECT.md）と作業ファイル（.ai/tasks/<作業ID>.md）の読み書き
 const fs = require('fs');
 const path = require('path');
@@ -10,13 +10,44 @@ const { Completion, hash } = require('./completion');
 
 const SAFE_NAME = /^[^/\\\0]+$/;
 
+let movePathMaps = [];
+function loadMovePathMap(root) {
+  movePathMaps = [];
+  try {
+    const file = path.join(root, '_hub/move/path-map.json');
+    if (!fs.lstatSync(file).isFile() || fs.statSync(file).size > 1024 * 1024) return;
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (doc.format !== 'project-hub-move-v1' || !Array.isArray(doc.maps)) return;
+    movePathMaps = doc.maps.filter(m => typeof m.from === 'string' && path.isAbsolute(m.from) && path.normalize(m.from) === m.from && typeof m.to === 'string' && path.isAbsolute(m.to) && path.normalize(m.to) === m.to && m.to.startsWith(os.homedir() + path.sep)).sort((a,b) => b.from.length - a.from.length);
+  } catch { /* No migration mapping: keep the existing path behavior. */ }
+}
 function expandHome(p) {
   if (!p || typeof p !== 'string') return '';
-  return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p;
+  if (p.startsWith('~')) return path.join(os.homedir(), p.slice(1));
+  if (path.isAbsolute(p) && !fs.existsSync(p)) {
+    const m = movePathMaps.find(m => p === m.from || p.startsWith(m.from + path.sep));
+    if (m) return path.join(m.to, path.relative(m.from, p));
+  }
+  return p;
 }
 
 function read(file) {
   try { return fs.readFileSync(file, 'utf8'); } catch { return null; }
+}
+
+// 受領の準備と通常の追記で同じ節境界を使い、成果欄へメモを混ぜない。
+function appendDocumentSection(text, heading, block) {
+  const add = String(block || '').replace(/\s+$/, '');
+  if (!add) return text;
+  const lines = text.replace(/\s*$/, '\n').split('\n');
+  const h = lines.findIndex(l => /^##\s/.test(l) && sectionNames(heading).some(name => l.replace(/^##\s+/, '').trim() === name || l.replace(/^##\s+/, '').trim().startsWith(name+'（')));
+  if (h < 0) lines.splice(lines.length - 1, 0, '', `## ${sectionName(heading)}`, add);
+  else {
+    let end = h + 1;
+    for (let i = h + 1; i < lines.length && !/^##\s/.test(lines[i]); i++) if (lines[i].trim()) end = i + 1;
+    lines.splice(end, 0, add);
+  }
+  return lines.join('\n');
 }
 
 // 読んで分けた結果の使い回し：ファイルの更新時刻と大きさが前と同じなら、読み直さずに前の結果を使う
@@ -95,7 +126,7 @@ function readSteps(body) {
   const out = [];
   let inside = false;
   for (const line of body.split(/\r?\n/)) {
-    if (/^##\s/.test(line)) { inside = /^##\s+(?:手順|步驟)/.test(line); continue; }
+    if (/^##\s/.test(line)) { inside = new RegExp('^##\\s+(?:' + sectionPattern('手順') + ')(?=$|\\s|（)').test(line); continue; }
     const m = inside && line.match(STEP);
     if (m) out.push({ text: m[2].trim(), done: m[1] !== ' ' });
   }
@@ -134,6 +165,8 @@ function pick(secs, word) {
 class Store {
   constructor(root) {
     this.root = root;
+    loadMovePathMap(root);
+    require('./integration-writes').register(root);
     this.product = path.join(root, 'Product');
     this.completion = new Completion(root, c => {
       let ids = []; try { ids = fs.readdirSync(this.product); } catch (e) { /* 初回 */ }
@@ -178,10 +211,13 @@ class Store {
       id,
       title: data.title || id,
       ...(data.freetalk === true ? { freetalk: true } : {}),
+      ...(data.gptChild === true ? { gptChild: true } : {}),
+      ...(typeof data.integrateKeep === 'boolean' ? { integrateKeep: data.integrateKeep } : {}),
       role: data.role || '',
       owner: data.owner || '',
       ...this.completion.task(`${path.basename(path.dirname(path.dirname(path.dirname(file))))}/${id}`, data.state, text, steps, c),
       ...(data.freetalk === true ? { state: data.state === '返事待ち' ? '返事待ち' : data.state === '未着手' ? '未着手' : '実行中', completionPending: false } : {}),
+      ...(data.continuation===true?{continuation:true,completionPending:false,state:data.state==='完了'?'実行中':data.state||'実行中'}:{}),
       question: data.question || '',
       workdir: data.workdir || '',
       mergeExcluded: data.mergeExcluded === true,
@@ -205,9 +241,13 @@ class Store {
   }
 
   readProject(id) {
+    return require('./state-read').memo(this, 'project:' + id, () => this.readProjectFresh(id));
+  }
+
+  readProjectFresh(id) {
     const dir = this.projectDir(id);
     if (!dir) return null;
-    const c = cachedParse(path.join(dir, 'PROJECT.md'), text => { const { data, body } = parseDoc(text); return { data, notes: projectNotes(body), textHash: hash(text) }; })
+    const c = cachedParse(path.join(dir, 'PROJECT.md'), text => { const { data, body } = parseDoc(text),notes=projectNotes(body); return { data, notes, ...require('./project-notes').notesMetadata(notes),textHash: hash(text) }; })
       || { data: {}, notes: '', textHash: hash('') };
     const { data } = c;
     const tdir = path.join(dir, '.ai', 'tasks');
@@ -233,6 +273,7 @@ class Store {
       derivedFrom: data.derivedFrom || '',
       description: data.description || '',
       notes: c.notes,
+      notesSummary:c.notesSummary||'',notesBytes:c.notesBytes||0,notesHash:c.notesHash||hash(''),
       updated: data.updated || '',
       folders: Object.entries(folders).filter(([, v]) => v).map(([label, p]) => ({ label, path: p })),
       related: Array.isArray(data.related) ? data.related.filter(Boolean) : [],
@@ -284,7 +325,7 @@ class Store {
       lt('# メモ'),
       '',
     ].join('\n');
-    fs.writeFileSync(path.join(dir, 'PROJECT.md'), text);
+    require('./integration-writes').write(path.join(dir, 'PROJECT.md'),()=>fs.writeFileSync(path.join(dir, 'PROJECT.md'), text));
     return { project: this.readProject(nm) };
   }
 
@@ -312,11 +353,15 @@ class Store {
       add.push(`  参考${n}: ${scalar(x)}`);
     }
     lines.splice(j, 0, ...add);
-    fs.writeFileSync(file, lines.join('\n'));
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, lines.join('\n')));
     return { project: this.readProject(id), added: add.length };
   }
 
   listProjects() {
+    return require('./state-read').memo(this, 'projects', () => this.listProjectsFresh());
+  }
+
+  listProjectsFresh() {
     let names = [];
     try { names = fs.readdirSync(this.product); } catch { return []; }
     return names.filter(n => !n.startsWith('.') && !n.startsWith('_'))
@@ -329,12 +374,20 @@ class Store {
     return text ? parseYaml(text) : {};
   }
 
-  // 状態・質問を書き換え、メモを1行足す
-  updateTask(projectId, taskId, { state, question, memo, owner, role, model, effort, parent, workdir, phase, via, mergeExcluded, kind, derivedFrom, workspaceMode, workspaceStarted }) {
+  // 継続の印と受領メモを準備する。原文への反映は受領journalに任せる。
+  continuationDocument(projectId, taskId, note) {
+    const file=this.taskFile(projectId,taskId);
+    if(!file)throw Error(lt('作業が見つかりません'));
+    return {file,text:appendDocumentSection(setScalar(read(file),'continuation',true),'やったこと',note)};
+  }
+
+  updateTask(projectId, taskId, { state, question, memo, owner, role, model, effort, parent, workdir, phase, via, mergeExcluded, kind, derivedFrom, workspaceMode, workspaceStarted, continuation, gptChild, integrateKeep }) {
     const file = this.taskFile(projectId, taskId);
     if (!file) return null;
     let text = read(file);
     const key = `${projectId}/${taskId}`, preserve = this.completion.data.tasks[key]?.hash === hash(text);
+    if (typeof integrateKeep==='boolean')text=setScalar(text,'integrateKeep',integrateKeep);
+    if (typeof continuation==='boolean')text=setScalar(text,'continuation',continuation);
     if (state !== undefined) text = setScalar(text, 'state', state);
     if (question !== undefined) text = setScalar(text, 'question', question);
     if (owner !== undefined) text = setScalar(text, 'owner', owner);
@@ -343,6 +396,7 @@ class Store {
     if (effort !== undefined) text = setScalar(text, 'effort', effort);
     if (parent !== undefined) text = setScalar(text, 'parent', parent);
     if (workdir !== undefined) text = setScalar(text, 'workdir', workdir);
+    if (typeof gptChild === 'boolean') text = setScalar(text, 'gptChild', gptChild);
     if (typeof mergeExcluded === 'boolean') text = setScalar(text, 'mergeExcluded', mergeExcluded);
     if (phase !== undefined) text = setScalar(text, 'phase', phase);
     if (via !== undefined) text = setScalar(text, 'via', via);
@@ -354,7 +408,7 @@ class Store {
         ? text.replace(/^## (?:メモ|備註)\s*$/m, m => `${m}\n${line}`)
         : text.replace(/\s*$/, lt`\n\n## メモ\n${line}\n`);
     }
-    fs.writeFileSync(file, text);
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, text));
     if (preserve && parseDoc(text).data.state === '完了') this.completion.approveTask(key, text);
     return this.readTask(file);
   }
@@ -367,7 +421,7 @@ class Store {
     const lines = before.split('\n');
     let inside = false, n = -1, hit = false;
     for (let i = 0; i < lines.length; i++) {
-      if (/^##\s/.test(lines[i])) { inside = /^##\s+(?:手順|步驟)/.test(lines[i]); continue; }
+      if (/^##\s/.test(lines[i])) { inside = new RegExp('^##\\s+(?:' + sectionPattern('手順') + ')(?=$|\\s|（)').test(lines[i]); continue; }
       if (inside && STEP.test(lines[i]) && ++n === index) { lines[i] = lines[i].replace(/\[[ xX]\]/, done ? '[x]' : '[ ]'); hit = true; break; }
     }
     if (!hit) return null;
@@ -375,7 +429,7 @@ class Store {
     const steps = readSteps(parseDoc(text).body);
     const cur = parseDoc(text).data.state;
     if (!steps.every(x => x.done) && cur === '完了') text = setScalar(text, 'state', '実行中');
-    fs.writeFileSync(file, text);
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, text));
     if (preserve && parseDoc(text).data.state === '完了') this.completion.approveTask(key,text);
     return this.readTask(file);
   }
@@ -386,7 +440,7 @@ class Store {
     const item = oneLine(textIn).slice(0, 120);
     if (!file || !item) return null;
     const lines = read(file).split('\n');
-    const h = lines.findIndex(l => /^##\s+(?:手順|步驟)/.test(l));
+    const h = lines.findIndex(l => new RegExp('^##\\s+(?:' + sectionPattern('手順') + ')(?=$|\\s|（)').test(l));
     if (h >= 0) {
       let end = h + 1;
       for (let i = h + 1; i < lines.length && !/^##\s/.test(lines[i]); i++) if (STEP.test(lines[i])) end = i + 1;
@@ -395,11 +449,11 @@ class Store {
       if (blank >= 0) lines[blank] = `- [ ] ${item}`; else lines.splice(end, 0, `- [ ] ${item}`);
     } else {
       const close = lines.indexOf('---', 1);
-      lines.splice(close + 1, 0, lt('## 手順'), `- [ ] ${item}`, '');
+      lines.splice(close + 1, 0, '## ' + sectionName('手順'), `- [ ] ${item}`, '');
     }
     let text = setScalar(lines.join('\n'), 'updated', now());
     if (parseDoc(text).data.state === '完了') text = setScalar(text, 'state', '実行中');
-    fs.writeFileSync(file, text);
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, text));
     return this.readTask(file);
   }
 
@@ -407,15 +461,7 @@ class Store {
   appendSection(projectId, taskId, heading, block) {
     const file = this.taskFile(projectId, taskId), add = String(block || '').replace(/\s+$/, '');
     if (!file || !add) return null;
-    const lines = read(file).replace(/\s*$/, '\n').split('\n');
-    const h = lines.findIndex(l => sectionNames(heading).some(name => l.replace(/^##\s+/, '').trim() === name || l.replace(/^##\s+/, '').trim().startsWith(name+'（')) && /^##\s/.test(l));
-    if (h < 0) lines.splice(lines.length - 1, 0, '', `## ${sectionName(heading)}`, add);
-    else {
-      let end = h + 1;
-      for (let i = h + 1; i < lines.length && !/^##\s/.test(lines[i]); i++) if (lines[i].trim()) end = i + 1;
-      lines.splice(end, 0, add);
-    }
-    fs.writeFileSync(file, setScalar(lines.join('\n'), 'updated', now()));
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, setScalar(appendDocumentSection(read(file),heading,add), 'updated', now())));
     return this.readTask(file);
   }
 
@@ -424,7 +470,7 @@ class Store {
     const p = this.readProject(projectId);
     if (!p) return null;
     const file = path.join(p.dir, 'PROJECT.md');
-    fs.writeFileSync(file, setScalar(read(file), 'status', status));
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, setScalar(read(file), 'status', status)));
     if (status === '完了') this.completion.approveProject(projectId, parseDoc(read(file)).data, { status: true });
     return this.readProject(projectId);
   }
@@ -439,7 +485,7 @@ class Store {
     let text = setPhaseLine(read(file), p.phases[i].name, '完了');
     if (p.phases[i + 1] && !p.phases[i + 1].completionPending) text = setPhaseLine(text, p.phases[i + 1].name, '進行中');
     else if (!p.phases[i + 1]) text = setScalar(text, 'status', '完了');
-    fs.writeFileSync(file, text);
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, text));
     this.completion.approveProject(projectId, parseDoc(text).data, { phase: p.phases[i].name, status: !p.phases[i + 1] });
     return this.readProject(projectId);
   }
@@ -450,7 +496,7 @@ class Store {
     const p = this.readProject(projectId); if (!p) return null;
     const ph = p.phases.find(x => x.state !== '完了'); if (!ph) return p;
     const file = path.join(p.dir, 'PROJECT.md');
-    fs.writeFileSync(file, setPhaseLine(read(file), ph.name, '進行中'));
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, setPhaseLine(read(file), ph.name, '進行中')));
     this.completion.data.projects[projectId] ||= { phases: {} };
     this.completion.data.projects[projectId].continued = this.phaseOfferKey(p); this.completion.save();
     return this.readProject(projectId);
@@ -462,8 +508,9 @@ class Store {
     const before = read(file);
     if (hash(before) !== expectedHash) return { error: lt('確認中に作業が更新されました'), status: 409 };
     const raw = parseDoc(before).data.state || '未着手';
-    const text = setScalar(setScalar(before, 'state', action === 'approve' ? '完了' : raw === '完了' ? '実行中' : raw), 'updated', now());
-    fs.writeFileSync(file, text);
+    const retained = action === 'approve' ? setScalar(before, 'continuation', false) : before;
+    const text = setScalar(setScalar(retained, 'state', action === 'approve' ? '完了' : raw === '完了' ? '実行中' : raw), 'updated', now());
+    require('./integration-writes').write(file,()=>fs.writeFileSync(file, text));
     const key = `${projectId}/${taskId}`;
     if (action === 'approve') this.completion.approveTask(key, text);
     else this.completion.continueTask(key, readSteps(parseDoc(text).body));
@@ -481,8 +528,13 @@ class Store {
     const id = require('./task-ids').reserveTaskId(this, projectId, dir, day);
     const one = scalar;
     const list = (Array.isArray(steps) ? steps : String(steps || '').split(/\r?\n/)).map(oneLine).filter(Boolean).slice(0, 12);
-    const text = lt`---\nid: ${id}\ntitle: ${one(title)}\nrole: ${one(role)}\nparent: ${one(parent)}\nkind: ${context.kind}\nderivedFrom: ${one(context.derivedFrom)}\nworkspaceMode: ${context.workspaceMode}\nphase: ${one(phase)}\nowner: ${one(owner)}\nvia: ${one(via)}\nstate: 未着手\nworkdir:\nmodel: ${one(model)}\neffort: ${one(effort)}\nquestion:\nskills: []\nupdated: ${now()}\n---\n## 手順\n${list.map(x => `- [ ] ${x}`).join('\n')}\n\n## やったこと\n\n## 次にやること\n${one(next)}\n\n## 注意\n`;
-    fs.writeFileSync(path.join(tdir, id + '.md'), text, { flag: 'wx' });
+    let text = lt`---\nid: ${id}\ntitle: ${one(title)}\nrole: ${one(role)}\nparent: ${one(parent)}\nkind: ${context.kind}\nderivedFrom: ${one(context.derivedFrom)}\nworkspaceMode: ${context.workspaceMode}\nphase: ${one(phase)}\nowner: ${one(owner)}\nvia: ${one(via)}\nstate: 未着手\nworkdir:\nmodel: ${one(model)}\neffort: ${one(effort)}\nquestion:\nskills: []\nupdated: ${now()}\n---\n## 手順\n${list.map(x => `- [ ] ${x}`).join('\n')}\n\n## やったこと\n\n## 次にやること\n${one(next)}\n\n## 注意\n`;
+    // Rewrite headings only; persisted values and interpolated user text stay opaque.
+    text = text.replace(/^## ([^\r\n]+)$/gm, (line, name) => {
+      const canonical = ['手順', 'やったこと', '次にやること', '注意', 'メモ'].find(key => sectionNames(key).includes(name));
+      return canonical ? '## ' + sectionName(canonical) : line;
+    });
+    require('./integration-writes').write(path.join(tdir, id + '.md'),()=>fs.writeFileSync(path.join(tdir, id + '.md'), text, { flag: 'wx' }));
     return this.readTask(path.join(tdir, id + '.md'));
   }
 }
@@ -493,4 +545,4 @@ function now() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-module.exports = { Store, expandHome, readSteps, setPhaseLine };
+module.exports = { Store, expandHome, loadMovePathMap, readSteps, setPhaseLine };

@@ -94,10 +94,10 @@ test('スマホ表示は未設定・壊れた設定で短い名前、保存と�
   assert.deepEqual(new ModelView(file).phone(), { labels: 'full', names: { [key]: 'ソル' } });
   assert.ok(view.hidden().codex.includes('Sol')); assert.deepEqual(view.initial(), initial);
   assert.equal(JSON.parse(fs.readFileSync(file)).future, true);
-  view.setPhone({ key: 'chatgpt|app', name: '貼り付け' }, catalog);
-  assert.equal(view.phone().names['chatgpt|app'], '貼り付け');
+  view.setPhone({ key: 'chatgpt|auto', name: '自動Chat' }, catalog);
+  assert.equal(view.phone().names['chatgpt|auto'], '自動Chat');
   view.setPhone({ key, name: '' }, catalog); assert.equal(view.phone().names[key], undefined);
-  view.setPhone({ key: 'chatgpt|app', name: ' ' }, catalog); assert.deepEqual(view.phone().names, {});
+  view.setPhone({ key: 'chatgpt|auto', name: ' ' }, catalog); assert.deepEqual(view.phone().names, {});
 });
 
 test('スマホ表示の不正入力・保存失敗は記録を保護、壊れた名前は読み取りから除く', t => {
@@ -110,7 +110,15 @@ test('スマホ表示の不正入力・保存失敗は記録を保護、壊れ�
   try { fs.renameSync = () => { throw Error('保存失敗'); }; assert.throws(() => view.setPhone({ labels: 'full' }, catalog), /保存失敗/); }
   finally { fs.renameSync = rename; }
   assert.deepEqual(fs.readFileSync(file), before); assert.deepEqual(fs.readdirSync(path.dirname(file)), ['model-view.json']);
-  fs.writeFileSync(file, JSON.stringify({ phone: { labels: 'short', names: { [key]: 'ソル', 'bad|key': 'bad', 'chatgpt|app': 'bad\nname', 'codex|old': 'あ'.repeat(25) } } }));
+  fs.writeFileSync(file, JSON.stringify({ phone: { labels: 'short', names: { [key]: 'ソル', 'bad|key': 'bad', 'chatgpt|auto': 'bad\nname', 'codex|old': 'あ'.repeat(25) } } }));
   assert.deepEqual(view.phone(), { labels: 'short', names: { [key]: 'ソル' } });
   fs.writeFileSync(file, '{broken'); assert.throws(() => view.setPhone({ labels: 'full' }, catalog)); assert.equal(fs.readFileSync(file, 'utf8'), '{broken');
+});
+test('旧手動・アプリのスマホ名は編集候補から外し、拒否時は保存データを変えない',t=>{
+  const {file,view}=fixture(t),catalog={codex:['GPT-6.1-Sol']};
+  fs.writeFileSync(file,JSON.stringify({phoneLabels:{labels:'short',names:{'chatgpt|app':'旧アプリ','chatgpt|chat':'旧手動'}},future:true}));
+  const before=fs.readFileSync(file);
+  for(const key of ['chatgpt|app','chatgpt|chat']) {assert.equal(view.setPhone({key,name:'変更'},catalog).status,400);assert.deepEqual(fs.readFileSync(file),before);}
+  assert.equal(view.setPhone({key:'chatgpt|auto',name:'Chat'},catalog).error,undefined);
+  assert.equal(view.phone().names['chatgpt|auto'],'Chat');assert.equal(JSON.parse(fs.readFileSync(file)).future,true);
 });

@@ -53,6 +53,23 @@ test('drop Hub descendants and same-AI wrapper children; strip secrets',()=>{
  assert.equal(pw.cleanCmd('x'.repeat(300)).length,160);
 });
 
+test('verified ancestry follows process parents, refuses unknown PIDs and stops at cycles',()=>{
+ const parents=new Map([[20,19],[19,18],[18,1],[40,41],[41,40]]);
+ assert.equal(pw.hasAncestor(20,parents,pid=>pid===18),true);
+ assert.equal(pw.hasAncestor(20,parents,pid=>pid===20),false);
+ assert.equal(pw.hasAncestor(21,parents,pid=>pid===18),false);
+ assert.equal(pw.hasAncestor(null,parents,()=>true),false);
+ assert.equal(pw.hasAncestor(40,parents,pid=>pid===18),false);
+});
+
+test('scan keeps parent metadata for supervised descendants, without using cwd task ownership',async()=>{
+ let ps=MAC+'  512   501 Sun Oct  4 10:01:00 2026 node tool-wrapper\n  513   512 Sun Oct  4 10:02:00 2026 codex exec fixture\n';
+ const w=pw.create({platform:'linux',selfPid:900,exec:async()=>ps,readlink:()=>'/shared',projects:()=>[{id:'freetalk',dir:'/shared',tasks:[{id:'guess',workdir:'/shared'}]}]});
+ await w.scan();assert.ok(w.list().some(x=>x.pid===513&&x.task==='guess'));
+ assert.equal(w.hasAncestor(513,pid=>pid===501),true);assert.equal(w.hasAncestor(502,pid=>pid===501),false);
+ ps=MAC;await w.scan();assert.equal(w.hasAncestor(513,pid=>pid===501),false);
+});
+
 test('lsof output and cwd → project/task mapping',()=>{
  const m=pw.parseLsof('p501\nfcwd\nn/Users/me/Work/p1/t1/sub\np503\nfcwd\nn/Users/me/Product/p1\n');
  assert.equal(m.get(501),'/Users/me/Work/p1/t1/sub');assert.equal(m.get(503),'/Users/me/Product/p1');

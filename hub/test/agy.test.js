@@ -1,4 +1,5 @@
 'use strict';
+const AGY_FIXTURE = { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' };
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 const test = require('node:test');
@@ -10,14 +11,15 @@ const launch = require('../lib/launch');
 const chat = require('../lib/chat');
 const roles = require('../lib/roles');
 const { AiTools, agyModels } = require('../lib/ai-tools');
-const model = launch.AGY_MODEL;
+const model = AGY_FIXTURE;
+test.beforeEach(() => launch.setDiscoveredModels({agy:{models:[model],known:[model]}}));
 const fixture = () => fs.mkdtempSync(path.join(os.tmpdir(), 'hub-agy-'));
 
-test('Agy pins the approved model in interactive, print and resume commands', () => {
+test('Agy passes an explicitly selected model in interactive, print and resume commands', () => {
   const prompt = 'quoted "text"; $(never-run)';
-  const argv = launch.buildArgv({ ai: 'agy', prompt });
+  const argv = launch.buildArgv({ ai: 'agy', model:model.id, prompt });
   assert.deepEqual(argv.args.slice(-3), ['--model', model.id, '--prompt-interactive=' + prompt]);
-  const shell = launch.buildCommand({ ai: 'agy', dir: '/tmp/a b', prompt });
+  const shell = launch.buildCommand({ ai: 'agy', dir: '/tmp/a b', model:model.id, prompt });
   assert.ok(shell.includes("env '-u' 'GEMINI_API_KEY'"));
   assert.ok(shell.includes(model.id));
   for (const resume of [false, true]) {
@@ -39,11 +41,19 @@ test('Agy pins the approved model in interactive, print and resume commands', ()
 });
 
 test('Agy parsing preserves text deltas, failure and model mismatch', () => {
-  assert.deepEqual(chat.parse('agy', { event: 'init', conversation_id: 'sid', init: { model: model.id } }), [{ kind: 'session', id: 'sid' }]);
-  assert.equal(chat.parse('agy', { event: 'init', init: { model: 'other' } })[0].abort, true);
+  assert.deepEqual(chat.parse('agy', { event: 'init', conversation_id: 'sid', init: { model: model.id } }, model.id), [{ kind: 'session', id: 'sid' }]);
+  assert.equal(chat.parse('agy', { event: 'init', init: { model: 'other' } }, model.id)[0].abort, true);
   assert.deepEqual(chat.parse('agy', { event: 'step_update', step_update: { step_type: 'user_input', text_delta: 'ignore' } }), []);
   assert.deepEqual(chat.parse('agy', { event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'hello' } }), [{ kind: 'text', text: 'hello' }]);
   assert.equal(chat.parse('agy', { event: 'result', result: { status: 'ERROR', error: { message: 'failure' } } })[0].error, 'failure');
+});
+
+test('Agy resolves current IDs before historical labels when a name is reused', () => {
+  const current = { id: 'gemini-current', label: model.label };
+  launch.setDiscoveredModels({ agy: { models: [current], known: [current] } });
+  assert.equal(launch.flagFor('agy', current.label), current.id);
+  assert.equal(launch.buildArgv({ ai: 'agy', model: current.id }).args[2], current.id);
+  assert.throws(() => launch.buildArgv({ ai: 'agy', model: model.id }));
 });
 
 test('Agy removes API credentials and rejects an API provider without editing preferences', () => {
@@ -62,27 +72,29 @@ test('Agy removes API credentials and rejects an API provider without editing pr
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('Agy catalogue exposes only the approved model and disables it on explicit removal', async () => {
-  const root = fixture();
+test('Agy keeps every observed model and does not replace a removed selection', async () => {
+  const root = fixture(), other={id:'gemini-current',label:'Current Gemini'};
   try {
-    let output = 'Fetching...\nother\tOther\n' + model.id + '\tGemini 3.1 Pro (High)\nclaude-opus-4-6-thinking\tOld';
-    assert.deepEqual(agyModels(output), [model]);
-    const tools = new AiTools({ root, home: root, find: ai => ai === 'agy' ? '/fixture/agy' : '', run: async () => output });
-    assert.deepEqual(tools.catalog().agy.models, []);
+    let output = model.id+'\t'+model.label+'\n'+other.id+'\t'+other.label;
+    assert.deepEqual(agyModels(output), [model,other]);
+    const tools = new AiTools({ root, home: root, find: () => '/fixture/agy', run: async () => output });
     await tools.refresh('agy');
-    roles.setModelCatalog(tools.catalog());
-    const raw = { models: { codex: ['GPT-6.1-Sol'] }, roles: { code: { main: ['codex', 'GPT-6.1-Sol', '高'] } } };
-    const data = roles.normalize(raw);
-    assert.deepEqual(data.models.agy, [model.label]);
-    assert.equal(data.roles[0].main.ai, 'codex');
-    output = 'other\tOther';
-    const result = await tools.refresh('agy');
-    assert.equal(result.unavailable, true);
-    assert.deepEqual(tools.catalog().agy.models, []);
-    const restarted = new AiTools({ root, home: root, dry: true });
-    assert.deepEqual(restarted.catalog().agy.models, []);
-    assert.equal(restarted.staleModel('agy', model.label), true);
-  } finally { roles.setModelCatalog({}); fs.rmSync(root, { recursive: true, force: true }); }
+    const raw={roles:{code:{main:['agy',model.label,'高'],backup:['人']}}};
+    output=other.id+'\t'+other.label;
+    await tools.refresh('agy'); roles.setModelCatalog(tools.catalog());launch.setDiscoveredModels(tools.catalog());
+    assert.deepEqual(tools.catalog().agy.models,[other]);assert.equal(tools.staleModel('agy',model.id),true);
+    assert.throws(()=>launch.buildArgv({ai:'agy',model:model.id}));
+    assert.throws(()=>launch.buildArgv({ai:'agy'}));
+    const data=roles.normalize(raw);assert.equal(data.roles[0].main.model,model.label);
+    assert.ok(data.models.agy.includes(other.label));
+    assert.equal(launch.buildArgv({ai:'agy',model:other.id}).args[2],other.id);
+    assert.deepEqual(new AiTools({root,home:root,dry:true}).catalog().agy.models,[other]);
+    output='unknown response';await assert.rejects(tools.refresh('agy'));
+    assert.equal(tools.catalog().agy.state,'failed');assert.deepEqual(tools.catalog().agy.models,[other]);
+    output='';await tools.refresh('agy');assert.equal(tools.catalog().agy.state,'empty');assert.deepEqual(tools.catalog().agy.models,[]);
+    assert.throws(()=>agyModels('bad;id\tBad'));
+    assert.equal(agyModels('safe\t<script>')[0].label,'<script>');
+  } finally {roles.setModelCatalog({});fs.rmSync(root,{recursive:true,force:true});}
 });
 
 test('Agy runner joins deltas, handles a final line without newline and resumes its own ID', async () => {
@@ -139,7 +151,7 @@ test('Gemini role validation pins model and high effort, saves only roles and te
     fs.writeFileSync(file,before); const data = roles.read(file).data;
     data.roles[0].main = {ai:'agy',model:model.label,effort:'高'};
     assert.equal(roles.write(file,data.roles).ok,true);
-    assert.equal(roles.read(file).data.roles[0].main.ai,'agy'); assert.ok(fs.readFileSync(file,'utf8').endsWith('switch:\n  auto: true\n'));
+    assert.equal(roles.read(file).data.roles[0].main.ai,'agy'); assert.match(fs.readFileSync(file,'utf8'), /^switch:\n  auto: true\n/m);
     for (const slot of [{ai:'agy',model:model.label,effort:'MAX'},{ai:'agy',model:'other',effort:'高'},{ai:'chatgpt',model:model.label,effort:'高'}]) {
       assert.ok(roles.validate({...data.models,agy:[model.label,'other']},[{...data.roles[0],main:slot}]).length);
     }

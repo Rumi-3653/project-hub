@@ -184,7 +184,7 @@ test('更新後の版が読めない時は最新と断定せず、モデル候�
   } finally { f.close(); }
 });
 
-test('Claudeの制御応答はmainだけ使い、cache不変なら前回候補を保つ', async () => {
+test('Claudeの制御応答とmainが一致すればcache再書込なしでも新しい観測にする', async () => {
   const f = fixture();
   try {
     const dir = path.join(f.home, '.claude', 'cache', 'model-catalog');
@@ -200,13 +200,63 @@ test('Claudeの制御応答はmainだけ使い、cache不変なら前回候補�
         return ['opus', 'sonnet', 'claude-opus-4-6'];
       },
     });
+    const mtime = fs.statSync(first).mtimeMs;
     const same = await tools.refresh('claude');
-    assert.equal(same.unchanged, true);
+    assert.equal(same.unchanged, undefined);
+    assert.equal(same.source, 'claude-cache');
     assert.equal(same.models[0].id, 'claude-opus-5-5');
+    assert.deepEqual(same.observedModels, same.models);
+    assert.equal(fs.statSync(first).mtimeMs, mtime);
+    assert.deepEqual(JSON.parse(fs.readFileSync(tools.file, 'utf8')).claude.models, same.models);
     refreshed = true;
     const next = await tools.refresh('claude');
     assert.equal(next.unchanged, undefined);
     assert.deepEqual(next.models.map(x => x.id), ['claude-opus-5-5', 'claude-sonnet-5-5']);
+  } finally { f.close(); }
+});
+
+for (const scenario of ['partial', 'empty-response', 'invalid-response', 'missing-cache', 'broken-cache', 'unreadable-cache', 'initialize-failed']) {
+  test(`Claudeのcache再書込なしでも${scenario}は未確認のまま前回候補を保持する`, async () => {
+    const f = fixture();
+    try {
+      const file = path.join(f.home, '.claude', 'cache', 'model-catalog', 'catalog.json');
+      const models = [['claude-opus-5-5', 'Opus 5.5'], ['claude-fable-5-1', 'Fable 5.1']];
+      fs.writeFileSync(file, claudeJson(models));
+      const tools = new AiTools({ root: f.root, home: f.home,
+        find: ai => ai === 'claude' ? '/fixture/claude' : '',
+        refreshClaude: async () => {
+          if (scenario === 'initialize-failed') throw Error('SECRET');
+          if (scenario === 'invalid-response') return undefined;
+          return scenario === 'partial' ? ['opus'] : scenario === 'empty-response' ? [] : ['opus', 'fable'];
+        },
+      });
+      const previous = JSON.stringify(tools.catalog().claude);
+      if (scenario === 'missing-cache') fs.unlinkSync(file);
+      if (scenario === 'broken-cache') fs.writeFileSync(file, '{bad');
+      if (scenario === 'unreadable-cache') { fs.unlinkSync(file); fs.mkdirSync(file); }
+      if (scenario === 'initialize-failed') {
+        await assert.rejects(tools.refresh('claude'), e => e.stage === 'models' && !e.message.includes('SECRET'));
+      } else {
+        const result = await tools.refresh('claude');
+        assert.equal(result.unchanged, true);
+        assert.equal(result.observedModels, undefined);
+        assert.deepEqual(result.models, models.map(([id, label]) => ({ id, label })));
+      }
+      assert.equal(JSON.stringify(tools.catalog().claude), previous);
+      assert.equal(fs.existsSync(tools.file), false);
+    } finally { f.close(); }
+  });
+}
+
+test('Claudeのcacheが無く前回候補も無い時は制御応答だけで候補を作らない', async () => {
+  const f = fixture();
+  try {
+    const tools = new AiTools({ root: f.root, home: f.home,
+      find: ai => ai === 'claude' ? '/fixture/claude' : '', refreshClaude: async () => ['opus'],
+    });
+    await assert.rejects(tools.refresh('claude'), e => e.stage === 'models');
+    assert.deepEqual(tools.catalog().claude.models, []);
+    assert.equal(fs.existsSync(tools.file), false);
   } finally { f.close(); }
 });
 

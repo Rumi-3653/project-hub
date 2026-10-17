@@ -2,9 +2,10 @@
 const { lt } = require('./locale');
 const fs = require('node:fs'), path = require('node:path');
 const order = require('../public/model-order');
+const special = require('../public/special-mode');
 const launch = require('./launch'), { EFFORTS } = require('./roles');
 const INITIAL_PICK = { ai: 'codex', model: 'GPT-6.1-Sol', effort: '高' };
-const validPhoneKey = key => key === 'chatgpt|app' || order.valid([key]);
+const validPhoneKey = key => key === 'chatgpt|auto' || order.valid([key]);
 const validPhoneName = name => typeof name === 'string' && name.length <= 24 && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(name);
 class ModelView {
   constructor(file) { this.file = file; }
@@ -31,7 +32,7 @@ class ModelView {
     const keys = Object.keys(spec);
     const mode = keys.length === 1 && keys[0] === 'labels' && ['short', 'full'].includes(spec.labels);
     const name = keys.length === 2 && keys.includes('key') && keys.includes('name') && validPhoneKey(spec.key) && validPhoneName(spec.name)
-      && (spec.key === 'chatgpt|app' || order.ordered(models).includes(spec.key));
+      && (spec.key === 'chatgpt|auto' || order.ordered(models).includes(spec.key));
     if (!mode && !name) return { status: 400, error: lt('名前は一覧のモデルを指定し、24字以内・改行なしで入力してください') };
     const data = this.read(true), phone = this.phone(data);
     if (mode) phone.labels = spec.labels;
@@ -39,6 +40,15 @@ class ModelView {
     else delete phone.names[spec.key];
     data.phone = phone; this.write(data);
     return { phoneLabels: phone };
+  }
+  special(data = this.read()) { return special.normalize(data.specialMode); }
+  setSpecial(spec) {
+    if (!spec || typeof spec.enabled !== 'boolean' || !['claude', 'codex'].includes(spec.ai) ||
+        Object.keys(spec).some(key => !['enabled', 'ai'].includes(key)))
+      return { status: 400, error: lt('特殊モードはオン・オフとClaude CodeかCodexを指定してください') };
+    const data = this.read(true);
+    data.specialMode = special.normalize(spec); this.write(data);
+    return { specialMode: this.special(data) };
   }
   initial(data = this.read()) {
     const s = data.initial;

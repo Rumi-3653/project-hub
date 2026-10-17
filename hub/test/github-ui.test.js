@@ -41,3 +41,25 @@ test('dismissed preview cannot reopen; pending operation cannot be dismissed', a
   const pending = a.context.openGithubCreate('p'); a.context.githubSheetClose(); resolve(preview); await pending; assert.equal(a.el('#github-sheet').hidden, true);
   vm.runInContext('githubPending = true', a.context); a.el('#github-sheet').hidden = false; a.context.githubSheetClose(); assert.equal(a.el('#github-sheet').hidden, false);
 });
+
+const existingPreview={project:'p',target:'product',targets:['.','product'],folder:'/local/folder/product',head:'saved-head',origin:'',accounts:[{login:'kieiken'}],defaultAccount:'kieiken',blockers:[]};
+const existingRepository={name:'kieiken/existing',private:true,writable:true,archived:false,url:'https://github.com/kieiken/existing'};
+test('existing sheet lists search and product target; explicit connect sends reviewed target and saved head without push',async()=>{
+  let body;const a=ui(async(url,input)=>{
+    if(url.endsWith('/connect-preview'))return existingPreview;
+    if(url.endsWith('/repositories'))return {repositories:[existingRepository,{...existingRepository,name:'u/public',private:false}]};
+    if(url.endsWith('/connect')){body=input;return {ok:true,url:existingRepository.url,message:'接続しました'};}
+  });a.el('#github-connect-account').value='kieiken';await a.context.openGithubConnect('p','product');
+  const html=a.el('#github-sheet').innerHTML;assert.match(html,/接続するGitフォルダ/);assert.match(html,/内容と履歴の同期は行いません/);
+  assert.match(a.el('#github-repository').innerHTML,/u\/public.*disabled/);
+  a.el('#github-repository').value=existingRepository.name;a.context.githubConnectValidate();assert.equal(a.el('#github-connect').disabled,false);
+  const button=a.el('#github-connect');button.dataset={githubExisting:'connect'};await a.event('click',button,'[data-github-existing]');
+  assert.equal(body.target,'product');assert.equal(body.expectedFolder,existingPreview.folder);assert.equal(body.expectedHead,'saved-head');assert.equal(body.confirm,true);assert.equal('push' in body,false);assert.equal(button.disabled,true);assert.equal(button.textContent,'接続済み');
+  await a.event('click',button,'[data-github-existing]');assert.match(a.el('#github-result').innerHTML,/接続しました/);
+});
+test('existing list ignores late account responses and a dismissed preview cannot reopen',async()=>{
+  let finish;const a=ui(url=>url.endsWith('/connect-preview')?Promise.resolve(existingPreview):new Promise(r=>{finish=r;}));
+  a.el('#github-connect-account').value='kieiken';const pending=a.context.openGithubConnect('p','product');
+  await new Promise(r=>setImmediate(r));a.context.githubSheetClose();finish({repositories:[existingRepository]});await pending;
+  assert.equal(a.el('#github-sheet').hidden,true);
+});

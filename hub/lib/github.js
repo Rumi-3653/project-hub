@@ -101,6 +101,115 @@ function createGithub({ exec = execute, settingsFile, init = gitw.init, tooBig =
     fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
     fs.writeFileSync(settingsFile, JSON.stringify(s, null, 2) + '\n'); return s;
   }
+  // 本体の指定は変えず、接続表示に使う Git フォルダだけを別に保持する。
+  const targetsFile = settingsFile && settingsFile.replace(/\.json$/, '') + '-projects.json';
+  function readTargets() {
+    try { return JSON.parse(fs.readFileSync(targetsFile, 'utf8')).targets || {}; }
+    catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
+  }
+  function folderFor(project, target = '.') {
+    if (typeof target !== 'string' || !target || path.isAbsolute(target) || target.split(/[\\/]/).includes('..')) fail(lt('本体内のGitフォルダを選んでください'));
+    const base = canonical(project.base), folder = canonical(path.resolve(base, target));
+    if (folder !== base && !folder.startsWith(base + path.sep)) fail(lt('本体内のGitフォルダを選んでください'));
+    return folder;
+  }
+  function targetNames(project) {
+    // 大きい依存・成果物の中を走査しない。本体と直下の独立Gitを候補にする。
+    const names = ['.'];
+    for (const entry of fs.readdirSync(project.base, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.name.startsWith('.') && fs.existsSync(path.join(project.base, entry.name, '.git'))) names.push(entry.name);
+    }
+    return names;
+  }
+  function projectRemote(project, { fresh = false } = {}) {
+    const inspect = target => {
+      const folder = folderFor(project, target);
+      if (folder !== canonical(project.base) && !fs.existsSync(path.join(folder, '.git'))) fail(lt('接続した製品Gitが見つかりません'));
+      const r = fresh ? (gitw.remoteInfo(folder, { fresh: true }), gitw.remoteSummary(folder)) : gitw.remoteSummary(folder);
+      return { ...r, target, folder, value: r.value ? { ...r.value, target, folder } : null };
+    };
+    try {
+      const selected = readTargets()[canonical(project.base)];
+      if (selected !== undefined) return inspect(selected);
+      const root = inspect('.');
+      if (root.hasOrigin) return root;
+      const connected = targetNames(project).slice(1).map(inspect).filter(r => r.hasOrigin);
+      // 明示選択が無い場合、接続済みGitがただ1つならその場所を表示する。
+      return connected.length === 1 ? connected[0] : root;
+    } catch { return { value: null, hasOrigin: false, error: lt('GitHubの接続フォルダを確認してください') }; }
+  }
+  function rememberTarget(project, target) {
+    const targets = readTargets(); targets[canonical(project.base)] = target;
+    fs.mkdirSync(path.dirname(targetsFile), { recursive: true });
+    const temporary = targetsFile + '.' + process.pid + '.tmp';
+    fs.writeFileSync(temporary, JSON.stringify({ targets }, null, 2) + '\n');
+    fs.renameSync(temporary, targetsFile);
+  }
+  function repository(raw) {
+    const r = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const parts = String(r.full_name || '').split('/');
+    if (parts.length !== 2 || !LOGIN.test(parts[0]) || !validName(parts[1])) fail(lt('GitHubのリポジトリ情報を確認できませんでした'));
+    return { name: r.full_name, url: 'https://github.com/' + r.full_name, private: r.private === true, writable: r.permissions?.push === true, archived: r.archived === true, branch: r.default_branch || '' };
+  }
+  async function repositories({ account, query = '' }) {
+    if (typeof query !== 'string' || query.length > 100) fail(lt('検索は100文字以内にしてください'));
+    const token = await tokenFor(account);
+    try {
+      const r = await run('gh', ['api', '--hostname', 'github.com', 'user/repos?per_page=100&sort=updated', '--paginate', '--jq', '.[] | {full_name, private, permissions, archived, default_branch} | tojson'], undefined, token);
+      const items = r.stdout.split('\n').filter(s => s.trim()).map(s => JSON.parse(s));
+      return { repositories: items.map(repository).filter(r => r.name.toLowerCase().includes(query.trim().toLowerCase())) };
+    } catch (e) { fail(lt`リポジトリを読み込めませんでした：${mask(e.stderr || e.message, token)}`); }
+  }
+  async function connectPreview(project, input = {}) {
+    const folder = folderFor(project, input.target || '.'), st = await status(), s = settings();
+    const top = await optional(folder, ['rev-parse', '--show-toplevel']);
+    const isRepo = top && canonical(top) === folder;
+    const origin = isRepo ? await optional(folder, ['config', '--get', 'remote.origin.url']) : null;
+    const account = st.accounts.find(a => a.login === s.account)?.login || st.accounts.find(a => a.active)?.login || st.accounts[0]?.login || '';
+    return { project: project.id, target: input.target || '.', targets: targetNames(project), folder, accounts: st.accounts, defaultAccount: account,
+      head: isRepo ? await optional(folder, ['rev-parse', '--verify', 'HEAD']) || '' : '', origin: gitw.webUrl(origin),
+      blockers: [...(!st.ready ? [st.error] : []), ...(!isRepo ? [lt('このフォルダには独立したGitがありません。Gitのあるフォルダを選んでください')] : [])] };
+  }
+  async function connect(project, input) {
+    if (input.confirm !== true) fail(lt('確認画面で［接続する］を押してください'));
+    if (input.push !== undefined && input.push !== false) fail(lt('接続では保存を送信できません'));
+    const parts = String(input.repository || '').split('/');
+    if (parts.length !== 2 || !LOGIN.test(parts[0]) || !validName(parts[1])) fail(lt('リポジトリを選んでください'));
+    const folder = folderFor(project, input.target || '.'), key = canonical(project.base);
+    if (locks.has(key) || locks.has(folder)) fail(lt('GitHubの操作中です'), 409);
+    return gitw.withCommonGit(folder, async () => {
+      locks.add(key); locks.add(folder);
+      let token = '', connected = false;
+      const url = 'https://github.com/' + input.repository;
+      try {
+        const validate = async () => {
+          const d = await connectPreview(project, input);
+          if (d.blockers.length) fail(d.blockers.join('\n'), 409);
+          if (d.folder !== folder || d.folder !== input.expectedFolder || d.head !== input.expectedHead) fail(lt('接続するGitフォルダまたは保存が変わりました。確認画面を開き直してください'), 409);
+          const remotes = (await git(folder, ['remote'])).split('\n');
+          if (remotes.includes('origin')) {
+            const fetch = await git(folder, ['remote', 'get-url', '--all', 'origin']);
+            const push = await git(folder, ['remote', 'get-url', '--push', '--all', 'origin']);
+            if ([...fetch.split('\n'), ...push.split('\n')].some(raw => gitw.webUrl(raw).toLowerCase() !== url.toLowerCase())) fail(lt('すでに別の送り先（origin）があります。上書きせずに終了します'), 409);
+          }
+          idle({ ...project, githubFolder: folder });
+          return remotes.includes('origin');
+        };
+        await validate(); token = await tokenFor(input.account);
+        const r = repository((await run('gh', ['api', '--hostname', 'github.com', 'repos/' + input.repository], undefined, token)).stdout);
+        if (r.name.toLowerCase() !== input.repository.toLowerCase() || !r.private || !r.writable || r.archived) fail(lt('非公開で、書き込み権限のある利用中のリポジトリを選んでください'), 409);
+        const existing = await validate();
+        if (!existing) await git(folder, ['remote', 'add', 'origin', r.url + '.git']);
+        connected = true; gitw.remoteInfoCache.clear();
+        rememberTarget(project, input.target || '.');
+        return { ok: true, connected: true, existing, private: true, pushed: false, url: r.url, folder, message: lt('接続しました。内容と履歴の同期は行っていません') };
+      } catch (e) {
+        const message = mask(e.stderr || e.message, token);
+        if (connected) return { ok: false, partial: true, connected: true, pushed: false, url, folder, message: lt`送り先は登録済みですが、Hubの接続表示の保存に失敗しました：${message}` };
+        fail(message, e.status || 400);
+      } finally { locks.delete(key); locks.delete(folder); }
+    });
+  }
   // HEAD のファイルだけでは、削除済みの秘密も送ってしまう。到達可能な履歴も調べる。
   async function risks(folder, head) {
     if (!head) return [];
@@ -146,7 +255,8 @@ function createGithub({ exec = execute, settingsFile, init = gitw.init, tooBig =
       remotes: type === 'repo' ? (await git(folder, ['remote'])).split('\n').filter(Boolean) : [],
       suggestedName: suggestedName(project.name), accounts: st.accounts, defaultAccount: account, defaultOwner: account === s.account ? s.owner || account : account };
   }
-  async function create(project, input) {
+  async function create(project,input){return gitw.withCommonGit(project.base,()=>createUnlocked(project,input));}
+  async function createUnlocked(project, input) {
     // 同じ本体を参照する別台帳も、一つのロックにする。
     const key = fs.realpathSync(project.base);
     if (locks.has(key)) fail(lt('作成中です'), 409);
@@ -197,6 +307,6 @@ function createGithub({ exec = execute, settingsFile, init = gitw.init, tooBig =
       fail(message, e.status || 400);
     } finally { locks.delete(key); }
   }
-  return { summary, status, settings, save, owners, preview, create, locked, assertStart };
+  return { summary, status, settings, save, owners, preview, create, repositories, connectPreview, connect, projectRemote, locked, assertStart };
 }
 module.exports = { createGithub, parseAccounts, suggestedName, validName, mask };

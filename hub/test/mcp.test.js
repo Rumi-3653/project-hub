@@ -10,15 +10,16 @@ const os = require('os');
 const http = require('http');
 const { spawn } = require('child_process');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-mcp-'));
+// macOSの/tmpリンクを避け、移動保護が検証できる実パスを使う。
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hub-mcp-')));
 const root = path.join(tmp, 'workspace'), pdir = path.join(root, 'Product', 'サンプルアプリ'), body = path.join(tmp, 'SampleApp');
 const P = 'サンプルアプリ', T = 'sample-app-01';
 const port = 49500 + Math.floor(Math.random() * 400);
 const taskFile = () => fs.readFileSync(path.join(pdir, '.ai', 'tasks', T + '.md'), 'utf8');
-function local(p, b) {
+function local(p, b, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const data = b === undefined ? null : JSON.stringify(b);
-    const rq = http.request({ host: '127.0.0.1', port, path: encodeURI(p), method: data ? 'POST' : 'GET', headers: { Host: `127.0.0.1:${port}`, 'X-Hub': '1', ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}) } }, res => {
+    const rq = http.request({ host: '127.0.0.1', port, path: encodeURI(p), method: data ? 'POST' : 'GET', headers: { Host: `127.0.0.1:${port}`, 'X-Hub': '1', ...extraHeaders, ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}) } }, res => {
       const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') }));
     });
     rq.on('error', reject); if (data) rq.write(data); rq.end();
@@ -151,4 +152,19 @@ test('報告・質問・手順・提案が作業ファイルと会話画面に�
   const made = JSON.parse((await call('hub_propose_task', { project: P, title: 'テストを足す', text: '一覧の画面にテストが無い。\n足すとよい。' })).content[0].text);
   const nt = fs.readFileSync(path.join(pdir, '.ai', 'tasks', made.task + '.md'), 'utf8');
   assert.match(nt, /owner: chatgpt/); assert.match(nt, /state: 未着手/); assert.match(nt, /## 次にやること\n一覧の画面にテストが無い。\n足すとよい。/);
+});
+
+test('廃止したDot経路は保存・配信前に拒否し、共用MCPは使える',async()=>{
+  const log=path.join(pdir,'.ai','chat',T+'.jsonl');
+  const before=taskFile(),rows=fs.existsSync(log)?fs.readFileSync(log,'utf8'):null;
+  const b={project:P,task:T,ai:'dot',model:'inbox',request:'old',text:'再送'};
+  for(const route of ['/api/chat/send','/api/dot/request','/api/dot/events/send','/api/mcp/rpc','/api/mcp/http']){
+    assert.equal((await local(route,b)).status,410,route);
+  }
+  assert.equal(taskFile(),before);assert.equal(fs.existsSync(log)?fs.readFileSync(log,'utf8'):null,rows);
+  assert.equal((await names()).includes('hub_dot_inbox'),false);assert.ok((await names()).includes('hub_get_task'));
+  assert.equal((await rpc('tools/call',{name:'hub_dot_inbox',arguments:{}})).error.code,-32602);
+  assert.equal((await call('hub_get_task',{project:P,task:T})).isError,undefined);
+  const init=await rpc('initialize',{protocolVersion:'2026-07-28'});assert.equal(init.result.capabilities.events,undefined);
+  assert.equal((await rpc('events/list')).error.code,-32601);
 });

@@ -1,0 +1,13 @@
+'use strict';
+// Reuse fixture definitions only. No D4 success tests are registered or rerun.
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),Module=require('node:module'),{createHash}=require('node:crypto');
+if(process.env.HUB_REQUEST_BASELINE)for(const name of ['integration-review-results','integrate-auto']){const filename=require.resolve('../lib/'+name),m=new Module(filename,module);m.filename=filename;m.paths=Module._nodeModulePaths(path.dirname(filename));m._compile(fs.readFileSync(path.join(process.env.HUB_REQUEST_BASELINE,name+'.js'),'utf8'),filename);require.cache[filename]=m;}
+const file=require.resolve('./integration-review-scope.test'),source=fs.readFileSync(file,'utf8'),m=new Module(file,module);m.filename=file;m.paths=Module._nodeModulePaths(path.dirname(file));m._compile(source.slice(0,source.indexOf("test('D4 原文"))+'\nmodule.exports={fixture};',file);
+const {fixture}=m.exports,results=require('../lib/integration-review-results'),hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+function authorize(t){const f=fixture(t);f.a.request={project:f.r.project,task:f.r.task,role:'チェック',text:f.a.request.text,review:{key:f.k,targetHead:f.head,subject:{project:f.i.project,task:f.i.task}}};return {...f,proof:results.recovery(f.h,f.r,f.i,f.a,f.k,f.row)};}
+test('D5 補足の根拠となる旧依頼全体をhash固定しJSON永続化後も同一内容を確認',t=>{const f=authorize(t);assert.equal(f.proof.requestHash,hash(f.a.request));const proof=JSON.parse(JSON.stringify(f.proof)),prior=JSON.parse(JSON.stringify(f.a));results.verifyScopeRecovery(proof,prior,f.row);assert.equal(createHash('sha256').update(fs.readFileSync(f.old.file)).digest('hex'),proof.oldEvidence.sha256);});
+for(const mode of ['text','project','task','role','review-key','review-target','nested-subject','missing-field','missing','null','empty','replacement','proof-hash-missing'])test('D5 許可後の旧依頼全体の変更/欠落/置換を拒否 '+mode,t=>{
+ const f=authorize(t),a=structuredClone(f.a),e=structuredClone(f.proof);
+ if(mode==='text')a.request.text+='changed';else if(['project','task','role'].includes(mode))a.request[mode]='other';else if(mode==='review-key')a.request.review.key='c'.repeat(64);else if(mode==='review-target')a.request.review.targetHead='d'.repeat(40);else if(mode==='nested-subject')a.request.review.subject.task='20261013-other';else if(mode==='missing-field')delete a.request.role;else if(mode==='missing')delete a.request;else if(mode==='null')a.request=null;else if(mode==='empty')a.request={};else if(mode==='replacement')a.request={text:f.a.request.text};else delete e.requestHash;
+ assert.throws(()=>results.verifyScopeRecovery(e,a,f.row),/Original insufficient scope request changed/);
+});

@@ -19,7 +19,7 @@ fs.mkdirSync(path.join(root, '_hub'), { recursive: true });
 fs.writeFileSync(path.join(dir, 'PROJECT.md'), '---\nname: Size fixture\nstatus: 進行中\nphases: []\nfolders: {}\nrelated: []\n---\n');
 fs.writeFileSync(path.join(dir, '.ai/tasks', 'existing.md'), '---\nid: existing\ntitle: 指示の効率化\nrole: 司令塔\nstate: 実行中\n---\n## 手順\n- [x] before\n- [ ] after\n\n## メモ\n- latest progress\n');
 fs.writeFileSync(path.join(root, '_hub/roles.yaml'), `models:\n  claude-code: [Fable 5.1, Opus 5.5]\n  codex: [GPT-6-Astra, GPT-6.1-Sol]\nroles:\n  司令塔: { main: [claude-code, Fable 5.1, 極高], backup: [codex, GPT-6-Astra, 極高] }\n  調査: { main: [claude-code, Opus 5.5, 高], backup: [codex, GPT-6.1-Sol, 高] }\n  デザイン: { main: [claude-code, Opus 5.5, 高], backup: [codex, GPT-6.1-Sol, 高] }\n  画像生成: { main: [codex, GPT-6.1-Sol, 高], backup: [claude-code, Opus 5.5, 高] }\n  コーディング: { main: [codex, GPT-6.1-Sol, 高], backup: [claude-code, Opus 5.5, 高] }\n  チェック: { main: [claude-code, Fable 5.1, 極高], backup: [codex, GPT-6-Astra, 極高] }\n  文章: { main: [claude-code, Opus 5.5, 高], backup: [codex, GPT-6.1-Sol, 高] }\nswitch:\n  auto: true\n`);
-fs.writeFileSync(path.join(root, '_hub/ai-tools-models.json'), JSON.stringify({ codex: { models: [{ id: 'gpt-6-astra', label: 'GPT-6-Astra' }, { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' }] } }));
+fs.writeFileSync(path.join(root, '_hub/ai-tools-models.json'), JSON.stringify({ claude:{models:[{id:'claude-fable-5-1',label:'Fable 5.1'},{id:'claude-opus-5-5',label:'Opus 5.5'}]}, agy:{models:[{id:'gemini-current',label:'Current Gemini'}]}, codex: { models: [{ id: 'gpt-6-astra', label: 'GPT-6-Astra' }, { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' }] } }));
 Object.assign(process.env, { HUB_ROOT: root, HUB_DRY_RUN: '1', HUB_PORT: '4545', HUB_AI_HOME: path.join(tmp, 'home') });
 const { Store } = require('../lib/store');
 const store = new Store(root), { taskPrompt, server } = require('../server');
@@ -29,7 +29,67 @@ const options = { ai: 'claude', model: 'Fable 5.1', rows: [], text: 'unique-curr
 const git = args => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
 const stateFile = path.join(root, '_hub/limits.json');
 
-test('前置きは基点1回・全文を必要時参照、意味を保持して40%以上削減', () => {
+test('確認方針は通常・自由対話の会話/ターミナルと全文へ一回届き、旧版の再開時は更新される', () => {
+  const roleFile = path.join(root, '_hub/roles.yaml'), beforeRoles = fs.readFileSync(roleFile);
+  const beforeLimits = fs.existsSync(stateFile) ? fs.readFileSync(stateFile) : null;
+  assert.match(prompt(),/Current Gemini（gemini-current）/);assert.doesNotMatch(prompt(),/Gemini 3\.1 Pro|gemini-3\.1-pro-high/);
+  const base = prompt(), first = chat.buildTurn({ ...options, basePrompt: base });
+  const topic = { ...t, freetalk: true }, fp = { id: 'freetalk', kind: 'freetalk', dir };
+  const texts = [
+    first.fixed,
+    fs.readFileSync(path.join(dir, '.ai/chat/existing.rules.md'), 'utf8'),
+    taskPrompt(p, t, store.taskFile(p.id, t.id), dir, 'terminal'),
+    ...['chat', 'terminal'].map(where => taskPrompt(fp, topic, '', dir, where)),
+  ];
+  for (const text of texts) {
+    assert.equal(text.split(instructions.WORKFLOW_RULE).length - 1, 1);
+    for (const required of [
+      '全役割を毎回呼ぶ指定ではない', '現在の担当が必要箇所を確認',
+      'チェック担当を呼ぶのは、軽微でない変更を含む時・影響の大きい操作の前・人が求めた時だけ',
+      'チェック後の修正が軽微なら、修正担当の自己確認で終え、チェック担当を再び呼ばない',
+      '影響の大きい操作の個別確認や人が求めた再確認は行う',
+      '行数ではなく', '権限・データ構造・外部連携', '一連の変更が揃い',
+      '指示一通・返信一回を自動の区切りにしない', '再確認は変更箇所と影響範囲だけ',
+      '根拠がある時だけ範囲を広げる', '最終確認も兼ねる', '影響の大きい操作の個別確認は維持',
+      '既定の役割は変更しない', 'mainの上限ではbackupへ',
+    ]) assert.ok(text.includes(required) || required === 'mainの上限ではbackupへ' && text.includes('設定main⇔backup'), required);
+    assert.doesNotMatch(text, /関連・全体試験→commit/);
+  }
+  assert.match(instructions.templates(), /全体試験は共通部への影響など根拠がある時だけ/);
+  assert.match(instructions.templates(), /関連変更が揃い、軽微でない変更を含む時・影響の大きい操作の前・人が求めた時だけ使う/);
+  assert.match(instructions.templates(), /軽微な変更だけなら現在の担当の自己確認で終える/);
+  assert.match(instructions.templates(), /チェック後の軽微な修正も自己確認で終え/);
+  assert.match(instructions.templates(), /軽微な修正は修正担当の自己確認で終える/);
+  const previous = chat.buildTurn({ ...options, basePrompt: base.replace(instructions.WORKFLOW_RULE, '旧確認方針（fixture）') });
+  const meta = { sessions: { claude: 'sid' }, rulesSent: { claude: { ...previous.rules, sid: 'sid' } } };
+  const updated = chat.buildTurn({ ...options, basePrompt: base, meta });
+  assert.equal(updated.shortRules, false);
+  assert.ok(updated.fixed.includes(instructions.WORKFLOW_RULE));
+  assert.notEqual(updated.rules.hash, previous.rules.hash);
+  assert.deepEqual(fs.readFileSync(roleFile), beforeRoles);
+  assert.deepEqual(fs.existsSync(stateFile) ? fs.readFileSync(stateFile) : null, beforeLimits);
+});
+
+test('Approved credit scope stays consistent in full and compact rules and updates the session version', () => {
+  const roles = require('../lib/roles'), file = path.join(root, '_hub/roles.yaml'), before = fs.readFileSync(file);
+  const oldPrompt = prompt(), first = chat.buildTurn({ ...options, basePrompt: oldPrompt });
+  try {
+    const original = roles.read(file).data;
+    assert.equal(roles.write(file, original.roles, { claude: false, codex: true }, false, true).ok, true);
+    const nextPrompt = prompt(), turn = chat.buildTurn({ ...options, basePrompt: nextPrompt });
+    const full = fs.readFileSync(path.join(dir, '.ai/chat/existing.rules.md'), 'utf8');
+    for (const text of [turn.fixed, full]) {
+      assert.match(text, /対象はCodexの確認ON側だけ/);assert.match(text, /購入・自動チャージ・APIキー課金/);
+      assert.doesNotMatch(text, /従量課金禁止。|追加課金・API従量課金は使わない。/);
+    }
+    const resumed = chat.buildTurn({ ...options, basePrompt: nextPrompt, meta: { sessions: { claude: 'sid' }, rulesSent: { claude: { ...first.rules, sid: 'sid' } } } });
+    assert.equal(resumed.shortRules, false);
+    roles.write(file, original.roles, { codex: false }, false, true);
+    assert.doesNotMatch(chat.buildTurn({ ...options, basePrompt: prompt() }).fixed, /既存クレジット優先の承認/);
+  } finally { fs.writeFileSync(file, before);prompt(); }
+});
+
+test('前置きは基点1回・既存指示を40%以上削減、新しい必須規則は各1回分だけ', () => {
   const turn = chat.buildTurn(options), text = turn.stdin.split('# 今回の依頼')[0];
   const baseline = require('./fixtures/instruction-baseline.json');
   const normalized = value => value.replaceAll(root, '/fixture/AI-Workspace');
@@ -41,8 +101,16 @@ test('前置きは基点1回・全文を必要時参照、意味を保持して4
   fs.writeFileSync(store.taskFile(p.id, t.id), originalTask);
   assert.match(copyText, /［本体に取り込む］がある/);
   console.log(JSON.stringify({ beforeChars: before, afterChars: after, reduction: 1 - after / before, copyBeforeChars: baseline.copyPrompt.length, copyAfterChars: copyText.length, fixedChars: turn.fixed.length }));
-  assert.ok(after <= before * .6, `${after}/${before}`);
-  assert.ok(copyText.length <= baseline.copyPrompt.length * .6, `${copyText.length}/${baseline.copyPrompt.length}`);
+  // 比較元にない必須規則だけを各一回追加し、既存指示の上限と重複禁止を保つ。
+  const addedRule = instructions.SEND_TEXT_RULE.length + instructions.WORKFLOW_RULE.length + chat.PLAIN_CHOICE_RULE.length + 3;
+  assert.equal(text.split(chat.PLAIN_CHOICE_RULE).length - 1, 1);
+  assert.equal(text.split(instructions.SEND_TEXT_RULE).length - 1, 1);
+  assert.equal(copyText.split(instructions.SEND_TEXT_RULE).length - 1, 1);
+  assert.equal(text.split(instructions.WORKFLOW_RULE).length - 1, 1);
+  assert.equal(copyText.split(instructions.WORKFLOW_RULE).length - 1, 1);
+  assert.match(instructions.WORKFLOW_RULE, /説明だけで番を終えず/);
+  assert.ok(after <= before * .6 + addedRule, `${after}/${before} + ${addedRule}`);
+  assert.ok(copyText.length <= baseline.copyPrompt.length * .6 + addedRule, `${copyText.length}/${baseline.copyPrompt.length} + ${addedRule}`);
   assert.match(copyText, /作業用コピー.*本体には触らない/);
   for (const word of ['司令塔＝Claude Code・Fable 5.1', '調査＝', 'デザイン＝', '画像生成＝', 'コーディング＝', 'チェック＝', '文章＝', 'claude-opus-4-6 などの古いモデルは使わない', '裏で起動しない', 'model欄は必須', '新しいプロジェクト', 'やっていない手順に [x]', 'workdir・state・question', '書き換えない', '自分で担当を変えない', '台帳/.ai/chat/existing.rules.md']) assert.ok(text.includes(word), word);
   assert.equal(text.split('台帳=').length - 1, 1);
@@ -55,7 +123,7 @@ test('前置きは基点1回・全文を必要時参照、意味を保持して4
   prompt(); assert.equal(fs.statSync(path.join(dir, '.ai/chat/existing.rules.md')).mtimeMs, mtime);
 });
 
-test('同じセッションは短い1行、版・session・5番目・圧縮・失敗後に復元', () => {
+test('同じセッションは短文とコピー規則、版・session・5番目・圧縮・失敗後に復元', () => {
   const first = chat.buildTurn(options);
   const meta = { sessions: { claude: 'sid' }, rulesSent: { claude: { ...first.rules, sid: 'sid' } } };
   let turn = chat.buildTurn({ ...options, meta });
@@ -68,6 +136,21 @@ test('同じセッションは短い1行、版・session・5番目・圧縮・�
   assert.equal(chat.parse('claude', { type: 'system', subtype: 'compact_boundary' })[0].kind, 'compact');
   assert.equal(chat.buildTurn({ ...options, meta: { ...meta, sessions: {} } }).shortRules, false);
   assert.notEqual(instructions.split(options.basePrompt.replace('全文版：', '別版：')).hash, first.rules.hash);
+});
+
+test('送信用本文の決まりは全文・初回・再開・担当交代で省略されない', () => {
+  assert.match(prompt(),/Current Gemini（gemini-current）/);assert.doesNotMatch(prompt(),/Gemini 3\.1 Pro|gemini-3\.1-pro-high/);
+  const base = prompt(), first = chat.buildTurn({ ...options, basePrompt: base });
+  const full = fs.readFileSync(path.join(dir, '.ai/chat/existing.rules.md'), 'utf8');
+  assert.match(full, /## 人がコピーして送る文/);
+  assert.ok(full.includes(instructions.SEND_TEXT_RULE));
+  assert.ok(first.fixed.includes(instructions.SEND_TEXT_RULE));
+  const meta = { sessions: { claude: 'sid' }, rulesSent: { claude: { ...first.rules, sid: 'sid' } } };
+  const resumed = chat.buildTurn({ ...options, basePrompt: base, meta });
+  assert.ok(resumed.shortRules); assert.ok(resumed.fixed.includes(instructions.SEND_TEXT_RULE));
+  const handoff = chat.buildTurn({ ...options, basePrompt: base, ai: 'codex', model: 'GPT-6.1-Sol', meta,
+    text: buildHandoffCard({ original: 'continue', direct: true }), limitSwitch: { original: 'continue' } });
+  assert.ok(handoff.fixed.includes(instructions.SEND_TEXT_RULE));
 });
 
 test('カードはHub記録のみ、途中commit/dirty/委任/手順を保持し繰り返さない', () => {

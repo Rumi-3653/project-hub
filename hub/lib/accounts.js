@@ -6,7 +6,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { execFile } = require('node:child_process');
-const { AGY_MODEL, agyAccountError, childEnv, GROK_AUTH_ENV, grokCommand } = require('./launch');
+const { agyAccountError, childEnv, GROK_AUTH_ENV, grokCommand } = require('./launch');
+const { agyModels } = require('./agy-models');
 const AIS = ['claude', 'codex', 'grok'];
 const ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const API_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'CODEX_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'];
@@ -51,7 +52,7 @@ const run = (file, args, env) => new Promise(resolve => {
 });
 class Accounts {
   constructor({ file, home = process.env.HUB_AI_HOME || os.homedir(), dry = false, busy = () => false, execute = run, trash = process.env.HUB_TRASH || path.join(home, '.Trash') }) {
-    Object.assign(this, { file, home, dry, busy, execute, trash }); this.locks = new Set(); this.readers = new Map();
+    Object.assign(this, { file, home, dry, busy, execute, trash }); this.locks = new Set(); this.readers = new Map(); this.authStates = new Map();
     this.termDir = path.join(path.dirname(file), 'account-processes');
     this.base = path.join(home, '.hub-accounts');
   }
@@ -92,34 +93,55 @@ class Accounts {
     if (ai === 'grok') return r.dir || process.env.GROK_HOME || path.join(this.home, '.grok');
     return r.dir || (ai === 'claude' ? process.env.CLAUDE_CONFIG_DIR : process.env.CODEX_HOME) || path.join(this.home, ai === 'claude' ? '.claude' : '.codex');
   }
-  available(ai, id = 'default') { this.get(ai, id); if (this.locks.has(ai + ':' + id) || this.terminalBusy(ai, id, true)) fail(lt('このアカウントのログアウト・削除を処理中です'), 409); }
-  terminalBusy(ai, id, authOnly = false) {
+  available(ai, id = 'default', { readOnly = false, forWork = false } = {}) {
+    this.get(ai, id);
+    if (this.locks.has(ai + ':' + id) || this.terminalBusy(ai, id, true, readOnly || forWork)) fail(lt('このアカウントのログアウト・削除を処理中です'), 409);
+  }
+  terminalBusy(ai, id, authOnly = false, allowLoginTerminal = false) {
     let files = []; try { files = fs.readdirSync(this.termDir); } catch (e) { if (e.code !== 'ENOENT') return true; }
     for (const f of files) {
       try {
         const row = JSON.parse(fs.readFileSync(path.join(this.termDir, f), 'utf8'));
-        if (row.ai !== ai || row.account !== id || authOnly && row.kind !== 'auth') continue;
+        if (ai && row.ai !== ai || id !== undefined && row.account !== id || authOnly && row.kind !== 'auth') continue;
         if (!Number.isInteger(row.pid) || row.pid < 1) return true;
-        try { process.kill(row.pid, 0); return true; } catch (e) { if (e.code !== 'ESRCH') return true; }
+        try {
+          process.kill(row.pid, 0);
+          // Agy の /login は完了後も対話画面が残る。状態確認と作業の起動は終了を待たない。
+          // 壊れた記録・権限エラー・認証を書き換える操作の保護は解除しない。
+          if (allowLoginTerminal && ai === 'agy' && row.ai === 'agy' && row.kind === 'auth' && [undefined, 'login'].includes(row.authAction)) continue;
+          return true;
+        } catch (e) { if (e.code !== 'ESRCH') return true; }
       } catch { return true; }
     }
     return false;
   }
   // 外部Terminalを開く前から保護し、CLI終了時に札を外す。再起動後も生存PIDを照合する。
-  terminalCommand(ai, account, command, sq, kind = 'work') {
+  terminalCommand(ai, account, command, sq, kind = 'work', authAction) {
     if (this.dry) return { command, cancel() {} };
     this.get(ai, account); noLinks(this.termDir); fs.mkdirSync(this.termDir, { recursive: true, mode: 0o700 });
     const file = path.join(this.termDir, randomUUID() + '.json');
-    fs.writeFileSync(file, JSON.stringify({ ai, account, kind, pid: process.pid }), { mode: 0o600 });
-    const prefix = JSON.stringify({ ai, account, kind }).slice(0, -1) + ',"pid":';
+    const marker = { ai, account, kind, ...(authAction ? { authAction } : {}) };
+    fs.writeFileSync(file, JSON.stringify({ ...marker, pid: process.pid }), { mode: 0o600 });
+    const prefix = JSON.stringify(marker).slice(0, -1) + ',"pid":';
     const script = `printf '%s%s%s' ${sq(prefix)} "$$" '}' > ${sq(file)}; trap ${sq('unlink ' + sq(file))} EXIT; ${command}`;
     return { command: '/bin/bash -c ' + sq(script), cancel: () => { fs.unlinkSync(file); } };
+  }
+  authTerminalPid(ai, id) {
+    this.get(ai, id);
+    let files; try { files = fs.readdirSync(this.termDir); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+    for (const file of files) {
+      const row = JSON.parse(fs.readFileSync(path.join(this.termDir, file), 'utf8'));
+      if (row.ai !== ai || row.account !== id || row.kind !== 'auth') continue;
+      if (!Number.isInteger(row.pid) || row.pid < 1) fail(lt('認証用Terminalの記録を確認できません'), 409);
+      try { process.kill(row.pid, 0); return row.pid; } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    }
+    return null;
   }
   assertIdle(ai, id) {
     this.available(ai, id);
     if (this.readers.get(ai + ':' + id) || this.busy(ai, id) || this.terminalBusy(ai, id)) fail(lt('このアカウントでAIが作業中または順番待ちです。終了してから操作してください'), 409);
   }
-  list() { return [...AIS.flatMap(ai => [this.get(ai), ...this.read().filter(r => r.ai === ai)]), this.get('agy')].map(r => ({ ...r, busy: Boolean(this.busy(r.ai, r.id)) || this.terminalBusy(r.ai, r.id) || this.locks.has(r.ai + ':' + r.id) })); }
+  list() { return [...AIS.flatMap(ai => [this.get(ai), ...this.read().filter(r => r.ai === ai)]), this.get('agy')].map(r => ({ ...r, busy: Boolean(this.busy(r.ai, r.id)) || this.terminalBusy(r.ai, r.id) || this.locks.has(r.ai + ':' + r.id), authTerminal: this.terminalBusy(r.ai, r.id, true) })); }
   add(ai, name) {
     if (!AIS.includes(ai)) fail(lt('Claude Code・Codex・Grokを選んでください'));
     name = this.name(name);
@@ -159,8 +181,8 @@ class Accounts {
     if (ai === 'codex' && id !== 'default') args.push('-c', 'cli_auth_credentials_store="file"');
     return { command: ai, args, env: this.env(ai, id) };
   }
-  async status(ai, id) {
-    try { this.available(ai, id); } catch { return { status: 'unknown', message: lt('認証処理中のため確認できません') }; }
+  async status(ai, id, opts = {}) {
+    try { this.available(ai, id, { readOnly: true }); } catch { return { status: 'unknown', message: lt('認証処理中のため確認できません') }; }
     if (ai === 'agy') { const error = agyAccountError(this.home, false); if (error) return { status: error.includes('API の利用設定') ? 'api' : 'unknown', message: lt(error) }; }
     const c = this.command(ai, id, 'status'); if (this.dry) return { status: 'unknown', message: lt('テスト中のため確認していません') };
     const key = ai + ':' + id; this.readers.set(key, (this.readers.get(key) || 0) + 1);
@@ -168,21 +190,49 @@ class Accounts {
     finally { const count = this.readers.get(key) - 1; if (count) this.readers.set(key, count); else this.readers.delete(key); }
     if (ai === 'agy') {
       const output = r.stdout + '\n' + r.stderr;
+      const failed = message => ({ status: this.authStates.get(key) || 'unknown', modelsState: 'failed', message });
       if (r.error?.code === 'ENOENT') return { status: 'not-installed', message: lt('Agy CLI が未導入です') };
-      if (r.error?.killed || r.error?.code === 'ETIMEDOUT') return { status: 'unknown', message: lt('ログイン状態の確認が時間切れになりました') };
-      if (!r.error && output.split(/\s+/).includes(AGY_MODEL.id)) return { status: 'logged-in' };
-      if (/not (?:logged|signed) in|unauthenticated|please (?:log|sign)[ -]?in|login required|authentication required/i.test(output)) return { status: 'logged-out' };
-      return { status: 'unknown', message: lt('ログイン状態を確認できませんでした') };
+      if (/not (?:logged|signed) in|unauthenticated|please (?:log|sign)[ -]?in|login required|authentication required/i.test(output)) {
+        this.authStates.set(key, 'logged-out');
+        return { status: 'logged-out', modelsState: 'auth-required', modelObservation: { models: [], source: 'agy-cli', authRequired: true } };
+      }
+      if (r.error?.killed || r.error?.code === 'ETIMEDOUT') return failed(lt('モデル一覧の取得が時間切れになりました。ログイン失敗とは限りません'));
+      if (!r.error) {
+        try {
+          const models = agyModels(r.stdout);
+          if (models.length) this.authStates.set(key, 'logged-in');
+          return { status: this.authStates.get(key) || 'unknown', modelsState: models.length ? 'ready' : 'empty',
+            ...(!models.length ? { message: lt('利用可能なモデルがありません。モデル一覧を再取得してください') } : {}),
+            modelObservation: { models, source: 'agy-cli', empty: !models.length } };
+        } catch { /* 未知の文は認証成功や空の一覧にしない。 */ }
+      }
+      return failed(lt('モデル一覧を取得できませんでした。前回の候補を保持しています。ログイン失敗とは限りません'));
     }
-    if (ai === 'grok') return require('./grok').authStatus(r);
+    if (ai === 'grok') {
+      const result = require('./grok').authStatus(r);
+      if (opts.models && result.status === 'logged-in') {
+        const models = require('./grok').models(r.stdout);
+        if (models.length) result.modelObservation = { models, source: 'grok-cli' };
+        else return { status: 'unknown', message: lt('ログイン状態を確認できませんでした') };
+      }
+      return result;
+    }
     if (ai === 'claude') {
+      if (r.error) return { status: 'unknown', message: lt('ログイン状態を確認できませんでした') };
       try { const d = JSON.parse(r.stdout); return { status: d.loggedIn === true ? (d.authMethod === 'api_key' ? 'api' : 'logged-in') : 'logged-out', email: typeof d.email === 'string' ? d.email.slice(0, 200) : '' }; } catch { return { status: 'unknown', message: lt('ログイン状態を確認できませんでした') }; }
     }
     const s = r.stdout + '\n' + r.stderr;
-    if (/Logged in using ChatGPT/i.test(s)) return { status: 'logged-in' };
+    if (!r.error && /Logged in using ChatGPT/i.test(s)) return { status: 'logged-in' };
     if (/Logged in using.*API key/i.test(s)) return { status: 'api', message: lt('APIのログインは対象外です') };
     if (/Not logged in/i.test(s)) return { status: 'logged-out' };
     return { status: 'unknown', message: lt('ログイン状態を確認できませんでした') };
+  }
+  async readOnly(ai, id, fn) {
+    this.available(ai, id, { readOnly: true });
+    const key = ai + ':' + id;
+    this.readers.set(key, (this.readers.get(key) || 0) + 1);
+    try { return await fn(); }
+    finally { const n = this.readers.get(key) - 1; if (n) this.readers.set(key, n); else this.readers.delete(key); }
   }
   async logout(ai, id, confirmDefault) {
     if (ai === 'agy') fail(lt('Gemini のログアウトは Terminal で /logout と入力してください'));

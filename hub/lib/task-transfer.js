@@ -5,8 +5,9 @@ const fs = require('node:fs'), path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const chat = require('./chat'), git = require('./git');
 const { readResults, verifyResults } = require('./task-results');
-const { taskTarget, integrators, integrateBlock } = require('../public/project-order');
-const { snapshot, noLinks, inside, exists } = require('./remove');
+const { taskTarget, integrators, integrateBlock, finished } = require('../public/project-order');
+const { snapshot, noLinks, noLink, inside, exists } = require('./remove');
+const continuation = require('./task-continuation');
 const hash = text => createHash('sha256').update(text).digest('hex');
 const FINAL_CHECK = lt('成果を確認し、GitHubへの更新やソフト・ホームページの本番適用が必要な場合は、対象・変更内容・検証結果を整理して人に最終確認する。引渡しだけでpush・公開・本番適用は行わない。');
 class TaskTransfer {
@@ -16,12 +17,13 @@ class TaskTransfer {
   }
   file(project, task) { return path.join(this.dir, hash(project + '\0' + task) + '.json'); }
   read(project, task) { const f = this.file(project, task); noLinks(f); return exists(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null; }
+  #readChecked(project, task) { const f = this.file(project, task); noLink(f); return exists(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null; }
   save(r) { const f = this.file(r.project, r.task); noLinks(f); fs.mkdirSync(this.dir, { recursive: true }); fs.writeFileSync(f + '.tmp', JSON.stringify(r, null, 2)); fs.renameSync(f + '.tmp', f); }
   pending() {
     if (!exists(this.dir)) return []; noLinks(this.dir);
     return fs.readdirSync(this.dir).filter(n => /^[a-f0-9]{64}\.json$/.test(n)).flatMap(n => {
-      try { const f=path.join(this.dir,n); noLinks(f); const r=JSON.parse(fs.readFileSync(f,'utf8'));
-        return r.complete || r.handedUp && !r.receiving || r.integrating ? [] : [{project:r.project,task:r.task,title:r.title,targetProject:r.targetProject,targetTask:r.targetTask}];
+      try { const f=path.join(this.dir,n); noLink(f); const r=JSON.parse(fs.readFileSync(f,'utf8'));
+        return r.complete || r.partial || r.handedUp && !r.receiving || r.integrating ? [] : [{project:r.project,task:r.task,title:r.title,targetProject:r.targetProject,targetTask:r.targetTask}];
       } catch { return []; } // 壊れた記録は消さず、他の正常な引渡しの再開を妨げない。
     });
   }
@@ -30,9 +32,45 @@ class TaskTransfer {
     const file = this.store.taskFile(project, task), title = file ? this.store.readTask(file).title : receipt?.title;
     if (title !== undefined && title !== expected) throw Error(lt`この結果の子作業はもうありません（同じ番号の別の作業「${title}」があります）`);
   }
-  offers() {
-    if(!exists(this.dir))return [];noLinks(this.dir);
-    return fs.readdirSync(this.dir).filter(n=>/^[a-f0-9]{64}\.json$/.test(n)).flatMap(n=>{try{const f=path.join(this.dir,n);noLinks(f);const r=JSON.parse(fs.readFileSync(f,'utf8'));return r.handedUp&&!r.complete?[{project:r.project,task:r.task,title:r.title,integrating:r.integrating}]:[];}catch{return [];}});
+  // History stays available; pending is a separate, target-specific projection.
+  offers({verify=true,all=this.store.listProjects()}={}) {
+    const rows=[];let directoryError;try{noLinks(this.dir);}catch(e){directoryError=e;}
+    for(const p of all)for(const t of p.tasks){
+      let r,received=null,readError;try{if(directoryError)throw directoryError;r=this.#readChecked(p.id,t.id);received=this.receiptStatus(r,{inspect:verify});}catch(e){readError=e.message;}
+      for(const target of integrators(p,t,all)){
+        let status={received:false};
+        // この統合先への受領履歴が無ければ未受領に決まる。重い統合前確認（git・全記録の参照確認）を一覧のたびに走らせない。
+        try{if(readError)throw Error(readError);if(verify&&this.offerState&&this.lastReceipt(r,target.project.id,target.task.id))status=this.offerState(p,t,target,all);}catch(e){status={received:false,reason:e.message};}
+        rows.push({project:p.id,task:t.id,title:t.title,targetProject:target.project.id,targetTask:target.task.id,integrating:r?.integrating,handedUp:r?.handedUp,partial:r?.partial,received,pending:!status.received,reason:status.reason||''});
+      }
+    }
+    return rows;
+  }
+  receivedState(i,r,targetProject,targetTask,targetDir,gitw=git) {
+    const last=this.lastReceipt(r,targetProject,targetTask);
+    if(!last)return {received:false};
+    try {
+      const history=this.receiptHistory(r).filter(x=>x.target.project===targetProject&&x.target.task===targetTask);
+      this.newReceiptFiles(i.files,{received:history},targetProject);
+      if(i.blockers?.length||i.source?.status||gitw.merging(targetDir)||require('./integration-writes').inspect(gitw,targetDir)?.status)return {received:false};
+      if(last.target.dir&&path.resolve(last.target.dir)!==path.resolve(targetDir))return {received:false};
+      if((i.source?.head||null)!==(last.head||null))return {received:false};
+      if(last.head&&(!i.copy||!gitw.isAncestor(i.copy,last.head)||!gitw.isAncestor(targetDir,last.head)))return {received:false};
+      const results=last.results??(r?.id===last.id?r.results:undefined);
+      if(JSON.stringify(i.results)!==JSON.stringify(results))return {received:false};
+      const taskHash=last.taskHash??(r?.id===last.id?r.taskHash:undefined);
+      let currentHash=taskHash;
+      // Only the human keep radio may advance the received task hash. Each
+      // persisted transition starts at the previously verified hash; all other
+      // code, result, file and permission checks still run below.
+      for(const change of r?.keepChanges||[])if(change.receipt===last.id&&change.before===currentHash)currentHash=change.after;
+      if(currentHash!==i.taskHash)return {received:false};
+      // Compare the whole declared file set, including removals, not just additions.
+      const saved=new Map((last.manifest||history.flatMap(x=>x.files||[])).map(f=>[f.id,f]));
+      const current=i.files.map(f=>({id:f.id,digest:hash(fs.readFileSync(f.path)),mode:fs.statSync(f.path).mode&0o777}));
+      if(current.length!==saved.size||current.some(f=>{const old=saved.get(f.id);return !old||old.digest!==f.digest||old.mode!==f.mode;}))return {received:false};
+      return {received:true,receipt:last.id};
+    }catch(e){return {received:false,reason:e.message};}
   }
   context(project, task, options = {}) {
     const all = this.store.listProjects(), p = all.find(x => x.id === project), t = p?.tasks.find(x => x.id === task);
@@ -42,15 +80,18 @@ class TaskTransfer {
     const target = options.targetTask ? { project: all.find(x=>x.id===options.targetProject) } : options.offer ? integrators(p,t,all)[0] || taskTarget(p,t,all) : taskTarget(p, t, all);
     if (options.targetTask && target.project) target.task = target.project.tasks.find(x=>x.id===options.targetTask);
     if (!target?.task) throw Error(lt('この作業には本作業・派生元がありません'));
-    if (options.integrating) { const reason = integrateBlock(target,p,t,all); if (reason) throw Error(reason); }
+    const policy=this.integrationPolicy?.(project,task,options);
+    if (options.integrating&&!policy?.related) { const reason = integrateBlock(target,p,t,all,options.partial?'partial':options.disposition); if (reason) throw Error(reason); }
     if (t.kind === 'derived' && !require('./work-context').sourceOf(p,t.derivedFrom,all)) throw Error(lt('派生元が同じ大きなプロジェクト内にありません'));
     if (!options.integrating && !options.offer && target.task.state === '完了') throw Error(lt`本作業「${target.task.title}」を再開してから渡してください`);
+    const retaining=options.partial||options.disposition==='continue';
     const d = this.removal.describe(project, task);
-    if (options.integrating || options.offer) d.blockers = d.blockers.filter(x=>!x.startsWith(lt('作業用コピー')) && !(options.offer && x.startsWith(lt('下の作業や'))));
+    if (options.integrating || options.offer) d.blockers = d.blockers.filter(x=>!x.startsWith(lt('作業用コピー')) && !((options.offer || retaining) && x.startsWith(lt('下の作業や'))));
     if (this.removal.busy(target.project.id, target.task.id) || this.removal.locked(target.project.id)) d.blockers.push(lt('本作業でAI・整理・確認が動いています。終わってから渡してください'));
-    if (!(t.state === '完了' || t.completionPending || t.steps.length && t.steps.every(x => x.done)) || t.question) d.blockers.push(lt('子作業の手順・質問が残っています。済ませてから渡してください'));
+    if (!retaining && !policy?.migrated && (!(t.state === '完了' || t.completionPending || t.steps.length && t.steps.every(x => x.done)) || t.question)) d.blockers.push(lt('子作業の手順・質問が残っています。済ませてから渡してください'));
     if (!options.integrating && !options.offer && t.workdir && path.resolve(t.workdir) !== path.resolve(this.baseOf(p))) d.blockers.push(lt('作業場所の記録が残っています。先に［本体に取り込む］または［記録を片付ける］を行ってください'));
-    if (!options.offer && all.some(q => q.tasks.some(x => !(q.id === p.id && x.id === t.id) && (() => { const src = taskTarget(q, x, all); return src?.project.id === p.id && src.task.id === t.id; })()))) d.blockers.push(lt('この作業に子作業・派生が残っています。先にそちらを渡してください'));
+    if (!retaining && !options.offer && all.some(q => q.tasks.some(x => !(q.id === p.id && x.id === t.id) && (() => { const src = taskTarget(q, x, all); return src?.project.id === p.id && src.task.id === t.id; })()))) d.blockers.push(lt('この作業に子作業・派生が残っています。先にそちらを渡してください'));
+    if(retaining){const q=path.join(target.project.dir,'.ai/chat',target.task.id+'.queue.json');noLinks(q);if(exists(q)){const rows=JSON.parse(fs.readFileSync(q,'utf8'));if(!Array.isArray(rows)||rows.length)d.blockers.push(lt('親作業に順番待ちがあります'));}}
     if ((options.integrating || options.offer) && t.mergeExcluded) d.blockers.push(lt('取り込み対象から外されています'));
     return { p, t, target, d };
   }
@@ -60,9 +101,9 @@ class TaskTransfer {
     let rows, results = [], issue = null;
     try { rows = readResults(this.store.taskFile(p.id, t.id)); }
     catch (e) { issue = { code: 'format', reason: e.message }; }
-    if (!issue) try { results = verifyResults(rows, p, this.baseOf(p)); }
+    if (!issue) try { results = this.verifyResults(rows, p, t); }
     catch (e) { issue = { code: 'verify', reason: e.message }; }
-    const candidates = r?.handedUp
+    const candidates = r?.handedUp&&!r.complete&&!r.partial
       ? { files: r.files, selected: r.files.map(f => f.id), candidateError: null, skipped: { count: 0, bytes: 0 } }
       : this.candidates(p, t);
     const { files, candidateError } = candidates;
@@ -86,7 +127,7 @@ class TaskTransfer {
 読む：この作業ファイルと必要な成果・本体の保存履歴。全文の「## 成果と保管」。
 やる：所属・内容・重複・反映済みを確認し、この作業ファイルの「## 成果」にファイル／本体保存済み／なし（理由）の正しい記録と短い説明を書く。検出した理由：${reason}
 条件：新しい作業・ZIPを作らない。既存成果を勝手に消さず、本体を旧版で上書きしない。人へファイル選別を求めない。実統合・公開はしない。未整理の成果を「なし」で隠さない。
-出力：成果記録と照合根拠、実施済みの手順をこの会話へ返す。残件が無ければ完了条件を整える。
+出力：成果記録と照合根拠、実施済みの手順をこの会話へ返す。「## 残件申告」にjsonコード枠で {"status":"なし|あり|不明","items":"残件の内容。無い時はなし","undecided":"判断待ち。無い時はなし","evidence":"レビュー根拠"} を保存する。未確認をなしにしない。
 次：AI終了後、整った成果の完了確認を人へ返す。` };
   }
   artifactInfo(p, t, relative, location = 'project') {
@@ -114,7 +155,8 @@ class TaskTransfer {
     }
     return [...out.values()];
   }
-  results(p, t) { return verifyResults(readResults(this.store.taskFile(p.id, t.id)), p, this.baseOf(p)); }
+  verifyResults(rows, p, t) { return verifyResults(rows, p, this.baseOf(p), { task: t, workRoot: this.removal.workRoot(p) }); }
+  results(p, t) { return this.verifyResults(readResults(this.store.taskFile(p.id, t.id)), p, t); }
   candidates(p, t) {
     const files = [], selected = [], skipped = { count: 0, bytes: 0 }; let bytes = 0;
     const fits = f => files.length < 500 && bytes + f.bytes <= 64 * 1024 * 1024;
@@ -179,39 +221,52 @@ class TaskTransfer {
   token(value) { for (const [id, x] of this.tokens) if (Date.now() - x.at > 600000) this.tokens.delete(id); const token = randomUUID(); this.tokens.set(token, { at: Date.now(), value }); return token; }
   offerPreview(project, task, paths = [], expectTitle) {
     const r=this.read(project,task); this.expectTitle(project,task,expectTitle,r);
-    if (r && !r.complete && !r.handedUp && !r.integrating) return this.preview(project,task,paths,expectTitle);
-    if (r?.complete) return this.preview(project,task,paths,expectTitle);
-    if (r?.integrating) throw Error(lt('祖先の統合が進行中です。祖先側で続きを行ってください'));
-    const {p,t,target,d}=this.context(project,task,{offer:true});
-    const candidates=this.filePreview(p,t,paths,d.blockers),{files,fileError}=candidates;
+    if (r && !r.complete && !r.handedUp && !r.integrating && !r.partial) return this.preview(project,task,paths,expectTitle);
+    if (r?.complete&&!r.retained) return this.preview(project,task,paths,expectTitle);
+    if (!r?.complete&&r?.integrating) throw Error(lt('祖先の統合が進行中です。祖先側で続きを行ってください'));
+    const file=this.store.taskFile(project,task),current=file&&this.store.readTask(file),partial=Boolean(current&&(!finished(current)||current.question));
+    const {p,t,target,d}=this.context(project,task,{offer:true,partial});
+    const candidates=this.filePreview(p,t,paths,d.blockers);let {files,fileError}=candidates,source=null;
+    if(partial)try{source=this.partialSource(p,t,r);files=this.newReceiptFiles(files,r,target.project.id);if((source?.head||null)===(this.lastReceipt(r)?.head||null)&&!files.length)d.blockers.push(lt('この保存と成果は受領済みです。新しい成果を保存してから渡してください'));}catch(e){d.blockers.push(e.message);}
     const code=Boolean(t.workdir && path.resolve(t.workdir)!==path.resolve(this.baseOf(p))) || this.integration(p,t);
     let results = []; try { results = this.results(p, t); } catch (e) { if (!fileError) d.blockers.push(e.message); }
     const resultReady = results.some(r => r.kind === 'なし' || r.kind === '本体保存済み');
     if (!fileError && !files.length && !code && !resultReady) d.blockers.push(lt('成果の記録がありません。子のAIに成果の整理を頼んでください'));
-    const value={project,task,title:t.title,taskHash:t.completionHash,targetProject:target.project.id,targetTask:target.task.id,target:`${target.project.name}／${target.task.title}`,files,results,resultReady,candidateError:candidates.candidateError,skipped:candidates.skipped,blockers:d.blockers,offer:true,hasCode:Boolean(code),selected:r?.files?.map(f=>f.id) || candidates.selected,guidance:FINAL_CHECK};
+    const value={questionHash:partial&&t.question?this.questionHash(t):null,remaining:continuation.declaration(this.store.taskFile(project,task)),project,task,partial,source,sourceHead:source?.head||null,title:t.title,taskHash:t.completionHash,targetProject:target.project.id,targetTask:target.task.id,target:`${target.project.name}／${target.task.title}`,files,results,resultReady,candidateError:candidates.candidateError,skipped:candidates.skipped,blockers:d.blockers,offer:true,hasCode:Boolean(code),selected:files.map(f=>f.id),guidance:FINAL_CHECK};
     return {...value,token:this.token(value)};
   }
   offer(b) {
     const x=this.tokens.get(b.token);
+    // A repeated submit of a completed offer returns the first result and writes nothing.
+    if (x?.done&&x.value.project===b.project&&x.value.task===b.task&&b.confirm===true) return x.done;
     if (!x?.value.offer) return this.apply(b); // 旧版で保存された途中の受領だけ再開。
     const d=x.value;
     if (Date.now()-x.at>600000 || b.confirm!==true || b.project!==d.project || b.task!==d.task) throw Error(lt('もう一度引渡し内容を確認してください'));
     this.expectTitle(b.project,b.task,b.expectTitle);
     if(d.blockers?.length)throw Error(d.blockers.join(' / '));
-    const old=this.read(b.project,b.task);if(old?.integrating || old?.complete)throw Error(lt('統合・受領記録が変わりました'));
-    const {p,t,target,d:now}=this.context(b.project,b.task,{offer:true});
+    const old=this.read(b.project,b.task);if((!old?.complete&&old?.integrating) || (old?.complete&&!old.retained))throw Error(lt('統合・受領記録が変わりました'));
+    const {p,t,target,d:now}=this.context(b.project,b.task,{offer:true,partial:d.partial});
     if(now.blockers.length)throw Error(now.blockers.join(' / '));
+    if((d.partial&&t.question?this.questionHash(t):null)!==d.questionHash)throw Error('確認中に子の質問が変わりました');
     if(d.results && JSON.stringify(this.results(p,t))!==JSON.stringify(d.results))throw Error(lt('確認中に成果の保存記録が変わりました'));
     if(t.completionHash!==d.taskHash || target.project.id!==d.targetProject || target.task.id!==d.targetTask)throw Error(lt('確認中に作業が変わりました'));
+    if(d.partial&&JSON.stringify(this.partialSource(p,t,old))!==JSON.stringify(d.source))throw Error(lt('確認中に子の保存が変わりました'));
+    if(JSON.stringify(continuation.declaration(this.store.taskFile(b.project,b.task)))!==JSON.stringify(d.remaining))throw Error(lt('確認中に残件申告が変わりました'));
     const selected=b.selected || [];
     if(!Array.isArray(selected) || new Set(selected).size!==selected.length || selected.some(id=>!d.files.some(f=>f.id===id)))throw Error(lt('渡す成果ファイルを選び直してください'));
     const files=d.files.filter(f=>selected.includes(f.id));
     if(!files.length && !d.hasCode && !d.resultReady)throw Error(lt('成果ファイルを選んでください'));
     for(const f of files)if((snapshot(f.path)!==f.fingerprint || f.mode!==undefined&&(fs.statSync(f.path).mode & 0o777)!==f.mode))throw Error(lt('確認中に成果ファイルが変わりました'));
-    const r={id:old?.id || randomUUID(),project:b.project,task:b.task,title:t.title,taskHash:t.completionHash,targetProject:target.project.id,targetTask:target.task.id,targetName:d.target,handedUp:true,files,results:d.results,resultReady:d.resultReady};this.save(r);
-    if(!chat.read(target.project.dir,target.task.id).some(x=>x.offer===r.id))chat.append(target.project.dir,target.task.id,{role:'user',text:lt`子作業「${t.title}」の成果が渡されました。［統合…］で確認して統合できます。`,from:'subtask',child:b.task,childTitle:t.title,childProject:b.project,offer:r.id});
+    if(d.partial&&(this.newReceiptFiles(files,old,target.project.id).length!==files.length||this.receiptHistory(old).length&&(this.lastReceipt(old).head===d.sourceHead&&!files.length)))throw Error(lt('この保存と成果は受領済みです。新しい成果を保存してから渡してください'));
+    const same=old?.handedUp&&old.sourceHead===d.sourceHead&&JSON.stringify(old.files)===JSON.stringify(files);
+    const history=this.receiptHistory(old);if(old?.complete&&old.retained)require('./task-continuation').archive(this.dir,old);
+    const r={...(old?.complete?{}:old||{}),schemaVersion:2,received:history,previous:this.lastReceipt(old)?.id||null,id:d.partial?(same?old.id:randomUUID()):(!old?.complete&&old?.id) || randomUUID(),partial:d.partial,sourceHead:d.sourceHead,project:b.project,task:b.task,title:t.title,taskHash:t.completionHash,targetProject:target.project.id,targetTask:target.task.id,targetName:d.target,handedUp:true,remaining:d.remaining,files,results:d.results,resultReady:d.resultReady};
+    delete r.questionBinding;if(d.questionHash)r.questionBinding={version:1,hash:d.questionHash,scope:this.questionOfferScope(r)};
+    this.save(r);
+    if(!chat.read(target.project.dir,target.task.id).some(x=>x.offer===r.id))chat.append(target.project.dir,target.task.id,{role:'user',text:d.partial?lt`子作業「${t.title}」の途中の成果が渡されました。［統合…］で受け取っても、子は継続します。`:lt`子作業「${t.title}」の成果が渡されました。［統合…］で確認して統合できます。`,from:'subtask',child:b.task,childTitle:t.title,childProject:b.project,offer:r.id,partial:r.partial});
     this.notify(r.targetProject,r.targetTask,r.id);
-    return {ok:true,handedUp:true,parent:r.targetTask,parentProject:r.targetProject,files:files.map(f=>f.path)};
+    x.done={ok:true,handedUp:true,partial:r.partial,parent:r.targetTask,parentProject:r.targetProject,files:files.map(f=>f.path)};
+    return x.done;
   }
   // 同じlocation内の共通親を一式の境界とする。共有直下まで広がる場合は束ねない。
   bundleScopes(files) {
@@ -321,21 +376,25 @@ class TaskTransfer {
     return walk(folder);
   }
   safeOptional(optional,files) { return optional.filter(m=>this.folderReceived(m.path,files)); }
-  receiveIntegrated({project,task,targetProject,targetTask,integrating,files,integrated,results=[],optional=[]}) {
+  receiveIntegrated({project,task,targetProject,targetTask,integrating,files,integrated,results=[],optional=[],disposition='cleanup',review,sourceHead,previous}) {
     let r=this.read(project,task);
     if(r?.complete){if(r.integrating!==integrating)throw Error(lt('別の統合で受領済みです'));return this.result(r,true);}
     if(r?.receiving){if(r.integrating!==integrating)throw Error(lt('別の祖先の統合中です'));this.continue(r);return this.result(r);}
     if(r?.integrating && r.integrating!==integrating)throw Error(lt('別の祖先の統合中です'));
-    const {t,target,d}=this.context(project,task,{targetProject,targetTask,integrating});
+    const {t,target,d}=this.context(project,task,{targetProject,targetTask,integrating,disposition});
     if(d.blockers.length)throw Error(d.blockers.join(' / '));
-    if(!Array.isArray(optional) || optional.some(id=>!d.optional.some(f=>f.id===id)))throw Error(lt('片付ける専用フォルダを確認してください'));
+    if(!Array.isArray(optional) || optional.some(id=>!d.optional.some(f=>f.id===id)&&!d.keep.some(f=>path.relative(this.store.readProject(project).dir,f.path)===id)))throw Error(lt('片付ける専用フォルダを確認してください'));
+    // A new reference can only narrow cleanup, never authorize another path.
+    // Preserve that folder and still receive the reviewed files.
+    const newlyProtected=d.keep.filter(f=>optional.includes(path.relative(this.store.readProject(project).dir,f.path))).map(f=>f.path);
+    optional=optional.filter(id=>d.optional.some(f=>f.id===id));
     for(const f of files)if((snapshot(f.path)!==f.fingerprint || f.mode!==undefined&&(fs.statSync(f.path).mode & 0o777)!==f.mode))throw Error(lt('成果ファイルが変わりました。元の記録は残しています'));
     const id=randomUUID(),destination=path.join(target.project.dir,'成果物','受取',id);noLinks(destination);
-    r={id,project,task,title:t.title,taskHash:t.completionHash,targetProject,targetTask,targetHash:target.task.completionHash,targetName:`${target.project.name}／${target.task.title}`,integrating,receiving:true,destination,files:this.receiptFiles(files,target.project,destination),integrated,results,move:[...d.move,...this.safeOptional(d.optional.filter(f=>optional.includes(f.id)),files)],optional,notified:false,complete:false};
+    r={schemaVersion:2,disposition,review,sourceHead,previous,id,project,task,title:t.title,taskHash:t.completionHash,targetProject,targetTask,targetHash:target.task.completionHash,targetName:`${target.project.name}／${target.task.title}`,integrating,receiving:true,destination,received:this.receiptHistory(r),manifest:files.map(f=>({id:f.id,digest:hash(fs.readFileSync(f.path)),mode:fs.statSync(f.path).mode&0o777})),allFiles:files,files:this.receiptFiles(this.newReceiptFiles(files,r,targetProject),target.project,destination),integrated,results,move:[...d.move,...this.safeOptional(d.optional.filter(f=>optional.includes(f.id)),files)],optional,notified:false,complete:false};
     // 既存の正本として使う場所を片付け対象にしない。専用成果の元も照合後だけ片付ける。
     r.move=r.move.filter(m=>!r.files.some(f=>f.to===m.path||inside(m.path,f.to)));
     r.optional=r.optional.filter(id=>r.move.some(m=>path.relative(this.store.readProject(project).dir,m.path)===id));
-    r.retainedFolders=d.optional.filter(m=>!r.move.some(x=>x.path===m.path)).map(m=>m.path);
+    r.retainedFolders=[...new Set([...newlyProtected,...d.optional.filter(m=>!r.move.some(x=>x.path===m.path)).map(m=>m.path)])];
     this.prepareBundles(r);this.save(r);this.continue(r);return this.result(r);
   }
   apply({ project, task, token, selected = [], confirm, expectTitle }) {
@@ -366,7 +425,20 @@ class TaskTransfer {
     if(old.pending && old.pending !== r.id) throw Error(lt('受領記録が変わりました。内容を読み直してください'));
     this.continue(r); return this.result(r);
   }
+  finishRetention(r) {
+    const owner=this.store.taskFile(r.project,r.task),target=this.store.taskFile(r.targetProject,r.targetTask);
+    if(!owner||!target||owner!==r.retention.file||this.removal.busy(r.project,r.task)||this.removal.busy(r.targetProject,r.targetTask)||this.removal.locked(r.project)||this.removal.locked(r.targetProject))throw Error(lt('作業・本作業が稼働中、完了済み、または見つかりません。成果は保持しています'));
+    this.checkBundles(r);
+    const {file,text,before,after}=r.retention;noLinks(file);
+    const current=hash(fs.readFileSync(file));
+    if(current!==before&&current!==after)throw Error(lt('引渡し途中で元の作業が変わりました。成果は保持しています'));
+    if(current===before){const tmp=file+'.'+randomUUID();noLinks(tmp);fs.writeFileSync(tmp,text,{flag:'wx',mode:fs.statSync(file).mode&0o777});require('./integration-writes').write(file,()=>fs.renameSync(tmp,file));}
+    if(hash(fs.readFileSync(file))!==after)throw Error(lt('継続記録を保存できませんでした'));
+    this.checkBundles(r);r.taskHash=this.store.readTask(file).completionHash;this.rememberReceipt(r);r.retained=true;r.complete=true;this.save(r);
+  }
   continue(r) {
+    this.integrationTargetGuard?.(r);
+    if(r.retention){this.finishRetention(r);return;}
     if(r.files.length>1&&!r.files.every(f=>f.to===f.path)){
       const first=r.files[0],suffix=path.join(first.location,first.relative);
       const root=first.to.endsWith(path.sep+suffix)?first.to.slice(0,-suffix.length):null;
@@ -389,7 +461,7 @@ class TaskTransfer {
       if(r.results && JSON.stringify(this.results(c.p,c.t))!==JSON.stringify(r.results))throw Error(lt('途中で成果の保存記録が変わりました。成果は保持しています'));
       if (!r.integrating && JSON.stringify(this.integration(c.p,c.t)) !== JSON.stringify(r.integrated)) throw Error(lt('本体への取り込み記録が変わりました。成果は保持しています'));
       if (c.t.completionHash !== r.taskHash || c.target.project.id !== r.targetProject || c.target.task.id !== r.targetTask) throw Error(lt('引渡し途中で元の作業が変わりました。成果は保持しています'));
-      let moves=[...c.d.move,...this.safeOptional(c.d.optional.filter(f=>(r.optional || []).includes(f.id)),r.files)].filter(m=>!r.files.some(f=>f.to===m.path||inside(m.path,f.to)));
+      let moves=[...c.d.move,...this.safeOptional(c.d.optional.filter(f=>(r.optional || []).includes(f.id)),r.allFiles||r.files)].filter(m=>!r.files.some(f=>f.to===m.path||inside(m.path,f.to)));
       // 旧版の途中受領は当時確認された片付け範囲を保つ。新版の追加物で再開を止めない。
       if(!r.integrating&&!r.cleanupVersion){const added=[path.join(c.p.dir,'.ai/work',r.task),path.join(c.p.dir,'.ai/chat',r.task+'.rules.md')];moves=moves.filter(f=>!added.includes(f.path)||r.move.some(x=>x.path===f.path));}
       if (JSON.stringify(moves) !== JSON.stringify(r.move)) throw Error(lt('引渡し途中で管理ファイルが変わりました。成果は保持しています'));
@@ -402,16 +474,26 @@ class TaskTransfer {
       const directories=(r.bundles || []).flatMap(b=>b.expected.filter(e=>e.kind==='directory').map(e=>({to:path.join(b.destination,e.path),mode:e.mode}))).filter(d=>inside(d.to,f.to)&&!exists(d.to));
       fs.mkdirSync(path.dirname(f.to), { recursive: true });
       for(const d of directories)fs.chmodSync(d.to,d.mode);
-      const tmp = f.to + '.handoff-tmp'; noLinks(tmp); fs.copyFileSync(f.path, tmp); if(f.mode!==undefined)fs.chmodSync(tmp,f.mode); if (hash(fs.readFileSync(tmp)) !== f.digest) throw Error(lt('成果を正しく保存できませんでした')); fs.renameSync(tmp, f.to);
+      const tmp = f.to + '.handoff-tmp'; noLinks(tmp); fs.copyFileSync(f.path, tmp); if(f.mode!==undefined)fs.chmodSync(tmp,f.mode); if (hash(fs.readFileSync(tmp)) !== f.digest) throw Error(lt('成果を正しく保存できませんでした')); require('./integration-writes').write(f.to,()=>fs.renameSync(tmp, f.to));
     }
     this.checkBundles(r);
     // 通知・本文は識別子で照合し、通知後の保存失敗でも二重にしない。
     const recovered = r.integrated?.recovered ? lt('（古い取り込み記録を本体の履歴と照合）') : '';
-    const text = [lt`「${r.title}」から本作業「${r.targetName}」へ成果を受け取りました。`, ...(r.retainedFolders||[]).map(f=>lt`- 残す：${f}（未受領の内容または正本があるため自動で片付けません）`), ...r.files.map(f => `- ${f.to}${f.existing ? lt('（同じ内容を保存済み。重複コピーなし）') : ''}`), ...(r.results || []).filter(x=>x.kind!=='ファイル').map(x=>`- ${x.kind}：${x.value}${x.description ? '（'+x.description+'）' : ''}`), ...(r.integrated ? [`${r.integrating ? lt('統合先') : lt('本体への取り込み済み')}：${r.integrated.dir}（${r.integrated.commit}）${recovered}`, ...(r.integrated.github ? [lt`更新候補：${r.integrated.github.url}（ブランチ：${r.integrated.github.branch || lt('未指定')}）`] : []), ...r.integrated.files.map(f => `- ${f}`)] : []), FINAL_CHECK].join('\n');
-    if (!chat.read(target.dir, r.targetTask).some(x => x.handoff === r.id)) chat.append(target.dir, r.targetTask, {role:'user',text,from:'subtask',child:r.task,childTitle:r.title,childProject:r.project,handoff:r.id,...(r.integrating?{integrating:r.integrating}:{})});
+    const text = [...(r.disposition==='continue'?[lt('成果を受け取り、作業・会話・コピーを残して続けます。'),lt('残件：')+r.review.residual,lt('判断待ち：')+r.review.undecided]:[]),lt`「${r.title}」から本作業「${r.targetName}」へ成果を受け取りました。`, ...(r.retainedFolders||[]).map(f=>lt`- 残す：${f}（未受領の内容または正本があるため自動で片付けません）`), ...r.files.map(f => `- ${f.to}${f.existing ? lt('（同じ内容を保存済み。重複コピーなし）') : ''}`), ...(r.results || []).filter(x=>x.kind!=='ファイル').map(x=>`- ${x.kind}：${x.value}${x.description ? '（'+x.description+'）' : ''}`), ...(r.integrated ? [`${r.integrating ? lt('統合先') : lt('本体への取り込み済み')}：${r.integrated.dir}（${r.integrated.commit}）${recovered}`, ...(r.integrated.github ? [lt`更新候補：${r.integrated.github.url}（ブランチ：${r.integrated.github.branch || lt('未指定')}）`] : []), ...r.integrated.files.map(f => `- ${f}`)] : []), FINAL_CHECK].join('\n');
+    if (!chat.read(target.dir, r.targetTask).some(x => x.handoff === r.id)) chat.append(target.dir, r.targetTask, {role:'user',text,from:'subtask',child:r.task,childTitle:r.title,childProject:r.project,handoff:r.id,disposition:r.disposition,...(r.integrating?{integrating:r.integrating}:{})});
     const targetFile = this.store.taskFile(r.targetProject, r.targetTask); noLinks(targetFile);
     if (!fs.readFileSync(targetFile, 'utf8').includes(lt`受領記録：${r.id}`)) this.store.appendSection(r.targetProject, r.targetTask, 'やったこと', lt`- 「${r.title}」の成果${r.files.length}ファイルを受領：${r.destination}${r.integrated ? (r.integrating ? lt('／統合先への取り込み済み') : lt('／本体への取り込み済み')) + recovered : ''}。受領記録：${r.id}。${FINAL_CHECK}`);
-    r.notified = true; this.save(r); this.notify(r.targetProject, r.targetTask, r.id);
+    const wasNotified=r.notified; r.notified = true; this.save(r); if(!wasNotified)this.notify(r.targetProject, r.targetTask, r.id);
+    if(!r.cleanup&&r.allFiles)this.newReceiptFiles(r.allFiles,r);
+    if(r.disposition==='continue'){
+      for(const f of r.files){noLinks(f.to);if(!exists(f.to)||hash(fs.readFileSync(f.to))!==f.digest||(fs.statSync(f.to).mode&0o777)!==f.mode)throw Error(lt('受け取った成果が変わりました。原物を保持します'));}
+      this.checkBundles(r);
+      const note=lt`- 成果を受領し作業を継続。残件：${r.review.residual}。判断待ち：${r.review.undecided}。受領記録：${r.id}`;
+      const prepared=this.store.continuationDocument(r.project,r.task,note);
+      r.retention={...prepared,before:hash(fs.readFileSync(prepared.file)),after:hash(prepared.text)};this.save(r);
+      this.finishRetention(r);
+      return;
+    }
     if(r.integrating)this.beforeCleanup(r);
     // コピー片付け処理などの後にも、保存先を照合してから原物を退避する。
     for(const f of r.files){
@@ -419,6 +501,7 @@ class TaskTransfer {
       if(!exists(f.to)||!fs.statSync(f.to).isFile()||hash(fs.readFileSync(f.to))!==f.digest||f.mode!==undefined&&(fs.statSync(f.to).mode & 0o777)!==f.mode)throw Error(lt('受け取った成果が変更されています。元の記録を保持します'));
     }
     this.checkBundles(r);
+    if(!r.cleanup&&r.allFiles)this.newReceiptFiles(r.allFiles,r);
     if (!r.cleanup) {
       const id = randomUUID(), dest = path.join(this.removal.trash, 'ProjectHub 引渡し ' + id);
       noLinks(dest);
@@ -441,14 +524,16 @@ class TaskTransfer {
         const p=this.store.readProject(r.project),t=p?.tasks.find(x=>x.id===r.task);
         if(!t || this.removal.referenced(e.from,p,t,this.store.listProjects())) throw Error(lt('他の記録から参照されているため専用フォルダ・引継ぎ資料を残します'));
       }
-      if ((r.optional||[]).some(x=>e.from===path.join(root,x))&&!this.folderReceived(e.from,r.files)) throw Error(lt('未受領の内容があるため専用フォルダを残します。子のAIに成果の整理を頼んでください'));
+      if ((r.optional||[]).some(x=>e.from===path.join(root,x))&&!this.folderReceived(e.from,r.allFiles||r.files)) throw Error(lt('未受領の内容があるため専用フォルダを残します。子のAIに成果の整理を頼んでください'));
       if (!exists(e.from) || snapshot(e.from) !== e.fingerprint) throw Error(lt('片付ける管理記録が変わりました。成果は保持しています'));
       this.checkBundles(r);
       fs.mkdirSync(path.dirname(e.to), {recursive:true}); e.moving=true; this.removal.save(record);
-      this.removal.rename(e.from,e.to); e.moved=true; e.moving=false; this.removal.save(record);
+      require('./integration-writes').tree(e.from,()=>this.removal.rename(e.from,e.to)); e.moved=true; e.moving=false; this.removal.save(record);
     }
+    if(r.schemaVersion===2)this.rememberReceipt(r);
     r.complete = true; this.save(r);
   }
-  result(r, duplicate = false) { return {ok:true,parent:r.targetTask,parentProject:r.targetProject,record:r.cleanup,destination:r.destination,files:r.files.map(f=>f.to),duplicate}; }
+  result(r, duplicate = false) { return {ok:true,parent:r.targetTask,parentProject:r.targetProject,record:r.cleanup||r.id,retained:r.retained===true,destination:r.destination,files:r.files.map(f=>f.to),duplicate}; }
 }
+Object.assign(TaskTransfer.prototype,require('./partial-receipt'));
 module.exports = { TaskTransfer, FINAL_CHECK };

@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createHash } = require('node:crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
 
 const bookkeeping = require('./git-bookkeeping');
 
@@ -14,17 +14,38 @@ const MAX_FILES = 20000;          // これより多いフォルダは自動で�
 const MAX_BYTES = 1024 ** 3;      // 1GB
 const MAX_GIT_OUTPUT = 16 * 1024 * 1024; // 日本語の長いパスや大量の保存待ちも、既定の1MiBで切らない
 
-function git(dir, args) {
+function git(dir, args, {readOnly=false}={}) {
+  if(['add','commit','merge','checkout','switch','branch','worktree','config','init','update-ref','reset','clean','rm','remote','tag','gc'].includes(args[0])&&!args.includes('--get')&&!args.includes('--get-all')){
+    const key=require('./resource-scope').commonGit(dir);
+    if(key&&mergeMutex.has(key)&&gitOwner.getStore()!==key)throw Object.assign(Error('共有Gitの保存処理が進行中です'),{status:409,delivery:{state:'not-sent'}});
+  }
   // 名前が未設定の Mac でも保存できるように、未設定の時だけ仮の名前を使う
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  if(readOnly)env.GIT_OPTIONAL_LOCKS='0';
   if (!hasIdentity(dir)) Object.assign(env, { GIT_AUTHOR_NAME: 'Project Hub', GIT_AUTHOR_EMAIL: 'hub@localhost', GIT_COMMITTER_NAME: 'Project Hub', GIT_COMMITTER_EMAIL: 'hub@localhost' });
-  return execFileSync('git', ['-C', dir, ...args], { env, encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return execFileSync('git', ['-C', dir, '-c', 'gc.auto=0', ...args], { env, encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 function blob(dir, ref, file) { return execFileSync('git',['-C',dir,'show',`${ref}:${file}`],{encoding:'utf8',maxBuffer:MAX_GIT_OUTPUT,stdio:['ignore','pipe','pipe']}); }
 function tryGit(dir, args) { try { return git(dir, args); } catch (e) { return null; } }
+// The display still asks Git for the current HEAD on every request. Overlap
+// this read-only process with state construction instead of blocking Node.
+// Commit identity is irrelevant to rev-parse; action paths keep savedHead.
+function savedHeadAsync(dir) {
+  return new Promise(resolve => execFile('git', ['-C', dir, '-c', 'gc.auto=0', 'rev-parse', 'HEAD'], {
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+    encoding: 'utf8', maxBuffer: MAX_GIT_OUTPUT,
+  }, (error, stdout) => resolve(error ? null : stdout.trim())));
+}
 
+// git を呼ぶたびに確かめると起動回数が倍になるので、場所ごとの答えを1分覚えておく（名前を設定してから最長1分は仮の名前のまま）
+const identityKnown = new Map();
 function hasIdentity(dir) {
-  try { return Boolean(execFileSync('git', ['-C', dir, 'config', 'user.email'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch (e) { return false; }
+  const known = identityKnown.get(dir);
+  if (known && Date.now() - known.at < 60000) return known.ok;
+  let ok = false;
+  try { ok = Boolean(execFileSync('git', ['-C', dir, 'config', 'user.email'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch (e) {}
+  identityKnown.set(dir, { ok, at: Date.now() });
+  return ok;
 }
 
 function available() {
@@ -104,9 +125,10 @@ const branchName = s => 'hub/' + (String(s).replace(/[\s~^:?*[\\\x00-\x1f\x7f]+|
 
 // 作業を始める前の準備。作業する場所と、何をしたかを返す
 //   base: 本体のフォルダ / workRoot: AI-Workspace/Work/<プロジェクト>
-function prepare({ base, workRoot, taskId, direct }) {
+function prepare({ base, workRoot, taskId, direct, startRef, isolatedOnly }) {
   if (!available()) return { dir: base, note: lt('Git が無いため、本体で作業します') };
   let top = repoTop(base);
+  if (isolatedOnly && (!top || direct || tryGit(top, ['config', 'hub.mode']) === 'direct')) return { dir: base, note: lt('専用の作業用コピーを作れません') };
   // 台帳のフォルダが別の Git の中にある時は、台帳だけの保存を始める
   if (top && direct && real(top) !== real(base)) top = null;
   if (!top) {
@@ -128,7 +150,7 @@ function prepare({ base, workRoot, taskId, direct }) {
   fs.mkdirSync(workRoot, { recursive: true });
   const branch = branchName(taskId);
   const exists = tryGit(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
-  git(top, exists ? ['worktree', 'add', '-q', wt, branch] : ['worktree', 'add', '-q', '-b', branch, wt, 'HEAD']);
+  git(top, exists ? ['worktree', 'add', '-q', wt, branch] : ['worktree', 'add', '-q', '-b', branch, wt, startRef || 'HEAD']);
   const copied = copyLocalFiles(top, wt);
   return { dir: path.join(wt, rel), worktree: wt, created: true, branch, copied, note: lt`この作業専用の作業用コピーを作りました${copied.length ? lt`（${copied.join('・')} も写しました）` : ''}` };
 }
@@ -154,14 +176,15 @@ function copyLocalFiles(top, wt) {
 }
 
 // 取り込む前の見通し：変わったファイルの数・行数、本体とぶつかりそうか（本体は触らない）
-function preview({ dir, workRoot, target }) {
+function preview({ dir, workRoot, target, from, targetGuard }) {
   const wt = repoTop(dir);
   const main = target ? repoTop(target) : wt && mainOf(wt);
   if (!wt || !main) return null;
   const inside = path.relative(workRoot, wt);
   if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return null;
   const mainHead = tryGit(main, ['rev-parse', 'HEAD']);
-  const base = mainHead && tryGit(wt, ['merge-base', mainHead, 'HEAD']);
+  const mergeBase = mainHead && tryGit(wt, ['merge-base', mainHead, 'HEAD']);
+  const base = from && /^[a-f0-9]{40,64}$/.test(from) && isAncestor(wt, from) ? from : mergeBase;
   if (!base) return null;
   const stat = tryGit(wt, ['diff', '--shortstat', base]) || '';
   const num = re => Number((stat.match(re) || [0, 0])[1]);
@@ -175,12 +198,15 @@ function preview({ dir, workRoot, target }) {
       conflict=e.status===1;
       if(conflict) {
         const parts=String(e.stdout||'').split('\0'),tree=parts.shift();conflictPaths=parts.filter(Boolean);
-        const plan=bookkeeping.plan({read:(ref,f)=>blob(main,ref,f),paths:conflictPaths,base,ours:mainHead,theirs:git(wt,['rev-parse','HEAD']),merged:tree,title:'確認'});
+        const plan=bookkeeping.plan({read:(ref,f)=>blob(main,ref,f),paths:conflictPaths,base:mergeBase,ours:mainHead,theirs:git(wt,['rev-parse','HEAD']),merged:tree,title:'確認'});
         conflictKind=plan?'bookkeeping':'content';
       }
     }
   }
-  return { files, added: num(/(\d+) insertions?/), removed: num(/(\d+) deletions?/), conflict, conflictPaths, conflictKind, mainDirty: dirty(main), paths: (tryGit(wt, ['diff', '--name-only', '-z', base]) || '').split('\0').filter(Boolean) };
+  const sourceHead=tryGit(wt,['rev-parse','HEAD']),sourceDirty=dirty(wt),mainDirty=targetGuard?Boolean(targetGuard(main).status):dirty(main);
+  const sameHistory=isAncestor(wt,mainHead)||isAncestor(main,sourceHead);
+  const noChanges=files===0&&!conflict&&!sourceDirty&&!mainDirty&&!merging(wt)&&!merging(main)&&sameHistory&&tryGit(wt,['rev-parse','HEAD^{tree}'])===tryGit(main,['rev-parse','HEAD^{tree}']);
+  return { files, added: num(/(\d+) insertions?/), removed: num(/(\d+) deletions?/), conflict, conflictPaths, conflictKind, mainDirty, sourceDirty, sourceHead, targetHead:mainHead, noChanges, paths: (tryGit(wt, ['diff', '--name-only', '-z', base]) || '').split('\0').filter(Boolean) };
 }
 
 // ゴミ箱へ移す（完全には消さない）
@@ -198,7 +224,31 @@ function trashPath(dir, trash) {
 }
 
 // 作業用コピーを本体に取り込み、片付ける。ぶつかったら何も変えずに conflict を返す
-function merge({ dir, workRoot, title, target, cleanup = true }) {
+const mergeMutex=new Set();
+const gitOwner=new (require('node:async_hooks').AsyncLocalStorage)();
+function mergeLocks(dir){
+ const own=git(dir,['rev-parse','--absolute-git-dir']),common=git(dir,['rev-parse','--path-format=absolute','--git-common-dir']),ref=tryGit(dir,['symbolic-ref','-q','HEAD']);
+ return [...new Set([path.join(own,'index.lock'),path.join(own,'HEAD.lock'),path.join(common,'packed-refs.lock'),...(ref?[path.join(common,ref+'.lock')]:[])])].filter(f=>fs.existsSync(f));
+}
+function withCommonGit(dir,fn){
+ const key=require('./resource-scope').commonGit(dir)||fs.realpathSync(dir);
+ if(mergeMutex.has(key))throw Object.assign(Error('共有Gitの保存処理が進行中です'),{status:409,delivery:{state:'not-sent'}});
+ mergeMutex.add(key);try{const value=gitOwner.run(key,fn);if(value&&typeof value.then==='function')return value.finally(()=>mergeMutex.delete(key));mergeMutex.delete(key);return value;}catch(e){mergeMutex.delete(key);throw e;}
+}
+function mergeTargetProblem(dir){
+ const own=git(dir,['rev-parse','--absolute-git-dir']);
+ if(['BISECT_LOG','BISECT_START'].some(n=>fs.existsSync(path.join(own,n))))return 'bisect';
+ return tryGit(dir,['symbolic-ref','-q','HEAD'])?null:'detached';
+}
+function assertMergeTarget(dir){
+ const problem=mergeTargetProblem(dir);
+ if(problem)throw Object.assign(Error(problem==='bisect'?'本体でGitの原因調査が途中です。調査を終えてから確認してください':'本体のブランチが選ばれていません。保存先のブランチを確認してください'),{delivery:{state:'not-sent'}});
+}
+function merge(options){
+ try{return withCommonGit(options.target||mainOf(options.dir)||options.dir,()=>{assertMergeTarget(options.target||mainOf(options.dir)||options.dir);return options.strictFrozen?require('./idea-frozen-merge').mergeFrozen(options):mergeUnlocked(options);});}
+ catch(e){return {ok:false,error:e.message,delivery:e.delivery||{state:'unknown'}};}
+}
+function mergeUnlocked({ dir, workRoot, title, target, cleanup = true, sourceHead, targetGuard }) {
   const wt = repoTop(dir);
   if (!wt) return { ok: false, error: lt('作業用コピーが見つかりません') };
   const inside = path.relative(workRoot, wt);
@@ -210,24 +260,40 @@ function merge({ dir, workRoot, title, target, cleanup = true }) {
   const mergeError = lt('統合先で取り込みが途中です。解消して保存してください');
   // 他の取り込みは、子の保存やno-op判定より前に拒否してそのまま残す。
   if (merging(main)) return { ok: false, error: mergeError };
+  const locks=mergeLocks(main);if(locks.length)return {ok:false,error:'Gitの保存処理が進行中です：'+locks.join('、'),delivery:{state:'not-sent'}};
+  const preflightGuard=()=>{try{return targetGuard?.(main);}catch(e){throw Object.assign(e,{delivery:{state:'not-sent'}});}};
   const branch = git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  // 途中受領の再開は確認済みの保存だけを取り込む。子の後続commitは次回へ残す。
+  if (sourceHead && (!/^[a-f0-9]{40}$/.test(sourceHead) || !isAncestor(wt, sourceHead))) return { ok: false, error: lt('確認した子の保存が履歴にありません') };
+  if (sourceHead && cleanup) return { ok: false, error: lt('途中の保存の取り込みでは子のコピーを片付けられません') };
+  if (sourceHead && (dirty(wt) || (targetGuard?preflightGuard().status:dirty(main)) || merging(wt))) return { ok: false, error: lt('途中の成果を渡す前に、子の変更を保存してください') };
   save(wt, lt`${title}（作業の保存）`);
   if (merging(main)) return { ok: false, error: mergeError };
-  save(main, lt('取り込み前の保存'));
+  if(targetGuard)preflightGuard();else save(main, lt('取り込み前の保存')); // approved integration never commits Hub records or unrelated work
   if (merging(main)) return { ok: false, error: mergeError };
   const before = git(main, ['rev-parse', 'HEAD']);
-  const source = git(wt, ['rev-parse', 'HEAD']), already = isAncestor(main, source);
+  // Local settings excluded from saving may remain untracked. Verify their
+  // exact before/after content too, rather than requiring a blank status.
+  const baseline = targetGuard ? null : inspect(main, {readOnly:true});
+  const targetChanged = () => {
+    if(targetGuard)return Boolean(targetGuard(main).status);
+    const now=inspect(main,{readOnly:true});
+    return !now || now.branch!==baseline.branch || now.status!==baseline.status || now.content!==baseline.content;
+  };
+  const source = sourceHead || git(wt, ['rev-parse', 'HEAD']), already = isAncestor(main, source);
   let autoResolved, startedMerge = false;
   const ownMerge = () => startedMerge && tryGit(main, ['rev-parse', '--verify', 'MERGE_HEAD']) === source;
   try {
     if (!already) {
       if (merging(main)) return { ok: false, error: mergeError };
+      assertMergeTarget(main);
+      if(targetGuard)preflightGuard();
       startedMerge = true;
-      git(main, ['merge', '--no-ff', '--no-edit', '-m', lt`取り込み: ${title}`, branch]);
+      git(main, ['merge', '--no-ff', '--no-edit', '-m', lt`取り込み: ${title}`, sourceHead || branch]);
     }
   } catch (e) {
     // 自分のmergeと確認できない失敗では、解消・abortを一切行わない。
-    if (!ownMerge()) return { ok: false, error: merging(main) ? mergeError : lt('取り込みを開始できません：') + e.message };
+    if (!ownMerge()) return { ok: false, error: merging(main) ? mergeError : lt('取り込みを開始できません：') + e.message,delivery:{state:e.delivery?.state==='not-sent'?'not-sent':!merging(main)&&git(main,['rev-parse','HEAD'])===before&&!targetChanged()?'not-sent':'unknown'} };
     const conflictPaths=(tryGit(main,['diff','--name-only','--diff-filter=U','-z'])||'').split('\0').filter(Boolean);
     const base=tryGit(main,['merge-base',before,source]);
     const plan=bookkeeping.plan({read:(ref,f)=>ref==='work'?fs.readFileSync(path.join(main,f),'utf8'):blob(main,ref,f),paths:conflictPaths,base,ours:before,theirs:source,merged:'work',title});
@@ -245,37 +311,51 @@ function merge({ dir, workRoot, title, target, cleanup = true }) {
         if (!ownMerge()) return { ok: false, error: mergeError };
         git(main,['merge','--abort']);
       }
-      if(git(main,['rev-parse','HEAD'])!==before||dirty(main))throw Error(lt('取り込みの中止結果を確認できません'));
-      return { ok: false, conflict: true, conflictKind:'content', conflictPaths, error: lt('コードがぶつかったため、この子は後回しにしました') };
+      if(git(main,['rev-parse','HEAD'])!==before||targetChanged())throw Error(lt('取り込みの中止結果を確認できません'));
+      return { ok: false, conflict: true, conflictKind:'content', conflictPaths, delivery:{state:'aborted',sourceHead:source,targetHead:before}, error: lt('コードがぶつかったため、取り込みを中止して元の状態に戻しました') };
     }
   }
   const commit = git(main, ['rev-parse', 'HEAD']);
+  if(!isAncestor(main,source)||!(tryGit(main,['rev-parse','HEAD^{tree}']))||targetChanged())return {ok:false,error:'取り込み後の本体を確認できません',delivery:{state:'unknown'}};
   const files = (tryGit(main, ['diff', '--name-only', '-z', before, commit]) || '').split('\0').filter(Boolean);
   const sourceSnapshot = inspect(wt);
   const trashed = cleanup ? cleanupCopy({ dir: wt, workRoot, target: main, expectedSnapshot:sourceSnapshot }).trashed : null;
   return { ok: true, main, trashed, commit, files, already, branch, ...(autoResolved?{autoResolved}:{}) };
 }
-function isAncestor(dir, commit) { return /^[a-f0-9]{40,64}$/.test(commit || '') && tryGit(dir, ['merge-base', '--is-ancestor', commit, 'HEAD']) !== null; }
-function inspect(dir) {
+function isAncestor(dir, commit, descendant='HEAD') { return /^[a-f0-9]{40,64}$/.test(commit || '') && (descendant==='HEAD'||/^[a-f0-9]{40,64}$/.test(descendant||'')) && tryGit(dir, ['merge-base', '--is-ancestor', commit, descendant]) !== null; }
+function commitsSince(dir, head) { return isAncestor(dir, head) ? Number(git(dir, ['rev-list', '--count', head + '..HEAD'])) : null; }
+function inspect(dir, {readOnly=false,ignore=[]}={}) {
+  const scope=ignore.length?['--','.',...ignore.map(f=>':(top,exclude,literal)'+f)]:[];
   const wt = repoTop(dir); if (!wt) return null;
   // porcelainの同じ変更マークでも、中身・ステージ・未追跡ファイルが変われば拒否する。
   const digest = createHash('sha256');
   for (const args of [['diff','--binary','--no-ext-diff','--no-textconv','HEAD'], ['diff','--cached','--binary','--no-ext-diff','--no-textconv']]) {
-    const data = execFileSync('git', ['-C',wt,...args], {maxBuffer:256*1024*1024,stdio:['ignore','pipe','pipe']});
+    // diffのstat更新はGIT_OPTIONAL_LOCKS=0でも起こる。内容検査にindexの更新は不要。
+    const data = execFileSync('git', ['-C',wt,'-c','diff.autoRefreshIndex=false',...args,...scope], {maxBuffer:256*1024*1024,stdio:['ignore','pipe','pipe']});
     digest.update(String(data.length)+':').update(data);
   }
-  const files = execFileSync('git',['-C',wt,'ls-files','--others','--exclude-standard','-z'],{encoding:'utf8',maxBuffer:MAX_GIT_OUTPUT,stdio:['ignore','pipe','pipe']}).split('\0').filter(Boolean).sort();
+  const untracked = execFileSync('git',['-C',wt,'ls-files','--others','--exclude-standard','-z'],{encoding:'utf8',maxBuffer:MAX_GIT_OUTPUT,stdio:['ignore','pipe','pipe']}).split('\0').filter(f=>f&&!ignore.includes(f));
+  // 保存から除外するローカル設定も、確認後に変わったなら片付けない。
+  const local=fs.readdirSync(wt).filter(n=>LOCAL_FILES.test(n));
+  if(fs.existsSync(path.join(wt,'.claude/settings.local.json')))local.push('.claude/settings.local.json');
+  const files = [...new Set([...untracked,...local.filter(f=>!ignore.includes(f))])].sort();
   let bytes=0;if(files.length>MAX_FILES)throw Error(lt('未追跡ファイルが多すぎて照合できません'));
   for (const f of files) {
     const file=path.join(wt,f),st=fs.lstatSync(file);
+    if(!st.isFile()&&!st.isSymbolicLink())throw Error(lt('未追跡ファイルが多すぎて照合できません'));
     if((bytes+=st.size)>256*1024*1024)throw Error(lt('未追跡ファイルが大きすぎて照合できません'));
     const data=st.isSymbolicLink()?Buffer.from(fs.readlinkSync(file)):fs.readFileSync(file);
     digest.update(JSON.stringify([f,st.mode,data.length])).update(data);
   }
-  return { head: git(wt, ['rev-parse', 'HEAD']), branch: git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']), status: git(wt, ['status', '--porcelain']), content: digest.digest('hex') };
+  return { head: git(wt, ['rev-parse', 'HEAD']), branch: git(wt, ['rev-parse', '--abbrev-ref', 'HEAD']), status: git(wt, ['-c','core.quotepath=false','status', '--porcelain',...scope],{readOnly}), content: digest.digest('hex') };
 }
 // 復旧先は同じリポジトリの保存済みの場所だけ。確認自体では保存しない。
-function merging(dir) { return tryGit(dir, ['rev-parse', '--verify', 'MERGE_HEAD']) !== null; }
+// Include every paused Git operation; state belongs to this worktree, not the
+// shared Git directory. Record-only saves use this same predicate.
+function merging(dir) {
+  const own=tryGit(dir,['rev-parse','--absolute-git-dir']);
+  return own!==null&&['MERGE_HEAD','REBASE_HEAD','CHERRY_PICK_HEAD','REVERT_HEAD','rebase-merge','rebase-apply','sequencer'].some(name=>fs.existsSync(path.join(own,name)));
+}
 function recoveryTarget(dir, base, { clean = true, allowMerge = false } = {}) {
   const common = p => tryGit(p, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const expected = common(base), actual = common(dir), state = inspect(dir);
@@ -339,6 +419,27 @@ function remoteInfo(dir, { fresh } = {}) {
   return value;
 }
 
+// 一覧は同期gitを呼ばず、保持値を返して裏で更新する。GitHubへの通信は行わない。
+const remotePending = new Map();
+function remoteSummary(dir) {
+  const hit=remoteInfoCache.get(dir);
+  if((!hit||Date.now()-hit.at>=REMOTE_TTL)&&!remotePending.has(dir)) {
+    const run=args=>new Promise(resolve=>execFile('git',['-C',dir,...args],{env:{...process.env,GIT_TERMINAL_PROMPT:'0'},encoding:'utf8',timeout:5000,maxBuffer:MAX_GIT_OUTPUT},(error,stdout)=>resolve(error?null:stdout.trim())));
+    const pending=(async()=>{
+      let value=null,hasOrigin=false;
+      if(dir&&fs.existsSync(dir)) {
+        const raw=await run(['config','--get','remote.origin.url']);hasOrigin=raw!==null;
+        const url=webUrl(raw);
+        if(url){const branch=await run(['rev-parse','--abbrev-ref','HEAD'])||'';value={url,branch:branch==='HEAD'?'':branch};}
+      }
+      // 操作のfresh検査が先に更新した場合、その新しい値を上書きしない。
+      if(remoteInfoCache.get(dir)===hit)remoteInfoCache.set(dir,{at:Date.now(),value,hasOrigin});
+    })();
+    remotePending.set(dir,pending);pending.finally(()=>remotePending.delete(dir));
+  }
+  return hit||{value:null,hasOrigin:false};
+}
+
 function hasOrigin(dir) { remoteInfo(dir); return Boolean(remoteInfoCache.get(dir)?.hasOrigin); }
 
 function integrationReceipt(dir, record, task) {
@@ -363,4 +464,5 @@ function integrationReceipt(dir, record, task) {
   if (tryGit(dir, ['merge-base', '--is-ancestor', record.commit, 'HEAD']) === null) return null;
   return {dir, commit:record.commit, files:record.files, github:remoteInfo(dir)};
 }
-module.exports = { hasOrigin, tooBig, integrationReceipt, available, repoTop, mainOf, save, init, prepare, merge, preview, toTrash, cleanupCopy, finishCleanupCopy, inspect, merging, recoveryTarget, isAncestor, countCopies, dirty, copyLocalFiles, remoteInfo, remoteInfoCache, webUrl };
+function changedBetween(dir, from, to) { return git(dir,["diff","--name-only","-z",from,to]).split("\0").filter(Boolean); }
+module.exports = {mergeTargetProblem, savedHeadAsync, savedHead:dir=>tryGit(dir,['rev-parse','HEAD']), mergeLocks, withCommonGit, remoteSummary, changedBetween, hasOrigin, tooBig, integrationReceipt, available, repoTop, mainOf, save, init, prepare, merge, preview, toTrash, cleanupCopy, finishCleanupCopy, inspect, merging, recoveryTarget, isAncestor, commitsSince, countCopies, dirty, copyLocalFiles, remoteInfo, remoteInfoCache, webUrl };

@@ -38,7 +38,7 @@ function showTreeMenu(pId, tId, x, y) {
       } else if (t) {
         const title = prompt(action === 'child' ? UI.text('子作業の名前') : UI.text('派生する作業の名前'), nextName(t.title, p.tasks.map(x => x.title))); if (!title?.trim()) return;
         // 子作業・分岐は設定の初期AIを使い、親の役割と階層は保持する。
-        const pick = initialPick();
+        const pick = defaultWorkPick('司令塔');
         const initialAI = { owner: AI_KEY[pick.ai], model: pick.model, effort: pick.effort };
         const created = await api('/api/task/new', { project: p.id, title, parent: action === 'child' ? t.id : t.parent || '', kind: action==='branch' ? 'derived' : 'main', derivedFrom: action==='branch' ? `${p.id}/${t.id}` : '', ...initialAI, phase: t.phase, role: t.role });
         view = { kind: 'work', project: p.id, task: created.id }; save(); await load();

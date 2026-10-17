@@ -77,6 +77,17 @@ function pickAi(rows, selfPid) {
   return kept.filter(r => keptAi.get(r.ppid) !== keptAi.get(r.pid)).map(r => ({ ...r, ai: keptAi.get(r.pid) }));
 }
 
+// Only process ancestry from the last successful scan, never shared cwd/task guesses.
+function hasAncestor(pid, parents, matches) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  const seen = new Set([pid]);
+  for (let p = parents.get(pid); Number.isSafeInteger(p) && p > 1 && !seen.has(p); p = parents.get(p)) {
+    if (matches(p)) return true;
+    seen.add(p);
+  }
+  return false;
+}
+
 // lsof -Fpn の出力 → Map(pid → cwd)
 function parseLsof(text) {
   const out = new Map(); let pid = 0;
@@ -116,7 +127,7 @@ function create(opts = {}) {
   const real = d => { if (!realCache.has(d)) { if (realCache.size > 1000) realCache.clear(); let r = d; try { r = fs.realpathSync(d); } catch (e) { r = d; } realCache.set(d, r); } return realCache.get(d); };
   const cwdCache = new Map(); // "pid:since" → cwd
   const listeners = [];
-  let current = [], timer = null, busy = false, lastWarn = 0;
+  let current = [], parents = new Map(), timer = null, busy = false, lastWarn = 0;
   const warn = m => { const now = Date.now(); if (now - lastWarn < WARN_EVERY) return; lastWarn = now; log(lt`[裏の作業の見張り] ${m}`); };
 
   async function cwds(rows) {
@@ -154,6 +165,7 @@ function create(opts = {}) {
       const before = new Set(current.map(x => x.pid)), after = new Set(next.map(x => x.pid));
       const removed = current.filter(x => !after.has(x.pid)), added = next.filter(x => !before.has(x.pid));
       current = next;
+      parents = new Map(rows.map(r => [r.pid, r.ppid]));
       if (removed.length || added.length) for (const fn of listeners) { try { fn(current, { added, removed }); } catch (e) { log(lt`[裏の作業の見張り] ${e.message}`); } }
       return current;
     } catch (e) { warn(String(e.message || e)); return current; }
@@ -163,10 +175,11 @@ function create(opts = {}) {
   return {
     scan,
     list: () => current.slice(),
+    hasAncestor: (pid, matches) => hasAncestor(pid, parents, matches),
     onChange: fn => { listeners.push(fn); },
     start(ms = INTERVAL) { if (timer) return; if (platform === 'win32') { log(lt('[裏の作業の見張り] Windows では裏で動く AI の見張りを行いません')); return; } scan().catch(() => {}); timer = setInterval(() => { scan().catch(() => {}); }, ms); timer.unref?.(); },
     stop() { if (timer) clearInterval(timer); timer = null; },
   };
 }
 
-module.exports = { create, parsePs, parseLstart, parseLsof, aiOf, cleanCmd, pickAi, mapCwd, psArgs };
+module.exports = { create, parsePs, parseLstart, parseLsof, aiOf, cleanCmd, pickAi, hasAncestor, mapCwd, psArgs };
