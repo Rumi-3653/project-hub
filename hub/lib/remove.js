@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 // 人が確認した対象だけをゴミ箱へ退避する。外の場所は明示選択と照合が必要。
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
@@ -125,7 +126,7 @@ function referenceTexts(text,file) {
  return out;
 }
 class Removal {
- constructor({store,busy=()=>false,locked=()=>false,reviewBusy=()=>false,trash=process.env.HUB_TRASH||path.join(os.homedir(),'.Trash'),rename=fs.renameSync}){Object.assign(this,{store,busy,locked,reviewBusy,trash,rename});this.tokens=new Map();this.referenceFiles=new Map();this.records=path.join(store.root,'_hub/removed');}
+ constructor({store,busy=()=>false,locked=()=>false,reviewBusy=()=>false,trash=process.env.HUB_TRASH||platform.trashDir(),rename=fs.renameSync}){Object.assign(this,{store,busy,locked,reviewBusy,trash,rename});this.tokens=new Map();this.referenceFiles=new Map();this.records=path.join(store.root,'_hub/removed');}
  trashFor(source){return trashRootFor(source,this.trash);}
  trashDestination(source,destination){return isTrashDestination(source,destination,this.trash);}
  workRoot(p){return path.join(this.store.root,'Work',p.id);}

@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { randomUUID } = require('crypto');
-const { execFileSync } = require('child_process');
+const platform = require('./platform');
 const IMAGE = /\.(png|jpe?g|webp|gif|heic)$/i;
 const MAX = 50 * 1024 * 1024;
 const dirOf = p => path.join(p.dir, '.ai', 'work', 'start-images');
@@ -26,7 +26,7 @@ function imageFile(p, id, preview = false) {
   return path.join(dirOf(p), preview && !/\.(png|jpe?g)$/i.test(id) ? id + '.png' : id);
 }
 function convertImage(file, output) {
-  execFileSync('/usr/bin/sips', ['-s', 'format', 'png', file, '--out', output], { timeout: 15000, stdio: 'pipe' });
+  return platform.convertImage(file, output);
 }
 function saveImage(p, name, data) {
   if (!IMAGE.test(name)) throw Error(lt('画像は png／jpg／jpeg／webp／gif／heic に対応しています'));

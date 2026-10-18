@@ -1,11 +1,16 @@
 'use strict';
+const persistence = require('./platform').persistence;
 // One detached supervisor per turn. It owns only that CLI, never Hub tasks or
 // model selection. Persisted requests contain no environment or credentials.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process'),{EventEmitter}=require('node:events'),{StringDecoder}=require('node:string_decoder');
 const WORKER_SOURCE=fs.readFileSync(__filename),OWNED_SOURCE=fs.readFileSync(path.join(__dirname,process.argv[2]==='--worker'?'owned-processes.cjs':'owned-processes.js'));
+const PLATFORM_SOURCE=new Map(require('./platform').supervisorFiles.map(name=>{
+ if(!/^[a-z][a-z0-9-]*\.js$/.test(name))throw Error('監督のOS部品の同梱先を確認できません');
+ return [name,fs.readFileSync(path.join(__dirname,'platform',name))];
+}));
 function strictRead(dir,name){try{return JSON.parse(fs.readFileSync(path.join(dir,name),'utf8'));}catch(e){if(e.code==='ENOENT')return null;throw e;}}
 function read(dir,name,fallback=null){try{return JSON.parse(fs.readFileSync(path.join(dir,name),'utf8'));}catch{return fallback;}}
-function atomic(dir,name,value){const file=path.join(dir,name),tmp=file+'.'+crypto.randomUUID(),fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,file);const d=fs.openSync(dir,'r');try{fs.fsyncSync(d);}finally{fs.closeSync(d);}}
+function atomic(dir,name,value){const file=path.join(dir,name),tmp=file+'.'+crypto.randomUUID(),fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,file);persistence.syncDirectory(dir);}
 // Publish an acknowledgement only AFTER the receipt and its directory synced.
 // The proof file itself is synced before rename. Rename is the last operation:
 // no subsequent failing directory sync can leave an apparent failed commit.
@@ -50,6 +55,7 @@ function worker(dir){
  let owned;let cli;const end=(code,signal,error)=>{if(ended)return;ended=true;clearInterval(timer);chunk(decoder.end());if(rest)line(rest);fs.closeSync(fd);atomic(dir,'stderr.json',{text:err});atomic(dir,'exit.json',{code,signal,error});};
  try{
    if(read(dir,'cancel.json'))throw Error('開始前に停止されました');
+   require(path.join(__dirname,'owned-processes.cjs')).assertLaunchOwnership();
    if(req.options.stopSafety){const c=req.options.stopSafety,d=strictRead(c.dir,'state.json');
      if(d?.version!==1||!Number.isSafeInteger(d.epoch)||d.epoch<0||typeof d.all!=='boolean'||!d.tasks||typeof d.tasks!=='object'||Array.isArray(d.tasks)||Object.entries(d.tasks).some(([k,t])=>!t||k!==JSON.stringify([t.project,t.task])||typeof t.project!=='string'||typeof t.task!=='string'||!Number.isSafeInteger(t.epoch)||t.epoch<0||typeof t.held!=='boolean'||t.autoHeld!==undefined&&typeof t.autoHeld!=='boolean')||d.restartIds!==undefined&&(!Array.isArray(d.restartIds)||d.restartIds.some(id=>typeof id!=='string'||!id||id.length>80)))throw Error('停止記録を確認できないため開始しません');
      const t=d.tasks[JSON.stringify([req.options.project,req.options.task])];
@@ -89,11 +95,14 @@ class SpoolChild extends EventEmitter{
  safe(){return this.spawned&&!this.failure&&!this.closed&&this.owns()&&alive(this.supervisorPid);}
 }
 function start(root,serverId,options,turn,meta,rows,env){
+ require('./owned-processes').assertLaunchOwnership();
  fs.mkdirSync(root,{recursive:true,mode:0o700});const dir=path.join(root,crypto.randomUUID());fs.mkdirSync(dir,{mode:0o700});
  // Capture this generation's worker bytes before launch; replacement on disk
  // cannot change the code governing a running CLI.
  fs.writeFileSync(path.join(dir,'worker.cjs'),WORKER_SOURCE,{mode:0o600});
  fs.writeFileSync(path.join(dir,'owned-processes.cjs'),OWNED_SOURCE,{mode:0o600});
+ fs.mkdirSync(path.join(dir,'platform'),{mode:0o700});
+ for(const [name,source]of PLATFORM_SOURCE)fs.writeFileSync(path.join(dir,'platform',name),source,{mode:0o600});
  const clean={};for(const [k,v]of Object.entries(options))if(k!=='env'&&typeof v!=='function')clean[k]=v;
  atomic(dir,'request.json',{options:clean,turn,meta,rows});const owner=claim(dir,serverId);
  const p=spawn(process.execPath,[path.join(dir,'worker.cjs'),'--worker',dir],{env,detached:true,stdio:'ignore'});p.unref();if(p.pid){let identity;try{identity=require('./owned-processes').capture(p.pid);}catch{}atomic(dir,'launch.json',{supervisorPid:p.pid,identity});}

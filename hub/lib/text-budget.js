@@ -201,14 +201,31 @@ class TextBudget{
     return out+(omitted?notice:'');
   }
 }
+// Display-only bounds: avoid allocating a code-point array for entire archived sections.
+// Keep the write/archive helpers above unchanged.
+const viewCount=s=>s.length-(s.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length||0);
+function viewHead(s,n){
+  if(s.length<=n)return s;
+  let i=0;for(let used=0;used<n&&i<s.length;used++)i+=s.codePointAt(i)>0xffff?2:1;
+  return s.slice(0,i);
+}
+function viewTail(s,n){
+  let i=s.length;for(let used=0;used<n&&i>0;used++){
+    const low=s.charCodeAt(--i),high=s.charCodeAt(i-1);
+    if(low>=0xdc00&&low<=0xdfff&&high>=0xd800&&high<=0xdbff)i--;
+  }
+  return s.slice(i);
+}
 function taskView(raw,projectRaw,archives=[]){
   const ss=sections(raw),sv=summaryView(raw),pick=n=>ss.find(s=>is(s,n))?.body||'',front=raw.slice(0,ss[0]?.start??raw.length);
+  const results=pick('成果'),resultsLength=viewCount(results),marker='\n'+lt('（中略。全文は原文検索で確認）')+'\n',remaining=12000-viewCount(marker),head=Math.ceil(remaining/2);
+  const resultsView=resultsLength<=12000?results:viewHead(results,head)+marker+viewTail(results,remaining-head);
   const st=lines(pick('手順')),pending=st.filter(l=>/^\s*[-*] \[ \]/.test(l)),done=st.filter(l=>/^\s*[-*] \[[xX]\]/.test(l)).slice(-10);
   const warnings=[lt('Unicode文字で合計24000字以内の表示。成果原文と受領判定は変更していません。省略された承認・未済は hub_search_archive で原文を検索してください。'),sv.warning].filter(Boolean);
-  const parts=[['管理情報',front],['最新の再開要約',sv.text],['手順（未済すべて・直近の済10件）',[...pending,...done].join('')],['次にやること',pick('次にやること')],['注意',pick('注意')],['成果',cut(Array.from(pick('成果')).slice(-12000).join(''),12000)],['メモ',cut(pick('メモ'),4000)],['PROJECT.md',cut(projectRaw.slice(0,sections(projectRaw,1)[0]?.start??projectRaw.length),800)+'\n'+cut(sections(projectRaw,1).find(s=>is(s,'メモ'))?.body||'',3100)],['保管先',archives.map(x=>x.path+' '+x.characters+'字').join('\n')]];
-  let out='',omitted=ss.filter(s=>!summaryName(s)&&!['手順','成果','次にやること','注意','メモ','本文保管'].some(n=>is(s,n))).map(s=>s.name);const max=LIMITS.total-750;for(const [label,body]of parts){const block='\n## '+lt(label)+'\n'+body,available=max-count(out);if(count(block)>available){omitted.push(label);out+=cut(block,available);}else out+=block;}
-  if(count(pick('成果'))>12000)omitted.push('成果');if(count(pick('メモ'))>4000)omitted.push('メモ');if(count(projectRaw)>4000)omitted.push('PROJECT.md');
-  const detail=omitted.length?'\n'+lt('表示不足：')+cut(omitted.join('、'),300)+lt('。hub_search_archive または hub_read_file で必要箇所を確認してください。'):'';
-  return cut(out+'\n'+warnings.join('\n')+detail,LIMITS.total);
+  const parts=[['管理情報',front],['最新の再開要約',sv.text],['手順（未済すべて・直近の済10件）',[...pending,...done].join('')],['次にやること',pick('次にやること')],['注意',pick('注意')],['成果',resultsView],['メモ',viewHead(pick('メモ'),4000)],['PROJECT.md',viewHead(projectRaw.slice(0,sections(projectRaw,1)[0]?.start??projectRaw.length),800)+'\n'+viewHead(sections(projectRaw,1).find(s=>is(s,'メモ'))?.body||'',3100)],['保管先',archives.map(x=>x.path+' '+x.characters+'字').join('\n')]];
+  let out='',used=0,omitted=ss.filter(s=>!summaryName(s)&&!['手順','成果','次にやること','注意','メモ','本文保管'].some(n=>is(s,n))).map(s=>s.name);const max=LIMITS.total-750;for(const [label,body]of parts){const block='\n## '+lt(label)+'\n'+body,available=max-used,blockLength=viewCount(block);if(blockLength>available){omitted.push(label);out+=viewHead(block,available);used=max;}else{out+=block;used+=blockLength;}}
+  if(resultsLength>12000)omitted.push('成果');if(viewCount(pick('メモ'))>4000)omitted.push('メモ');if(viewCount(projectRaw)>4000)omitted.push('PROJECT.md');
+  const detail=omitted.length?'\n'+lt('表示不足：')+viewHead(omitted.join('、'),300)+lt('。hub_search_archive または hub_read_file で必要箇所を確認してください。'):'';
+  return viewHead(out+'\n'+warnings.join('\n')+detail,LIMITS.total);
 }
 module.exports={TextBudget,LIMITS,count,cut,hash,lines,sections,summaryView,taskView,splitKeep};

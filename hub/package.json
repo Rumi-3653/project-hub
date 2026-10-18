@@ -1,6 +1,6 @@
 {
   "name": "project-hub",
-  "version": "4.124.0",
+  "version": "4.124.2",
   "private": true,
   "license": "MIT",
   "author": "kieiken",
@@ -11,7 +11,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "HUB_LANG=ja node --test test/*.test.js",
+    "test": "node test/run.cjs",
     "test:langpack": "HUB_LANG=zh-TW node --test ../langpacks/zh-TW/test/*.test.js"
   },
   "dependencies": {

@@ -64,7 +64,7 @@ function verifyStopped(a){
   for(const p of added)if(!known.has(p.pid)){saved.push(p);known.add(p.pid);}
  });
  const groups=new Set([...observed,...added].map(p=>p.pgid).filter(n=>Number.isSafeInteger(n)&&n>1));
- if(rows.some(p=>pids.has(p.pid)||p.uid===identity.uid&&groups.has(p.pgid)))throw Error('前のAIまたは子プロセスが残っています。待ち指示は開始していません');
+ if(rows.some(p=>pids.has(p.pid)||groups.has(p.pgid)&&require('./owned-processes').sameOwner(p,identity)))throw Error('前のAIまたは子プロセスが残っています。待ち指示は開始していません');
 }
 function resolve(pdir,task,{id,expectedUpdated,evidence}){
  if(typeof evidence!=='string'||!evidence.trim()||evidence.length>4000)throw Error('完了を確認した成果と参照を記録してください');

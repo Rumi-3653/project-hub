@@ -1,4 +1,5 @@
 'use strict';
+const persistence = require('./platform').persistence;
 // Explicit human authorization, narrowly scoped to related ledger records.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process'),{createHash}=require('node:crypto');
 const writes=require('./integration-writes'),{noLinks}=require('./remove'),{lt}=require('./locale'),graph=require('../public/project-order');
@@ -17,7 +18,7 @@ function ready(top,paths,untracked){let dir;try{
 // and exact HEAD/index comparison. No reset, stash or unrelated entry editing.
 function undoPreparation(top,head,prepared,original){const file=indexFile(top),lock=file+'.lock';let fd,owned=false;try{
  fd=fs.openSync(lock,'wx',0o600);owned=true;if(g(top,['rev-parse','HEAD']).toString().trim()!==head||hash(fs.readFileSync(file))!==prepared.sha)return false;
- fs.writeFileSync(fd,original.bytes);fs.fchmodSync(fd,original.mode);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(lock,file);owned=false;const directory=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}return g(top,['rev-parse','HEAD']).toString().trim()===head&&hash(fs.readFileSync(file))===hash(original.bytes);
+ fs.writeFileSync(fd,original.bytes);fs.fchmodSync(fd,original.mode);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(lock,file);owned=false;persistence.syncDirectory(path.dirname(file));return g(top,['rev-parse','HEAD']).toString().trim()===head&&hash(fs.readFileSync(file))===hash(original.bytes);
  }catch{return false;}finally{if(fd!==undefined){try{fs.closeSync(fd);}catch{}}if(owned){try{fs.unlinkSync(lock);}catch{}}}}
 function outputState(dir,id){const f=path.join(dir,'作業',id);return fs.existsSync(f)?require('./remove').snapshot(f):null;}
 function scope(h,a){return a.all.flatMap(p=>p.tasks.filter(t=>p.id===a.p.id&&t.id===a.t.id||graph.ancestorsOf(p,t,a.all).some(x=>x.project.id===a.p.id&&x.task.id===a.t.id)).map(t=>({dir:p.dir,id:t.id,project:p,task:t})));}

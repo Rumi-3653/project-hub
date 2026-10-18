@@ -7,21 +7,10 @@ const { randomUUID } = require('node:crypto');
 const { noLinks, exists } = require('./remove');
 const { lt } = require('./locale');
 const start = require('./start');
+const platforms = require('./platform');
 const run = promisify(execFile), TEXT_LIMIT = 500000, PACKAGE_LIMIT = 256 * 1024 * 1024, FILE_LIMIT = 20000;
 const TEXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html|css|js|ts|py|log|rtf)$/i;
-const PDF_SCRIPT = `function run(argv) {
-  ObjC.import('PDFKit');
-  var doc = $.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath(argv[0]));
-  var count = Number(doc.pageCount);
-  if (!doc || !Number.isFinite(count) || count < 1 || doc.isEncrypted) throw Error('PDF unavailable');
-  var out = '';
-  for (var i = 0; i < count && out.length <= ${TEXT_LIMIT}; i++) {
-    var s = doc.pageAtIndex(i).string;
-    var text = s ? ObjC.unwrap(s) : '';
-    if (typeof text === 'string' && text.trim()) out += text + '\\n';
-  }
-  return out.slice(0, ${TEXT_LIMIT + 1});
-}`;
+const { PDF_SCRIPT } = platforms;
 function xmlText(xml) {
   return [...xml.matchAll(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g)].map(m => m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (all, v) => {
     if (v[0] === '#') { const n = v[1].toLowerCase() === 'x' ? parseInt(v.slice(2),16) : Number(v.slice(1)); return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ''; }
@@ -38,7 +27,7 @@ function readSafe(file, max = start.MAX) {
   } finally { fs.closeSync(fd); }
 }
 class FreetalkAttachments {
-  constructor(ft) { this.ft = ft; }
+  constructor(ft, { platform = platforms } = {}) { this.ft = ft; this.platform = platform; }
   base(task) { this.ft.history.topic(task); const dir = path.join(this.ft.dir,'topics',task); noLinks(dir); return dir; }
   derived(task, id) {
     if (!/^[a-f\d-]{36}$/.test(id)) throw Error(lt('添付ファイルの指定が正しくありません'));
@@ -107,13 +96,13 @@ class FreetalkAttachments {
         }
       } else if (/\.pdf$/i.test(file)) {
         try {
-          const {stdout} = await run('/usr/bin/osascript',['-l','JavaScript','-e',PDF_SCRIPT,file],{timeout:30000,maxBuffer:4*1024*1024});
+          const stdout = await this.platform.readPdfText(file, run);
           if (!stdout.trim()) { result.status='unsupported';result.message=lt('画像のみのPDFです。本文を抽出できません'); }
           else writeText(stdout);
         } catch { result.status='unsupported';result.message=lt('PDFの本文を抽出できませんでした'); }
       } else if (/\.(pptx|key)$/i.test(file)) {
         const keynote = /\.key$/i.test(file), deadline = Date.now()+30000;
-        const unzip = args => run('/usr/bin/unzip',args,{timeout:Math.max(1,deadline-Date.now()),maxBuffer:8*1024*1024});
+        const unzip = args => this.platform.readArchive(args,{timeout:Math.max(1,deadline-Date.now()),maxBuffer:8*1024*1024});
         try {
           const packageDir = fs.lstatSync(file).isDirectory();
           let members;
@@ -132,7 +121,7 @@ class FreetalkAttachments {
           const preview = ['preview.jpg','preview.png','preview-web.jpg','Metadata/Preview.jpg','docProps/thumbnail.jpeg','docProps/thumbnail.jpg','docProps/thumbnail.png'].find(n=>members.includes(n));
           if(preview){
             const output=path.join(derived,'preview'+path.extname(preview).toLowerCase());
-            const data=packageDir?readSafe(path.join(file,preview)):(await run('/usr/bin/unzip',['-p',file,preview],{timeout:Math.max(1,deadline-Date.now()),maxBuffer:start.MAX,encoding:'buffer'})).stdout;
+            const data=packageDir?readSafe(path.join(file,preview)):(await this.platform.readArchive(['-p',file,preview],{timeout:Math.max(1,deadline-Date.now()),maxBuffer:start.MAX,encoding:'buffer'})).stdout;
             fs.writeFileSync(output,data,{flag:'wx'});result.imagePath=output;result.referencePaths.push(output);
           }
         } catch { result.status='unsupported';result.message=lt(keynote ? 'Keynoteのプレビューを取得できませんでした' : 'PPTXの文字・ノートを抽出できませんでした'); }

@@ -13,6 +13,76 @@ const NOW = Date.parse('2026-10-03T00:00:00Z');
 const codex = { rateLimits:{ limitId:'codex',primary:{usedPercent:0,windowDurationMins:10080,resetsAt:1791046922},secondary:null,credits:{balance:'SECRET'}} };
 const claude = { subscription_type:'max',rate_limits_available:true,rate_limits:{five_hour:{utilization:20,resets_at:'2026-10-03T05:00:00Z'},seven_day:null,model_scoped:[{display_name:'Fable',utilization:33,resets_at:'2026-10-07T13:00:00Z'}]},behaviors:{private:'SECRET'} };
 
+const capacityModels = ['gpt-6.2-sol', 'gpt-6.1-astra'];
+const contract = usedPercent => ({ rateLimits: { limitId: 'codex', primary: {
+  usedPercent, windowDurationMins: 300, resetsAt: (NOW + 3600000) / 1000
+}, credits: { hasCredits: true, balance: '10000' } } });
+for (const used of [0, 25, 99.999, 100, 100.001, -1, null, '20', NaN]) {
+  test(`混雑交代の残量は未丸め契約枠の数値だけで判定（${String(used)}）`, async () => {
+    const u = new Usage({ now: () => NOW, find: ai => ai, read: async () => contract(used) });
+    assert.equal(u.subscriptionAvailable(capacityModels), false);
+    await u.status(false, {}, { only: { ai: 'codex', account: 'default' } });
+    assert.equal(u.subscriptionAvailable(capacityModels), typeof used === 'number' && used >= 0 && used < 100);
+    assert.equal(u.subscriptionAvailable(capacityModels, 'other'), false);
+  });
+}
+test('共有枠とモデル専用枠を両方確認し、別モデルの余裕・クレジット・context tokenで補わない', async () => {
+  for (const [buckets, expected] of [
+    [{ codex: { primary: { usedPercent: 30 } } }, true],
+    [Object.fromEntries(capacityModels.map(id => [id, { primary: { usedPercent: 20 } }])), true],
+    [{ [capacityModels[0]]: { primary: { usedPercent: 20 } } }, false],
+    [{ codex: { primary: { usedPercent: 30 } }, [capacityModels[1]]: { secondary: { usedPercent: 100 } } }, false],
+    [{ codex: { primary: { usedPercent: 30 }, secondary: { usedPercent: null, resetsAt: (NOW + 3600000) / 1000 } } }, false],
+    [{ codex: { primary: { usedPercent: 30 }, secondary: { usedPercent: null } } }, false],
+    [{ codex: { primary: { usedPercent: 30 } }, [capacityModels[1]]: { primary: {} } }, false],
+    [{ codex: { primary: { usedPercent: 30 } }, ...Object.fromEntries(Array.from({ length: 19 }, (_, i) => ['other-' + i, { primary: { usedPercent: 0 } }])), [capacityModels[1]]: { primary: { usedPercent: 100 } } }, false],
+    [{ 'gpt-9-luna': { primary: { usedPercent: 0 } } }, false],
+    [{}, false]
+  ]) {
+    const u = new Usage({ now: () => NOW, find: ai => ai, read: async () => ({
+      rateLimitsByLimitId: buckets, credits: { hasCredits: true, balance: '10000' }, tokens_remaining: 100000
+    }) });
+    await u.status(false, {}, { only: { ai: 'codex', account: 'default' } });
+    assert.equal(u.subscriptionAvailable(capacityModels), expected, JSON.stringify(buckets));
+    assert.ok(!JSON.stringify(u.snapshot()).includes('subscriptionWindows'));
+  }
+});
+test('残量証明は古い/未来/遅い取得・失敗・認証変更・取得中・reset中・期限後には失効する', async () => {
+  let now = NOW, fail = false;
+  const u = new Usage({ now: () => now, find: ai => ai, read: async () => { if (fail) throw Error('unavailable'); return contract(25); } });
+  const status = () => u.status(true, {}, { only: { ai: 'codex', account: 'default' } });
+  await status(); assert.equal(u.subscriptionAvailable(capacityModels), true);
+  now = NOW - 1; assert.equal(u.subscriptionAvailable(capacityModels), false);
+  now = NOW + 300000; assert.equal(u.subscriptionAvailable(capacityModels), false);
+  await status(); assert.equal(u.subscriptionAvailable(capacityModels), true);
+  u.inflight.set('codex', Promise.resolve()); assert.equal(u.subscriptionAvailable(capacityModels), false); u.inflight.delete('codex');
+  u.resetBusy.add('codex'); assert.equal(u.subscriptionAvailable(capacityModels), false); u.resetBusy.delete('codex');
+  u.cache.codex.windows[0].resetsAt = new Date(now).toISOString(); assert.equal(u.subscriptionAvailable(capacityModels), false);
+  now += 31000; fail = true; await status(); assert.equal(u.subscriptionAvailable(capacityModels), false);
+  fail = false; now += 31000; await status(); u.invalidate('codex'); assert.equal(u.subscriptionAvailable(capacityModels), false);
+  const slow = new Usage({ now: () => now, find: ai => ai, read: async () => { now += 300000; return contract(25); } });
+  await slow.status(false, {}, { only: { ai: 'codex', account: 'default' } });
+  assert.equal(slow.subscriptionAvailable(capacityModels), false);
+});
+test('混雑交代の証明は取得したアカウントだけに属し、ログアウトやアカウント削除で失う', async () => {
+  let accountRows = ['default', 'work'].map(id => ({ ai: 'codex', id })), loggedIn = true, now = NOW;
+  const u = new Usage({ now: () => now, find: ai => ai, accounts: {
+    list: () => accountRows, status: async () => ({ status: loggedIn ? 'logged-in' : 'logged-out' })
+  }, read: async () => contract(25) });
+  await u.status(false, { codex: 'work' }, { only: { ai: 'codex', account: 'work' } });
+  assert.equal(u.subscriptionAvailable(capacityModels, 'work'), true);
+  assert.equal(u.subscriptionAvailable(capacityModels), false);
+  assert.equal(u.subscriptionAvailable([], 'work'), false);
+  loggedIn = false; now += 300000;
+  await u.status(false, { codex: 'work' }, { only: { ai: 'codex', account: 'work' } });
+  assert.equal(u.subscriptionAvailable(capacityModels, 'work'), false);
+  loggedIn = true; u.loginChecked('codex', 'work', 'logged-in');
+  await u.status(false, { codex: 'work' }, { only: { ai: 'codex', account: 'work' } });
+  assert.equal(u.subscriptionAvailable(capacityModels, 'work'), true);
+  accountRows = []; await u.status(false);
+  assert.equal(u.subscriptionAvailable(capacityModels, 'work'), false);
+});
+
 test('Priority proof requires fresh numeric prepaid credits and is lost on failure, invalidation and slow reads', async () => {
   let now = NOW;
   for (const credits of [{ hasCredits: true, unlimited: true }, { hasCredits: true, unlimited: true, balance: '20' },

@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const platforms = require('./platform');
 const SECRET = /^(\.git|\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?|\.netrc|\.npmrc|\.pypirc)$/i;
 const MAX = 64 * 1024;
 const inside = (f, root) => f === root || f.startsWith(root + path.sep);
@@ -21,33 +22,27 @@ function resolveWorkspace(root, raw) {
   return f;
 }
 class WorkspaceSandbox {
-  constructor(scope, opts = {}) { this.scope = scope; this.workspace = opts.workspace; this.platform = opts.platform || process.platform; this.spawn = opts.spawn || spawn; this.children = opts.children || new Set(); this.Error = opts.Error || WorkspaceError; this.timeoutMs = opts.timeoutMs || 120000; }
-  profile() {
-    const root = this.workspace(), quote = x => JSON.stringify(x);
-    return `(version 1) (deny default)
-      (allow process-exec process-fork signal sysctl-read mach-lookup)
-      (allow file-read-metadata)
-      (allow file-read* (literal "/") (subpath ${quote(root)}) ${['/System', '/usr', '/bin', '/sbin', '/Library'].map(x => '(subpath ' + quote(x) + ')').join(' ')} (literal ${quote(fs.realpathSync(process.execPath))}) (literal "/dev/null") (literal "/dev/urandom") ${this.scope.readFiles.map(x => '(literal ' + quote(x) + ')').join(' ')})
-      (allow file-write* (subpath ${quote(root)}) (literal "/dev/null"))
-      (deny file-read* file-write* (subpath ${quote(path.join(root, '.git'))})
-        (regex #"(^|/)[.][gG][iI][tT](/|$)")
-        (regex #"(^|/)([.][eE][nN][vV][^/]*|[.][nN][eE][tT][rR][cC]|[.][nN][pP][mM][rR][cC]|[.][pP][yY][pP][iI][rR][cC]|[iI][dD]_([rR][sS][aA]|[eE][dD]25519|[eE][cC][dD][sS][aA]|[dD][sS][aA])[^/]*|[^/]*[.]([pP][eE][mM]|[kK][eE][yY]|[pP]12|[pP][fF][xX]))$"))`;
-  }
+  constructor(scope, opts = {}) { this.scope = scope; this.workspace = opts.workspace; this.platform = opts.platformApi || platforms.forPlatform(opts.platform); this.spawn = opts.spawn || spawn; this.children = opts.children || new Set(); this.Error = opts.Error || WorkspaceError; this.timeoutMs = opts.timeoutMs || 120000; }
+  profile() { return this.platform.commandSandbox.profile(this.workspace(), this.scope.readFiles); }
   run(command) {
-    if (this.platform !== 'darwin' || !fs.existsSync('/usr/bin/sandbox-exec')) throw new this.Error('command_sandbox_unavailable');
+    if (!this.platform.commandSandbox.available()) {
+      const error = new this.Error('command_sandbox_unavailable');
+      if (this.platform.name === 'win32') error.message = 'Windowsでは未対応：安全のための隔離実行が使えないため、コマンドを実行しません';
+      throw error;
+    }
     const root = this.workspace();
     // Reject linked/hardlinked workspace contents before granting recursive writes.
     const check = dir => { for (const d of fs.readdirSync(dir, { withFileTypes: true })) { if (d.name.toLowerCase() === '.git') continue; const f = path.join(dir, d.name), st = fs.lstatSync(f); if (st.isSymbolicLink()) { if (!inside(fs.realpathSync(f), root)) throw new this.Error('command_link_not_allowed'); continue; } if (st.isFile() && st.nlink > 1) throw new this.Error('command_link_not_allowed'); if (st.isDirectory()) check(f); } }; check(root);
     return new Promise((resolve, reject) => {
-      const child = this.spawn('/usr/bin/sandbox-exec', ['-p', this.profile(), '/bin/sh', '-c', command], { cwd: root, detached: true, env: { PATH: path.dirname(process.execPath) + ':/usr/bin:/bin:/usr/sbin:/sbin', HOME: root, TMPDIR: root, LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = this.platform.commandSandbox.spawn(command, root, this.profile(), this.spawn);
       this.children.add(child); const out = { stdout: '', stderr: '' }; let bytes = 0, truncated = false;
-      const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } };
+      const kill = () => { this.platform.killTree(child, 'SIGKILL'); };
       const timer = setTimeout(kill, this.timeoutMs);
       for (const key of ['stdout', 'stderr']) child[key].on('data', buf => { const remaining = MAX - bytes; out[key] += buf.subarray(0, remaining).toString('utf8'); bytes += Math.min(remaining, buf.length); if (buf.length > remaining) truncated = true; });
       child.on('error', () => { clearTimeout(timer); this.children.delete(child); reject(new this.Error('command_failed')); });
       child.on('close', (code, signal) => { clearTimeout(timer); kill(); this.children.delete(child); resolve({ code, signal, ...out, truncated }); });
     });
   }
-  stop() { for (const c of this.children) { try { process.kill(-c.pid, 'SIGKILL'); } catch { c.kill('SIGKILL'); } } }
+  stop() { for (const c of this.children) { this.platform.killTree(c, 'SIGKILL'); } }
 }
 module.exports = { WorkspaceSandbox, WorkspaceError, resolveWorkspace, inside };

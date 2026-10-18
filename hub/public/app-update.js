@@ -27,7 +27,7 @@ function appUpdateHtml(data) {
     ${d.autoTranslate ? UI.html('<p class="small">新版を繁体字中国語に翻訳し、テストを通してからアプリを更新します。</p>') : ''}
     ${d.publishEnabled ? UI.html('<p class="small">テストを通した翻訳のPRを、元のプロジェクトへ送ります。</p>') : ''}
     ${d.prUrl ? UI.template`<button class="btn plain sm" data-url="${esc(d.prUrl)}" type="button">翻訳のPRを見る</button>` : ''}
-    ${d.supported === false ? UI.html('<p class="small">このインストールではアプリの自動更新を使えません。</p>') : ''}
+    ${d.supported === false ? (d.unsupportedReason === 'windows' ? UI.html('<p class="small">Windowsでは未対応：アプリの自動更新はまだ使えません。</p>') : UI.html('<p class="small">このインストールではアプリの自動更新を使えません。</p>')) : ''}
     ${d.error ? UI.template`<p class="danger" role="status">${esc(d.error)}</p>` : ''}
     ${d.publishError && d.publishError !== d.error ? UI.template`<p class="danger" role="status">翻訳PRの送信：${esc(d.publishError)}</p>` : ''}
     <div class="acts"><button class="btn plain" id="app-update-check" data-app-update="check" type="button" ${disabled || (checking ? 'disabled' : '')}>今すぐ更新を確認</button>${d.mode === 'packaged' && ['ready','deferred'].includes(d.phase) && d.pending ? UI.template`<button class="btn plain" data-app-update="apply" type="button" ${disabled || (checking ? 'disabled' : '')}>新版を適用</button>` : ''}<span class="small" id="app-update-status" role="status">${appUpdatePending ? UI.text('確認中…') : ''}</span></div>`;

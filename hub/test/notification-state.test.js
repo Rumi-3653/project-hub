@@ -2,6 +2,11 @@
 process.env.HUB_LANG = 'ja';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+// This fixture closes/restarts its server on the same port. Keep client sockets
+// out of the pool so a cold-state assertion cannot reuse the old server's socket.
+const fetch = (url, options = {}) => globalThis.fetch(url, {
+  ...options, headers: { ...options.headers, connection: 'close' }
+});
 
 test('正式HTTP：待ち順は件数と停止フラグだけを一覧へ出し、解除でETagも変わる', async () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'hub-notification-'));
@@ -27,7 +32,7 @@ test('正式HTTP：待ち順は件数と停止フラグだけを一覧へ出し�
   await new Promise(r=>server.listen(port,'127.0.0.1',r));
   const base = 'http://127.0.0.1:'+server.address().port;
   // 同じポートの停止・再起動を試すため、停止前の接続をクライアントが再利用しない。
-  const request = (url, options = {}) => fetch(url, { ...options, headers: { ...options.headers, Connection: 'close' } });
+  const request = fetch;
   try {
     // Queue loading rejects malformed identities before the state projection.
     // Preserve that protection, then use an empty fixture for the display checks.

@@ -1,4 +1,5 @@
 'use strict';
+const persistence = require('./platform').persistence;
 // Explicit, reviewed maintenance only. Never called by state polling or startup.
 // Completed ordinary turns have their final rows pinned in the active chat log.
 // Automation, unresolved runs and evidence needed by their recovery stay put.
@@ -55,7 +56,7 @@ function apply(p,resultFile){
    if(exists(dst)||fs.statSync(src).dev!==fs.statSync(batch).dev)throw Error('同じディスク内の新しい場所にだけ退避できます');
    fs.renameSync(src,dst);
    if(json(snapshot(dst))!==json({mode:i.mode,uid:i.uid,gid:i.gid,files:i.files,sha256:i.sha256,bytes:i.bytes})||exists(src))throw Error('退避後の内容を確認できません');
-   for(const parent of [p.root,batch]){const fd=fs.openSync(parent,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+   for(const parent of [p.root,batch])persistence.syncDirectory(parent);
    out.moved.push({name:i.name,path:dst,sha256:i.sha256,bytes:i.bytes});out.active=null;save();
   }
   out.complete=true;save();return out;

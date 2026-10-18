@@ -87,6 +87,17 @@ if [ "${HUB_BUNDLE_RUNTIME:-0}" = "1" ]; then
     [ -e "$HERE/$item" ] || { echo "同梱する本体がありません: $item"; exit 1; }
     cp -R "$HERE/$item" "$RUNTIME/hub/"
   done
+  # The private bundle is optional in an OSS build; an official bundle marker
+  # requires every declared feature and its UI before the old App is touched.
+  node - "$HERE" "$RUNTIME/hub" <<'CHECKPAID'
+const path=require('node:path');
+const extensions=require(path.join(process.argv[2],'lib/extensions')).loadExtensions({hub:process.argv[2]});
+if(extensions.state().missing.length)throw Error(extensions.state().notice);
+extensions.uiSource(); extensions.uiSource('style');
+const fs=require('node:fs'), source=process.argv[2], target=process.argv[3];
+if(fs.existsSync(path.join(source,'paid')))fs.cpSync(path.join(source,'paid'),path.join(target,'paid'),{recursive:true,filter:file=>path.basename(file)!=='test'});
+if(fs.existsSync(path.join(source,'paid-bundle.json')))fs.copyFileSync(path.join(source,'paid-bundle.json'),path.join(target,'paid-bundle.json'));
+CHECKPAID
   cp -R "$HERE/../docs/project-hub/templates" "$RUNTIME/docs/project-hub/"
   # Embed the Keychain/continuous-clock bridge so recipients need no Swift compiler.
   swiftc "${SWIFT_ARGS[@]}" -o "$RUNTIME/hub/lib/license/mac-native" "$HERE/lib/license/mac-native.swift"

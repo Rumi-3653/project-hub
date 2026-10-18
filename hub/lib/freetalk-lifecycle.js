@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 const fs = require('node:fs'), path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
@@ -241,7 +242,7 @@ class FreetalkLifecycle {
       throw Error(lt('プロジェクト化に失敗し、元の話題とファイルを保持しました：')+e.message);
     } finally { this.operating=false; }
   }
-  trash(label) { const dir=path.join(this.ft.home,'.Trash','ProjectHub freetalk '+label+' '+randomUUID());noLinks(dir);fs.mkdirSync(dir,{recursive:true});return dir; }
+  trash(label) { const dir=path.join(platform.trashDir(this.ft.home),'ProjectHub freetalk '+label+' '+randomUUID());noLinks(dir);fs.mkdirSync(dir,{recursive:true});return dir; }
   clean({confirm,automatic=false}={}) {
     this.ft.verify();const reason=this.reason();if(reason)throw Error(reason);
     const s=this.state();if(automatic && this.now().getTime()<Date.parse(s.due))return {ok:false,notDue:true};

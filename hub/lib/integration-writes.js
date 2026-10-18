@@ -1,4 +1,5 @@
 'use strict';
+const persistence = require('./platform').persistence;
 // Exact provenance, outside product Git. A durable per-file intent precedes every mutation.
 const fs=require('node:fs'),path=require('node:path'),{createHash,randomUUID}=require('node:crypto'),{execFileSync}=require('node:child_process');
 const roots=new Set(),digest=x=>createHash('sha256').update(x).digest('hex');
@@ -7,7 +8,7 @@ function links(file){for(let f=path.resolve(file);;f=path.dirname(f)){try{if(fs.
 function state(file){try{const s=fs.lstatSync(file);if(!s.isFile()||s.nlink!==1)return 'unsupported';return digest(fs.readFileSync(file))+':'+(s.mode&0o777);}catch(e){if(e.code==='ENOENT')return null;throw e;}}
 function home(file){return [...roots].find(r=>{const rel=path.relative(path.join(r,'Product'),file);return rel&&!rel.startsWith('..')&&!path.isAbsolute(rel);});}
 function journal(root){const f=path.join(root,'_hub/integration-writes.json');links(f);try{return {f,data:JSON.parse(fs.readFileSync(f,'utf8'))};}catch(e){if(e.code!=='ENOENT')throw e;return {f,data:{}};}}
-function syncDir(dir){while(!fs.existsSync(dir)&&dir!==path.dirname(dir))dir=path.dirname(dir);const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+function syncDir(dir){while(!fs.existsSync(dir)&&dir!==path.dirname(dir))dir=path.dirname(dir);persistence.syncDirectory(dir);}
 function atomic(f,data,{exclusive=false}={}){links(f);fs.mkdirSync(path.dirname(f),{recursive:true});const tmp=exclusive?f:f+'.'+randomUUID(),fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(data));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}if(!exclusive)fs.renameSync(tmp,f);syncDir(path.dirname(f));}
 function journalLock(root){return path.join(root,'_hub/integration-writes.lock');}
 // rename makes a publication atomic, but does not serialize read/modify/write
@@ -34,7 +35,7 @@ function begin(file){file=path.resolve(file);const root=home(file),top=root&&top
  const trusted=!pending(file)&&baseline!=='unsupported'&&before!=='unsupported'&&(normalized(before)===baseline||old?.top===top&&old.after===before&&old.bases?.includes(baseline));
  const mark=intent(file),retained=pending(file);if(!retained)atomic(mark,{file,top,before,phase:'writing'},{exclusive:true});return {file,root,top,before,baseline,old,trusted,mark,retained};
 }
-function end(e){if(!e)return;const after=state(e.file);if(after!==null&&after!=='unsupported'){const fd=fs.openSync(e.file,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}syncDir(path.dirname(e.file));
+function end(e){if(!e)return;const after=state(e.file);if(after!==null&&after!=='unsupported'){persistence.syncFile(e.file);}syncDir(path.dirname(e.file));
  updateJournal(e.root,data=>{if(e.trusted&&after!=='unsupported')data[e.file]={top:e.top,after,bases:[...new Set([...(e.old?.bases||[]),e.baseline,normalized(e.before),normalized(after)])]};else delete data[e.file];});
  if(!e.retained){fs.unlinkSync(e.mark);syncDir(path.dirname(e.mark));}
 }

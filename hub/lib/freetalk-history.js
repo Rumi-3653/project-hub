@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 const fs = require('node:fs'), path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
@@ -110,7 +111,7 @@ class FreetalkHistory {
     const topicMemory = path.join(this.ft.dir,'topics',task,...(summaryId ? ['.ai'] : []));
     if (exists(topicMemory)) targets.push(topicMemory);
     for (const target of targets) noLinks(target);
-    const trash = path.join(this.ft.home, '.Trash', 'ProjectHub freetalk ' + task + ' ' + randomUUID()); noLinks(trash);
+    const trash = path.join(platform.trashDir(this.ft.home), 'ProjectHub freetalk ' + task + ' ' + randomUUID()); noLinks(trash);
     fs.mkdirSync(trash,{recursive:true});
     const moved = [], created = [];
     fs.writeFileSync(path.join(trash,'manifest.json'),JSON.stringify({task,generation:oldState.generation,planned:targets.map((target,i)=>({target,dest:path.join(trash,String(i))}))})+'\n',{flag:'wx'});

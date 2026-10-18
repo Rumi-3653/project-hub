@@ -1,4 +1,5 @@
 'use strict';
+const persistence = require('./platform').persistence;
 // Recovery changes only the durable abort receipts. It never dispatches work.
 const fs=require('node:fs'),path=require('node:path'),{createHash}=require('node:crypto');
 const {noLinks,exists}=require('./remove');
@@ -44,8 +45,8 @@ function commit(h,x,r){
   if(!fs.statSync(destination).isFile()||!fs.readFileSync(destination).equals(fs.readFileSync(x.file)))throw Error('退避先の記録が異なります');
  }else fs.linkSync(x.file,destination);
  if(hash(fs.readFileSync(destination))!==x.sha256||hash(fs.readFileSync(x.file))!==x.sha256)throw Error('中止履歴が変わりました');
- const fd=fs.openSync(destination,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
- const parent=fs.openSync(path.dirname(x.file),'r');try{fs.fsyncSync(parent);fs.unlinkSync(x.file);fs.fsyncSync(parent);}finally{fs.closeSync(parent);}
+ persistence.syncFile(destination);
+ persistence.withDirectorySync(path.dirname(x.file),()=>fs.unlinkSync(x.file));
  return {recovered:'quarantine',preserved:destination,complete:false};
 }
 module.exports={reconstruct,residue,publicInfo,commit};

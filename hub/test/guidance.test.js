@@ -37,6 +37,8 @@ test('完了済みは再開を示す', () => {
 });
 test('コピーあり・対象外・欠落の操作を分ける', () => {
   assert.match(info({}, { copy: true }), /［本体に取り込む］がある/);
+  assert.match(info({}, { copy: true }), /作業・会話・コピーは残る/);
+  assert.doesNotMatch(info({}, { copy: true }), /コピーを片付けてこの作業も完了/);
   const excluded = info({ mergeExcluded: true }, { copy: true });
   assert.match(excluded, /［取り込み対象に戻す］がある/);
   assert.doesNotMatch(excluded, /［本体に取り込む］がある/);

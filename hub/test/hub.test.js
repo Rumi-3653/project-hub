@@ -34,9 +34,10 @@ test('指示ひな形は改行込み500文字以内で、圧縮の詳細は共�
     const text = fs.readFileSync(path.join(TPL, 'project', name), 'utf8');
     assert.ok(Array.from(text).length <= 500, name);
     assert.match(text, /\.ai\/rules\.md/);
-    assert.match(text, /160k/);
+    assert.match(text, /rules\.md の「役割」と「圧縮」に従う/);
   }
   const rules = fs.readFileSync(path.join(TPL, 'project', '.ai/rules.md'), 'utf8');
+  assert.match(rules, /160k/);
   assert.match(rules, /180k/);
   assert.doesNotMatch(rules, /200k トークンを超えたら/);
 });

@@ -1,7 +1,8 @@
 'use strict';
+const platform = require('./platform');
 const fs = require('node:fs'), path = require('node:path'), { spawn } = require('node:child_process');
 const U = require('./idea-utils'), safe = require('./safe-file');
-const birth=pid=>{try{return require('node:child_process').execFileSync('ps',['-p',String(pid),'-o','lstart='],{encoding:'utf8'}).trim();}catch{return '';}};
+const birth=pid=>platform.processBirth(pid);
 const alive=(pid,stamp)=>{try{process.kill(pid,0);return !stamp||birth(pid)===stamp;}catch(e){return e.code!=='ESRCH';}};
 class IdeaVerification {
   constructor({ ideas, lane, gate, profiles, spawnProcess = spawn, environment = () => ({ node:process.version,platform:process.platform,arch:process.arch }) }) {
@@ -35,12 +36,12 @@ class IdeaVerification {
       authorize?.(); const cwd=fs.realpathSync(path.join(lane.workdirReal,p.cwd)); U.check(U.inside(lane.workdirReal,cwd),'test-profile','検証場所が実行先の外です');
       this.ideas.internal(project,U.uuid(),{kind:'verify-start',id},d=>{d.evidence[id]={id,type:'verification',key,...descriptor,itemIds,baseline:Boolean(baseline),releaseId:releaseId||null,finished:false,owner:{pid:process.pid,birth:birth(process.pid)},child:null,stdout:{file:outFile},stderr:{file:errFile}};});
       child=this.spawnProcess(p.executable,p.argv,{cwd,env:{PATH:process.env.PATH,HOME:process.env.HOME,LANG:process.env.LANG,...p.env},shell:false,detached:process.platform!=='win32',stdio:['ignore',out,err]}); live=true;if(child.pid)this.ideas.internal(project,U.uuid(),{kind:'verify-child',id},d=>{d.evidence[id].child={pid:child.pid,birth:birth(child.pid)};});
-      const kill=sig=>{try{if(process.platform!=='win32')process.kill(-child.pid,sig);else child.kill(sig);}catch(e){if(e.code!=='ESRCH')throw e;}};
+      const kill=sig=>{try{platform.killTree(child,sig,{fallback:false});}catch(e){if(e.code!=='ESRCH')throw e;}};
       await new Promise(resolve=>{const timer=setTimeout(()=>{timedOut=true;kill('SIGTERM');force=setTimeout(()=>kill('SIGKILL'),500);force.unref?.();},p.timeout); let force;
         child.once('error',e=>{spawnError=e.message;live=false;clearTimeout(timer);clearTimeout(force);resolve();});
         child.once('close',(code,sig)=>{exitCode=code;signal=sig;live=false;clearTimeout(timer);clearTimeout(force);resolve();});});
       // The whole process group must be gone before another writer gets this lease.
-      if(child.pid&&process.platform!=='win32') { let group=false;try{process.kill(-child.pid,0);group=true;live=true;}catch(e){if(e.code!=='ESRCH')throw e;} if(group){kill('SIGKILL');for(let n=0;n<50;n++){try{process.kill(-child.pid,0);await new Promise(r=>setTimeout(r,20));}catch(e){if(e.code==='ESRCH'){group=false;live=false;break;}throw e;}}U.check(!group,'verification-owner','検証の子プロセス終了を確認できません',503);} }
+      if(child.pid&&process.platform!=='win32') { let group=false;try{platform.killTree(child,0,{fallback:false});group=true;live=true;}catch(e){if(e.code!=='ESRCH')throw e;} if(group){kill('SIGKILL');for(let n=0;n<50;n++){try{platform.killTree(child,0,{fallback:false});await new Promise(r=>setTimeout(r,20));}catch(e){if(e.code==='ESRCH'){group=false;live=false;break;}throw e;}}U.check(!group,'verification-owner','検証の子プロセス終了を確認できません',503);} }
       fs.fsyncSync(out);fs.fsyncSync(err); const after=U.snapshot(lane.workdirReal),same=after.head===descriptor.head&&after.tree===descriptor.tree&&!after.dirty&&!after.merging;
       const evidence={id,type:'verification',key,...descriptor,itemIds,baseline:Boolean(baseline),releaseId:releaseId||null,finished:true,success:!spawnError&&!timedOut&&exitCode===0&&same,exitCode,signal,timedOut,spawnError,unchanged:same,stdout:{file:outFile,hash:U.hash(fs.readFileSync(outFile))},stderr:{file:errFile,hash:U.hash(fs.readFileSync(errFile))},at:new Date(this.ideas.clock()).toISOString()};
       this.ideas.internal(project,U.uuid(),{kind:'verification',id},x=>{x.evidence[id]=evidence;if(!same)x.observed={state:'blocked',reason:'検証中に開発場所が変わりました'};}); return evidence;

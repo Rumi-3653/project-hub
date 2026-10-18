@@ -1,8 +1,9 @@
 'use strict';
+const persistence = require('./platform').persistence;
 const fs=require('node:fs'),path=require('node:path');
 const {noLinks,readNoLinks,exists}=require('./remove');
 // Exclusive temporary file, exact POSIX mode, durable intent before any source replacement.
-function syncDirectory(file){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}
+function syncDirectory(file){persistence.syncDirectory(path.dirname(file));}
 function atomic(file,bytes,mode=0o600){return require('./integration-writes').write(file,()=>{
   noLinks(file);const tmp=file+'.tmp';noLinks(tmp);
   const fd=fs.openSync(tmp,'wx',0o600);

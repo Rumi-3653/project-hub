@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -108,7 +109,7 @@ class WebchatClient {
     // A broken peer must not keep pending calls alive or throw from a stream event.
     for (const id of this.pending.keys()) try { this.process.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason } }) + '\n'); } catch {}
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Error(reason)); } this.pending.clear();
-    try { process.kill(-this.process.pid, 'SIGKILL'); } catch { try { this.process.kill('SIGKILL'); } catch {} }
+    try { platform.killTree(this.process, 'SIGKILL', { fallback: false }); } catch { try { this.process.kill('SIGKILL'); } catch {} }
   }
 }
 module.exports = { WebchatClient };

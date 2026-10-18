@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 // 認証情報はCLIの専用場所にだけ置く。Hubの台帳には名前と場所だけを保存する。
 const fs = require('node:fs');
@@ -48,7 +49,7 @@ function noLinks(dir) {
 }
 const run = (file, args, env) => new Promise(resolve => execFile(file, args, { env, timeout: 15000, maxBuffer: 65536 }, (error, stdout, stderr) => resolve({ error, stdout, stderr })));
 class Accounts {
-  constructor({ file, home = process.env.HUB_AI_HOME || os.homedir(), dry = false, busy = () => false, execute = run, trash = process.env.HUB_TRASH || path.join(home, '.Trash') }) {
+  constructor({ file, home = process.env.HUB_AI_HOME || os.homedir(), dry = false, busy = () => false, execute = run, trash = process.env.HUB_TRASH || platform.trashDir(home) }) {
     Object.assign(this, { file, home, dry, busy, execute, trash }); this.locks = new Set(); this.readers = new Map(); this.authStates = new Map();
     this.termDir = path.join(path.dirname(file), 'account-processes');
     this.base = path.join(home, '.hub-accounts');

@@ -1,7 +1,8 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 // 選択式の整理、ゴミ箱への退避・復元、ローカル検証。
-const fs=require('node:fs'), path=require('node:path'), os=require('node:os');
+const fs=require('node:fs'), path=require('node:path');
 const {createHash,randomUUID}=require('node:crypto');
 const {execFileSync,spawn}=require('node:child_process');
 const {StringDecoder}=require('node:string_decoder');
@@ -35,7 +36,7 @@ function scriptsAt(base) {
  });
 }
 class Maintenance {
- constructor({store,baseOf,busy=()=>false,trash=process.env.HUB_TRASH || path.join(os.homedir(),'.Trash'),timeout=60000,referenceLimits={}}) {
+ constructor({store,baseOf,busy=()=>false,trash=process.env.HUB_TRASH || platform.trashDir(),timeout=60000,referenceLimits={}}) {
   Object.assign(this,{store,baseOf,busy,trash,timeout});this.previews=new Map();this.running=new Map();
   this.records=path.join(store.root,'_hub/cleanup');
   this.referenceLimits={items:50000,bytes:128*1024*1024,ms:15000,depth:64,chunk:64*1024,carry:1024*1024,gitBytes:16*1024*1024,...referenceLimits};
@@ -223,7 +224,7 @@ class Maintenance {
    const result=await new Promise(resolve=>{
     let output='',bytes=0,settled=false,child,timer,why='';
     const finish=(code)=>{if(settled)return;settled=true;clearTimeout(timer);resolve({name:script,command:choice.command,ok:code===0&&!why,code,output,note:why});};
-    const stop=reason=>{why=reason;try {process.kill(-child.pid,'SIGKILL');}catch(e) {child.kill('SIGKILL');}};
+    const stop=reason=>{why=reason;platform.killTree(child,'SIGKILL');};
     try {child=spawn('npm',['--offline','--ignore-scripts','run',script],{cwd:base,env:process.env,detached:true,stdio:['ignore','pipe','pipe']});}
     catch(e){finish(null);return;}
     for(const stream of [child.stdout,child.stderr])stream.on('data',d=>{bytes+=d.length;output=(output+d.toString()).slice(-20000);if(bytes>2*1024*1024)stop(lt('出力が多いため停止しました'));});

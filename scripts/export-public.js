@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, 'public-release', 'ProjectHub');
+const defaultOutput = path.join(root, 'public-release', 'ProjectHub');
 const publicFiles = new Set([
   'README.md', 'CONTRIBUTING.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
   'README.zh-TW.md', 'CONTRIBUTING.zh-TW.md', 'THIRD_PARTY_NOTICES.zh-TW.md',
@@ -42,10 +42,11 @@ function packAsset(name) {
     || file.startsWith('test/') && /\.(?:js|json|md|yaml|yml|txt)$/.test(file);
 }
 function excluded(name) {
+  if (name === 'hub/paid-bundle.json' || name.startsWith('hub/paid/') || name.startsWith('hub/public/paid/')) return true;
   // Local DMG acceptance uses the private publisher and macOS-only fixtures.
-  if (['scripts/package-update.js', 'scripts/sign-update.js', 'scripts/release-license-build.sql', 'hub/test/release-candidate.test.js', 'hub/test/app-update-packaged.test.js'].includes(name)) return true;
+  if (['scripts/package-update.js', 'scripts/sign-update.js', 'scripts/release-keychain.js', 'scripts/release-keychain.swift', 'scripts/release-license-build.sql', 'hub/test/release-candidate.test.js', 'hub/test/app-update-packaged.test.js'].includes(name)) return true;
   if (name === 'hub/lib/license/owner-edition.js' || name.startsWith('hub/license-issuer/') ||
-      name === 'hub/test/license.test.js' || name === 'hub/test/fixtures/license-db.cjs') return true;
+      name === 'hub/test/license.test.js' || name === 'hub/test/sandbox-local.test.js' || name === 'hub/test/fixtures/license-db.cjs') return true;
   const parts = name.split('/');
   if (parts.some(p => ['.git', 'node_modules', 'public-release', 'Inbox', '.DS_Store'].includes(p))) return true;
   // Skills belong to the recipient's AI installation, never the distributed runtime.
@@ -127,8 +128,7 @@ function readOutput(dir, prefix = '') {
     return [{ name, content: fs.readFileSync(path.join(dir, e.name)) }];
   });
 }
-function main() {
-  const args = process.argv.slice(2);
+function main({ args = process.argv.slice(2), output = defaultOutput } = {}) {
   let ref = 'HEAD', publicRef;
   for (let i = 0; i < args.length; i += 2) {
     if (!args[i + 1] || !['--ref', '--public-ref'].includes(args[i])) throw new Error('Usage: node scripts/export-public.js [--ref commit] [--public-ref commit]');
@@ -183,8 +183,8 @@ function main() {
     fs.renameSync(output, path.join(previous, `ProjectHub-${Date.now()}`));
   }
   fs.renameSync(stage, output);
-  console.log(`Exported ${entries.length} files to public-release/ProjectHub (no Git history).`);
+  console.log(`Exported ${entries.length} files to ${path.relative(root, output)} (no Git history).`);
   console.log(`Source: ${source}; public documents: ${overlay}; version: ${version}; inspection: 0 findings.`);
 }
 if (require.main === module) main();
-module.exports = { excluded, selected, inspect };
+module.exports = { excluded, selected, inspect, main };

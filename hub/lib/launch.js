@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // Claude Code / Codex の起動コマンドを組み立てる。フォルダを Finder で開く。
-const { execFile } = require('child_process');
+const platform = require('./platform');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -152,7 +152,6 @@ function switchCommand(ai, field, value) {
 }
 
 function sq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
-function as(s) { return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
 
 // シェル用の1行（ターミナルの窓を開く時に使う）
 function buildCommand({ ai, dir, prompt, cmd, model, effort, account = 'default', fast = false }) {
@@ -197,44 +196,10 @@ function buildArgv({ ai, prompt, cmd, model, effort, account = 'default', fast =
   return { command: base[0], args };
 }
 
-function run(file, args, dry) {
-  if (dry) return Promise.resolve({ dry: true, file, args });
-  return new Promise((resolve, reject) => {
-    execFile(file, args, err => (err ? reject(err) : resolve({ ok: true })));
-  });
-}
-
-function openTerminal(command, dry) {
-  return run('osascript', [
-    '-e', `tell application "Terminal" to do script "${as(command)}"`,
-    '-e', 'tell application "Terminal" to activate',
-  ], dry);
-}
-
-async function focusAuthTerminal(pid, dry) {
-  if (!Number.isInteger(pid) || pid < 1) throw Error(lt('認証用Terminalの記録を確認できません'));
-  if (dry) return { dry: true, existingTerminal: true };
-  const tty = await new Promise((resolve, reject) => execFile('/bin/ps', ['-p', String(pid), '-o', 'tty='], (error, stdout) => error ? reject(error) : resolve(stdout.trim())));
-  if (!/^ttys[0-9]+$/.test(tty)) throw Error(lt('認証用Terminalの画面を見つけられませんでした'));
-  await run('osascript', ['-e', `tell application "Terminal"
-repeat with w in windows
-repeat with t in tabs of w
-if tty of t is "/dev/${tty}" then
-set selected tab of w to t
-set index of w to 1
-activate
-return
-end if
-end repeat
-end repeat
-error "Authentication Terminal not found"
-end tell`], false);
-  return { ok: true, existingTerminal: true };
-}
-
-function openFolder(p, dry) { return run('open', [p], dry); }
-// ファイルは Finder でその場所を開いて選ぶ。URL は Mac の既定のブラウザで開く
-function revealFile(p, dry) { return run('open', ['-R', p], dry); }
-function openUrl(u, dry) { return run('open', [u], dry); }
+const openTerminal = (...args) => platform.openTerminal(...args);
+const focusAuthTerminal = (...args) => platform.focusTerminal(...args);
+const openFolder = (...args) => platform.openPath(...args);
+const revealFile = (...args) => platform.revealPath(...args);
+const openUrl = (...args) => platform.openUrl(...args);
 
 module.exports = { GROK_API_ENV, GROK_AUTH_ENV, grokCommand, accelerationArgs, setAccounts, accountEnv, accountArgs, accountShell, AIS, AI_KEY, AI_LABEL, agyModelId, agyAccountError, agyAccountShell, childEnv, buildCommand, buildArgv, openTerminal, openFolder, revealFile, openUrl, sq, DEFAULT_CMD, CODEX_CONTEXT_ARGS, CONTEXT_RULE, MODEL_FLAG, EFFORT_FLAG, SWITCH_CMD, switchCommand, focusAuthTerminal, flagFor, modelLabel, startupInfo, setOverrides, getOverrides, setDiscoveredModels };

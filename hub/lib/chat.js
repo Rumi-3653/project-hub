@@ -10,6 +10,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { randomUUID } = require('node:crypto');
 const launch = require('./launch');
+const { capacityReturnAllowed } = require('./limit-route');
 const instructions = require('./instructions');
 const { generatedImages, recoverImages } = require('./chat-images');
 const { snapshot, buildHandoffCard } = require('./handoff-card');
@@ -386,7 +387,7 @@ class ChatRunner {
     const original = o.shown || o.text;
     const repeated = o.request && read(pdir, task).findLast(r => r.role === 'user' && r.request === o.request &&
       (r.text === original || r.limitSwitch?.original === original));
-    const completed = repeated && read(pdir, task).findLast(r => r.role === 'assistant' && (r.request === o.request || r.request === `limit-${o.request}` || r.request === `capacity-${o.request}`) && !r.error);
+    const completed = repeated && read(pdir, task).findLast(r => r.role === 'assistant' && (r.request === o.request || r.request === `limit-${o.request}` || r.request === `capacity-${o.request}` || r.request === `capacity-capacity-${o.request}`) && !r.error);
     if (completed) {
       o.beforeSend?.(); // This request already has a durable conversation entry.
       const ai = completed.ai || repeated.to, model = completed.model || repeated.model;
@@ -501,6 +502,7 @@ class ChatRunner {
     const cliEnv = launch.childEnv(ai, launch.accountEnv(ai, account, { ...process.env, ...(env || {}) }));
     if (!o.started) o.started=Date.now();
     if(!adopted)this.assertQueueStart(o);
+    if(!adopted&&!this.spoolRoot)require('./owned-processes').assertLaunchOwnership();
     this.startGate?.(o,{adoption:Boolean(adopted)});
     let child;try{child = adopted || (this.spoolRoot ? require('./cli-spool').start(this.spoolRoot,this.serverId,o,turn,meta,rows,cliEnv) : spawn(turn.command, turn.args, { cwd: dir, env: cliEnv, stdio: ['pipe', 'pipe', 'pipe'] }));}catch(e){this.endGate?.(o);throw e;}
     if (!o.started) o.started = Date.now(); // 思考の指定をやり直しても、最初に送った時から数える
@@ -623,11 +625,14 @@ class ChatRunner {
         }
       }
       // Capacity uses the durable handoff queue, but never the quota recorder.
-      // A later successful turn cancels transient capacity evidence. No fallback chain.
+      // A later successful turn cancels transient capacity evidence. Only a
+      // Sol -> Astra capacity handoff may return to Sol once; no further chain.
       const capacity = !run.limit && run.capacity && error === run.capacity;
       const capacitySuccessor = o.limitSwitch?.reason === 'capacity';
       if (capacitySuccessor && error) run.limitSaveFailed = true; // Keep all followers on any failed successor.
-      const route = capacity ? !o.limitSwitch && this.capacityBackup : run.limit && !capacitySuccessor ? this.limitBackup : null;
+      const route = capacity
+        ? (!o.limitSwitch || capacityReturnAllowed(o) ? this.capacityBackup : null)
+        : run.limit && !capacitySuccessor ? this.limitBackup : null;
       if (closed && run.spawned && !cancelled() && error && !modelRejected && !run.blocked && (capacity || run.limit && route)) {
         const request = String(o.request || o.started);
         // 起動前の案内は交代キューを作った証拠ではない。失敗後Fableへ戻った再送は正式上限で交代できる。
@@ -636,19 +641,28 @@ class ChatRunner {
             !x.limitSwitch.preflight && !x.limitSwitch.direct);
         if (!already) {
           try {
-            const backup = route?.(o);
-            if (backup) {
+            const backup = capacity ? await route?.(o) : route?.(o);
+            // Contract-status reads may be asynchronous. A human stop while
+            // checking must never create a new handoff or release followers.
+            if (cancelled()) run.limitSaveFailed = true;
+            else if (backup) {
               const original = o.limitSwitch?.original || o.shown || o.text;
               const from = launch.modelLabel(ai, model), to = `${LABEL[backup.ai]}・${backup.model}`;
-              const limitSwitch = { from, to, request, sourceRequest: o.request, original, sourceAI: ai, sourceModel: model, sourceEffort: effort, sourceAccount: account, sourceLimitSlot: o.limitSlot, ...(capacity ? { reason: 'capacity' } : {}) };
-              const shown = o.isolatedReview || o.freshContext ? buildHandoffCard({ original, from, to, direct:true }) : buildHandoffCard({ original, from, to, reason: capacity ? 'capacity' : undefined, user: o.userRow, rows: read(pdir, task), dir, pdir, task, queue: this.queue(project, task), delegates: this.delegates?.(project, task) || [] });
+              const limitSwitch = { from, to, request, sourceRequest: o.request, original, sourceAI: ai, sourceModel: model, sourceEffort: effort, sourceAccount: account, sourceLimitSlot: o.limitSlot, ...(capacity ? { reason: 'capacity', sourceTurn: o.userRow?.turn } : {}) };
+              const rows = read(pdir, task);
+              // A return must carry the first Sol's operations/delegations as well as Astra's.
+              const user = capacityReturnAllowed(o) ? rows.findLast(r => r.role === 'user' &&
+                (o.limitSwitch.sourceTurn ? r.turn === o.limitSwitch.sourceTurn : o.limitSwitch.sourceRequest && r.request === o.limitSwitch.sourceRequest)) || o.userRow : o.userRow;
+              const sourceTurns = user !== o.userRow ? [o.userRow?.turn] : [];
+              const shown = o.isolatedReview || o.freshContext ? buildHandoffCard({ original, from, to, direct:true }) : buildHandoffCard({ original, from, to, reason: capacity ? 'capacity' : undefined, user, sourceTurns, rows, dir, pdir, task, queue: this.queue(project, task), delegates: this.delegates?.(project, task) || [] });
               const item = { ...backup, automation:o.automation,contextMode:o.contextMode,freshContext:o.freshContext,preserveTaskState:o.preserveTaskState,reviewKind:o.reviewKind,origin:o.origin, account: backup.account ?? this.accountFor?.(project, task, backup.ai) ?? 'default', id: `${capacity ? 'capacity' : 'limit'}-${request}`, readOnly:o.readOnly, readDirs:o.readDirs, isolatedReview:o.isolatedReview, selectionOnly:o.selectionOnly, integrationReviewRequest:o.integrationReviewRequest, at: new Date().toISOString(), text: shown, shown, limitSwitch };
               this.setQueue(project, task, [item, ...this.queue(project, task)], true);
               this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, limitSwitch, text: capacity ? lt`${from} がモデル混雑で終了したため、保存済みの作業を確認し ${to} で一回だけ続けます` : lt`${from} が利用上限で止まったため、同じ作業を ${to} で続けます` }) });
+              if (capacity) run.limitSaveFailed = false; // The allowed return is durable; dispatch it after close.
             }
             else if (capacity) {
               run.limitSaveFailed = true; // Do not advance unrelated waiting instructions.
-              this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: lt('モデルが混雑しています。設定済みのOpus 5.5またはAstraへ交代できないため、待ち指示を開始せず待機します') }) });
+              this.emit(project, task, { type: 'row', row: append(pdir, task, { role: 'event', ai, text: lt('モデルが混雑しています。契約枠の残量や交代先を確認できないか、今回の自動引き継ぎを使い切ったため、待ち指示を開始せず待機します') }) });
             }
           } catch (e) {
             run.limitSaveFailed = true;

@@ -1,4 +1,5 @@
 'use strict';
+const persistence = require('./platform').persistence;
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -15,8 +16,7 @@ function atomic(file, value) {
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, file);
-  const dir = fs.openSync(path.dirname(file), 'r');
-  try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+  persistence.syncDirectory(path.dirname(file));
 }
 // Chat/Pro sends are conversation-only. Legacy child records remain readable.
 class Webchat {

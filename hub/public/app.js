@@ -1295,7 +1295,6 @@ function renderWork() {
 }
 
 // ---- 会話画面（Goose のような形）：1本の会話で、送るたびに答える AI とモデルを選ぶ ----
-let discussionPollTimer = null;
 let chatES = null, chatDraft = {}, chatBusy = null, chatScroller = null;
 const chatDraftRevisions = new Map();
 function setChatDraft(key, text) {
@@ -1442,99 +1441,15 @@ function chatSelection(p, t) {
   }
   return pick;
 }
-const DISCUSSION_STATUS = { waiting: '待ち', running: '実行中', done: '完了', stopped: '停止', failed: '失敗', excluded: '不参加', skipped: '省略' };
-const DISCUSSION_CAMEL = UI.html('<svg viewBox="0 0 64 40" focusable="false"><g fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path class="discussion-camel-legs" d="M17 26 14 33 11 37 M43 26 46 33 43 37"/><path class="discussion-camel-legs alternate" d="M22 27 24 33 24 37 M39 27 37 33 39 37"/><path d="M12 23 7 20 4 25"/></g><path fill="currentColor" d="M10 25 12 19 Q14 16 17 19 L19 18 Q21 8 25 9 Q29 8 32 18 L34 18 Q37 6 41 7 Q45 8 46 18 L48 18 50 10 52 7 52 4 55 7 59 8 62 13 58 15 54 13 52 24 Q51 29 46 29 L17 29 Q11 29 10 25Z"/><circle cx="58" cy="10" r=".9" fill="#423329"/></svg>');
-function discussionOptions(candidates, selected = '', optional = false) {
-  const missing = selected && !candidates.some(c => c.ai + '|' + c.id === selected);
-  return (optional ? UI.html('<option value="">参加しない</option>') : UI.html('<option value="">選んでください</option>'))
-    + (missing ? UI.template`<option value="${esc(selected)}" selected disabled>${esc(selected)}（利用不可）</option>` : '')
-    + candidates.map(c => UI.template`<option value="${esc(c.ai + '|' + c.id)}" ${c.ai + '|' + c.id === selected ? 'selected' : ''} ${c.unavailable ? 'disabled' : ''}>${esc(AI_LABEL[c.ai])}・${esc(c.model)}${c.unavailable ? UI.template`（利用不可：${esc(c.unavailable)}）` : ''}</option>`).join('');
+let discussionUIInstance;
+function discussionUI() {
+  if (!window.HubPaidDiscussion || state.extensions && !state.extensions.included.includes('discussion')) return null;
+  return discussionUIInstance ||= window.HubPaidDiscussion.create(Object.freeze({
+    UI, $, esc, AI_LABEL, api:(...args)=>api(...args), toast, chatImages, chatAttachmentKey, chatDraftRevisions, setChatDraft,
+    get state() { return state; }, get chatDraft() { return chatDraft; },
+  }));
 }
-function drawDiscussionProgress(data) {
-  const el = $('#discussion-progress'); if (!el) return;
-  const p = data.session, active = ['waiting', 'running'].includes(p?.status);
-  el.dataset.active = active ? '1' : '0'; el.hidden = !active && !data.error;
-  const panel = $('#discussion-settings'), history = $('#discussion-history');
-  if (active && panel) panel.hidden = true;
-  if (history) history.hidden = !p || active;
-  if (!active) { el.innerHTML = data.error ? UI.template`<p class="small danger">${esc(data.error)}</p>` : ''; el.discussionMarkup = null; }
-  if ($('#discussion-toggle')) $('#discussion-toggle').disabled = active;
-  if ($('#chat-send')) $('#chat-send').disabled = active;
-  if (active) for (const id of ['chat-redo', 'chat-amend', 'chat-q']) if ($('#' + id)) $('#' + id).hidden = true;
-  if ($('#discussion-start')) $('#discussion-start').disabled = active;
-  // Finished discussions stay available on demand, without keeping a live banner.
-  const target = active ? el : history?.querySelector('[data-discussion-history]');
-  if (!p || !target) return;
-  const g = p.progress, current = g.current;
-  const percent = Math.min(100, Math.max(0, Number(g.percent) || 0));
-  const stage = current ? current.kind === 'initial' ? '各自の意見' : current.kind === 'exchange' ? '意見交換中' : 'まとめ中' : '';
-  const manual = !['waiting', 'running', 'done'].includes(p.status) && p.slots.some(s => s.status === 'done' && s.text);
-  const markup = UI.template`<div class="discussion-progress"><b>話し合い：${g.completed}/${g.total} 完了・${g.percent}%・${esc(DISCUSSION_STATUS[p.status])}${stage ? '・' + esc(stage) : ''}${current ? '・' + esc(AI_LABEL[current.ai]) + '・' + esc(current.label) : ''}</b><div class="discussion-journey${active ? ' is-active' : ''}" style="--discussion-percent:${percent}%"><div class="discussion-route"><span class="discussion-camel" aria-hidden="true">${DISCUSSION_CAMEL}</span><progress max="100" value="${percent}" aria-label="完了したAI実行回数"></progress></div></div>${p.message ? UI.template`<p>${esc(p.message)}</p>` : ''}${p.single && p.status === 'done' ? UI.html('<p>1人になったため話し合いではなく1人の意見</p>') : ''}${p.reasons.map(reason => UI.template`<p class="small">${esc(reason)}</p>`).join('')}<details><summary>各回の状態</summary><ol>${p.slots.map(s => UI.template`<li>${esc(s.kind === 'initial' ? '各自の意見' : s.kind === 'exchange' ? '意見交換 ' + s.round + '回目' : 'まとめ')}・${esc(AI_LABEL[s.ai])}・${esc(s.label)}：${esc(DISCUSSION_STATUS[s.status])}${s.reason ? '（' + esc(s.reason) + '）' : ''}</li>`).join('')}</ol></details>${el.dataset.active === '1' ? UI.html('<button class="btn plain sm" type="button" data-discussion-stop>停止</button>') : ''}${manual ? UI.template`<div class="discussion-manual"><label>まとめを頼むAI・モデル<select data-discussion-summary-model>${discussionOptions(data.candidates)}</select></label><button class="btn sm" type="button" data-discussion-summary="${esc(p.id)}">この意見をまとめる</button></div>` : ''}</div>`;
-  // Preserve a manual choice across progress polls; held choices become disabled.
-  const selected = target.querySelector('[data-discussion-summary-model]')?.value;
-  if (target.discussionMarkup !== markup) { target.discussionMarkup = markup; target.innerHTML = markup; const pick = target.querySelector('[data-discussion-summary-model]'); if (pick && [...pick.options].some(o => o.value === selected && !o.disabled)) pick.value = selected; }
-}
-function bindDiscussion(p, t) {
-  const progress = $('#discussion-progress'), panel = $('#discussion-settings'); let data = null, pending = false, pollPending = false, revision = 0;
-  const current = () => $('#discussion-progress') === progress;
-  clearInterval(discussionPollTimer); discussionPollTimer = null;
-  const update = next => {
-    if (!current()) return;
-    revision++; data = next; drawDiscussionProgress(next);
-    if (['waiting', 'running'].includes(next.session?.status)) {
-      if (discussionPollTimer === null) discussionPollTimer = setInterval(() => { if (current()) void refresh(); }, 1500);
-    } else { clearInterval(discussionPollTimer); discussionPollTimer = null; }
-    if (!panel.hidden) for (const select of panel.querySelectorAll('[data-discussion-person], [data-discussion-summarizer]')) {
-      const optional = select.hasAttribute('data-discussion-person') && [...panel.querySelectorAll('[data-discussion-person]')].indexOf(select) > 1;
-      const options = discussionOptions(next.candidates, select.value, optional);
-      if (select.discussionOptions !== options) { select.discussionOptions = options; select.innerHTML = options; }
-    }
-  };
-  const refresh = async () => {
-    if (!current() || pollPending) return; pollPending = true;
-    const before = revision;
-    try { const next = await api('/api/discussion?project=' + encodeURIComponent(p.id) + '&task=' + encodeURIComponent(t.id)); if (revision === before) update(next); }
-    catch (e) { if (current() && revision === before) progress.textContent = e.message; }
-    finally { pollPending = false; }
-  };
-  void refresh();
-  const pick = value => { const [ai, model] = value.split('|'); return { ai, model }; };
-  const draft = () => ({ participants: [...panel.querySelectorAll('[data-discussion-person]')].map(s => s.value).filter(Boolean).map(pick), exchanges: Number(panel.querySelector('[data-discussion-rounds]').value), summarizer: pick(panel.querySelector('[data-discussion-summarizer]').value) });
-  const count = () => { const d = draft(); panel.querySelector('[data-discussion-count]').textContent = UI.template`開始するとAIが動く予定：${d.participants.length * (1 + d.exchanges) + 1}回（順番に実行）`; try { localStorage.setItem('hub-discussion', JSON.stringify(d)); } catch {} };
-  $('#discussion-toggle').addEventListener('click', async () => {
-    await refresh(); if (!data || !current()) return;
-    if (!panel.hidden) { panel.hidden = true; return; }
-    let previous = data.previous; try { previous = JSON.parse(localStorage.getItem('hub-discussion') || 'null') || previous; } catch {}
-    const role = state.roles.roles.find(r => r.name === '司令塔')?.main;
-    const ai = role?.ai === 'claude-code' ? 'claude' : role?.ai;
-    const model = state.cliFlags?.[ai]?.[role?.model] || role?.model || '';
-    const defaults = data.candidates.filter(c => !c.unavailable).slice(0, 2);
-    const persons = previous?.participants || defaults.map(c => ({ ai: c.ai, model: c.id }));
-    const summary = previous?.summarizer || { ai, model };
-    panel.innerHTML = UI.template`<details id="discussion-history" hidden><summary>前の話し合い</summary><div data-discussion-history></div></details><fieldset><legend>話し合いの設定</legend><p class="small">参加者は2〜4人。同じAIでも違うモデルは別の参加者です。各回は読み取り専用で実行します。利用上限の参加者は不参加にします。読み取り専用の実行・正式上限の判定を確認できないAIは選べません。</p>${Array.from({length:4}, (_, i) => UI.template`<label>参加者 ${i + 1}<select data-discussion-person>${discussionOptions(data.candidates, persons[i] ? persons[i].ai + '|' + persons[i].model : '', i > 1)}</select></label>`).join('')}<label>意見交換の回数<select data-discussion-rounds><option value="1">1回</option><option value="2" ${previous?.exchanges === 2 ? 'selected' : ''}>2回</option></select></label><label>まとめ役<select data-discussion-summarizer>${discussionOptions(data.candidates, summary.ai + '|' + summary.model)}</select></label><p data-discussion-count role="status"></p><button class="btn" id="discussion-start" type="button">話し合いを始める</button></fieldset>`;
-    panel.hidden = false; drawDiscussionProgress(data); count();
-  });
-  panel.addEventListener('change', count);
-  panel.addEventListener('click', async e => {
-    if (e.target.id !== 'discussion-start') return control(e);
-    if (pending) return;
-    if (chatImages(p.id, t.id).length) { toast(UI.text('話し合いは文章で始めてください')); return; }
-    pending = true; e.target.disabled = true;
-    const before = ++revision;
-    try { const result = await api('/api/discussion/start', { project: p.id, task: t.id, text: $('#chat-in').value, ...draft() }); if (current()) { if (revision === before) update(result); panel.hidden = true; } }
-    catch (err) { toast(err.message); } finally { pending = false; if (current() && $('#discussion-start')) $('#discussion-start').disabled = progress.dataset.active === '1'; }
-  });
-  const control = async e => {
-    const stop = e.target.closest('[data-discussion-stop]'), summary = e.target.closest('[data-discussion-summary]');
-    if ((!stop && !summary) || pending) return;
-    pending = true;
-    const before = ++revision;
-    try { if (stop) await api('/api/chat/stop', { project: p.id, task: t.id }); else { const result = await api('/api/discussion/summary', { project: p.id, task: t.id, id: summary.dataset.discussionSummary, summarizer: pick(panel.querySelector('[data-discussion-summary-model]').value) }); if (revision === before) update(result); } await refresh(); }
-    catch (err) { toast(err.message); } finally { pending = false; }
-  };
-  progress.addEventListener('click', control);
-  return update;
-}
+function bindDiscussion(p,t) { return discussionUI()?.bind(p,t) || (()=>{}); }
 function chatModelChoices(p, t, selected) {
   const pick = selected || chatSelection(p, t);
   // 名前が未設定のモデルは、CLI の既定のモデルで動く（設定画面で名前を入れられる）
@@ -1559,7 +1474,7 @@ function chatHtml(p, t) {
   const pick = chatSelection(p, t), opts = chatModelChoices(p,t);
   const bodyNotice=(state.bodyNotices||[]).filter(x=>x.scope===p.id+' / '+t.id||x.scope==='本文整理').map(x=>UI.template`<p class="small danger" role="status">${esc(x.message)}</p>`).join('');
   return UI.template`<div class="chat" data-p="${esc(p.id)}" data-t="${esc(t.id)}">${!t.freetalk?UI.template`<div class="task-history-toolbar"><button class="btn plain sm" type="button" data-task-history="continue" data-p="${esc(p.id)}" data-t="${esc(t.id)}">要約して続ける</button><span class="history-progress small" id="history-progress" role="status" data-p="${esc(p.id)}" data-t="${esc(t.id)}" hidden></span><button class="btn plain sm" type="button" data-task-history="archives" data-p="${esc(p.id)}" data-t="${esc(t.id)}">過去の会話</button></div>`:''}
-    ${bodyNotice}<div id="webchat-notice">${webchatNoticeHtml(t,pick.ai==='chatgpt' && pick.model==='auto')}</div><div id="webchat-progress">${webchatProgress(p,t)}</div><div id="discussion-progress" role="status" hidden></div><div class="msgs" id="msgs">${EMPTY_CHAT}</div>
+    ${bodyNotice}${state.extensions?.notice ? UI.template`<p class="small danger" role="status">${esc(state.extensions.notice)}</p>` : ''}<div id="webchat-notice">${webchatNoticeHtml(t,pick.ai==='chatgpt' && pick.model==='auto')}</div><div id="webchat-progress">${webchatProgress(p,t)}</div>${discussionUI()?.progressHtml() || ''}<div class="msgs" id="msgs">${EMPTY_CHAT}</div>
     <button class="chat-latest btn plain sm" id="chat-latest" type="button" hidden>↓ 最新へ</button>
     <form class="composer" id="composer">
       <div class="queue" id="chat-queue" hidden></div>
@@ -1576,9 +1491,9 @@ function chatHtml(p, t) {
         <div class="composer-settings">
         <span id="chat-account-box">${['claude','codex','grok'].includes(pick.ai) ? taskAccountSelect(p,t,pick.ai,true) : ''}</span>
         <span id="chat-fast-box">${taskFastSelect(p,t,pick.ai)}</span>
-        <button class="btn plain" id="discussion-toggle" type="button">話し合い</button></div><button class="btn" id="chat-send" type="submit">送る</button>
+        ${discussionUI()?.buttonHtml() || ''}</div><button class="btn" id="chat-send" type="submit">送る</button>
       </div>
-      <div id="discussion-settings" hidden></div><div class="crow busyrow" id="chat-busyrow" hidden>
+      ${discussionUI()?.settingsHtml() || ''}<div class="crow busyrow" id="chat-busyrow" hidden>
         <button class="btn plain" id="chat-stop" type="button" title="今の作業を止めます（待っている指示も取り消します）">停止</button>
         <button class="btn warn" id="chat-redo" type="button" hidden title="今の指示が間違いだった時。今の指示を取り消し、この指示でやり直します">やり直し</button>
         <button class="btn" id="chat-amend" type="button" hidden title="今の指示に足りない所がある時。今の指示は続け、この指示も合わせて行います">追加指示</button>
@@ -2154,7 +2069,7 @@ function openChat(p, t, savedScroll) {
   $('#chat-stop').addEventListener('click', () => api('/api/chat/stop', { project: p.id, task: t.id }).then(r=>{state.stopControl=r;toast(r.ok?'停止処理を終えました。新しい指示を送ると、この会話だけ再開します。待ち指示は保留中です':'停止を確認できないAIがあります。設定の［復旧］を確認してください');}).catch(e => toast(e.message)));
   // mode: ''（普通）／'interrupt'（① 中断して送る）／'queue'（② 追加：終わったら続けて）
   const sendChat = async (mode, answer) => {
-    if ($('#discussion-progress')?.dataset.active === '1') { toast(UI.text('話し合いが進行中です。停止または完了後に送ってください')); return false; }
+    if (discussionUI()?.active()) { toast(UI.text('話し合いが進行中です。停止または完了後に送ってください')); return false; }
     if (chatSending.has(draftKey)) return false;
     if (['chatgpt|chat','chatgpt|app'].includes($('#chat-ai').value)) { toast(UI.text('廃止された経路です。ChatGPT（Chat／Pro）を選び直してください')); return false; }
     if (chatImageUploads.get(draftKey)) { toast(UI.text('添付ファイルの追加が終わってから送ってください')); return false; }
@@ -2410,7 +2325,7 @@ function openChat(p, t, savedScroll) {
     const was = chatBusy;
     chatBusy = b;
     $('#chat-busyrow').hidden = !b; $('#chat-send').hidden = Boolean(b);
-    const discussing = $('#discussion-progress')?.dataset.active === '1';
+  const discussing = Boolean(discussionUI()?.active());
     $('#chat-redo').hidden = !b || b.webchat || discussing; $('#chat-amend').hidden = !b || b.webchat || discussing; $('#chat-q').hidden = !b || b.webchat || discussing;
     if (Boolean(was) !== Boolean(b)) drawQueue(lastQueue); // ［▶ 始める］の出し入れ
     let tmp = $('#msg-partial');
@@ -2559,7 +2474,7 @@ document.addEventListener('hub-theme-change', () => {
 function closePanes() {
   chatScroller?.dispose(); chatScroller = null;
   if (chatES) { chatES.close(); chatES = null; }
-  clearInterval(discussionPollTimer); discussionPollTimer = null;
+  discussionUIInstance?.close();
   clearInterval(busyTimer); busyTimer = null; chatBusy = null;
   for (const ai of Object.keys(panes)) {
     const p = panes[ai];
@@ -3549,6 +3464,30 @@ document.addEventListener('keydown', e => {
   const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
   e.preventDefault(); selectSettingsTab(tabs[next]); document.querySelector(`[data-settings-tab="${tabs[next]}"]`)?.focus();
 });
+function licensePurchaseHtml() {
+  if (state.license?.supported === false || state.license?.edition !== 'public' || state.license.purchased || !state.license?.purchaseUrl) return '';
+  try {
+    const url = new URL(state.license.purchaseUrl);
+    if (url.protocol !== 'https:' || url.username || url.password) return '';
+    return UI.template`<div class="license-purchase" data-license-purchase-guide>
+      <p>買い切りで、購入した版の全機能を期限なしで使えます。</p>
+      ${state.license.introAvailable
+        ? UI.html('<button type="button" class="btn" data-license-intro>体験中の特別価格で購入（1,100円・税込）</button>')
+        : UI.template`<button type="button" class="btn" data-license-purchase data-url="${url.href}">購入する（4,900円・税込）</button>`}
+      <p class="small">支払い画面はブラウザで開きます。支払い後に表示される利用コードをコピーし、この画面の［お持ちの利用コード］に貼り付けて［登録する］を押してください。すでに支払い済みの場合は、再購入せずコードを登録してください。</p>
+    </div>`;
+  } catch { return ''; }
+}
+document.addEventListener('click', async e => {
+  const button = e.target.closest?.('[data-license-intro]');
+  if (!button) return;
+  e.preventDefault();
+  if (button.disabled) return;
+  button.disabled = true;
+  try { await api('/api/license/intro-checkout', {}); }
+  catch { toast(UI.text('体験価格の購入画面を開けません。支払い状況を確認してください')); }
+  finally { button.disabled = false; }
+});
 document.addEventListener('submit', async e => {
   if (e.target.id !== 'license-form') return;
   e.preventDefault();
@@ -3587,91 +3526,105 @@ function renderSettings() {
         <select data-r="${i}" data-k="${k}" data-f="ai" aria-label="AI">${roleAiOptions(s.ai)}</select>
         ${s.ai === '人' ? '' : UI.template`<select data-r="${i}" data-k="${k}" data-f="model" aria-label="モデル">${roleModelOptions(s.ai,s.model)}</select>
         <select data-r="${i}" data-k="${k}" data-f="effort" aria-label="思考" ${effortHidden(s.ai) ? 'hidden' : ''} ${s.ai === 'agy' ? 'disabled' : ''}>${opt(effortsFor(s.ai), s.effort)}</select>`}</div>`;
-    const dirty = rolesDirty();
+    const dirty = rolesDirty(), purchase = licensePurchaseHtml();
     $('#main').innerHTML = UI.template`<div class="view settings-view"><div class="settings">
       <div class="settings-tabs" role="tablist" aria-label="設定">${Object.entries(SETTINGS_TABS).map(([key, label]) => UI.template`<button type="button" role="tab" data-settings-tab="${key}">${label}</button>`).join('')}</div>
-      <div class="card recovery-card" data-tab="recovery"><div data-handoff-status>${chatHandoffHtml()}</div><h2>AIの緊急停止</h2>
-        <p>停止が効かない時は、Hubが起動したAIをすべて停止します。待ち指示と自動開始も保留します。会話と保存済み成果は残ります。停止・保存を確認できたらHubを一度再起動し、AIは保留したまま画面へ戻ります。</p>
-        <button type="button" class="btn emergency-stop" data-ai-emergency><span aria-hidden="true">■</span> すべてのAIを緊急停止</button>
-        <p id="emergency-status" role="status" aria-live="polite">停止状態を確認中…</p>
-        <div class="buttons"><button class="btn plain" type="button" data-ai-stop-refresh>状態を確認</button><button class="btn" type="button" data-ai-resume disabled>AIの開始を再び許可</button></div>
-        <p class="small">強制終了まで数秒かかる場合があります。所有を確認できないAIへは信号を送りません。外部サービスの生成終了は別に確認が必要です。Hub自体が応答しない場合、このボタンも動きません。</p></div>
-      <div class="card" data-tab="basic"><h2>はじめの設定</h2><p>AIの導入・ログイン・確認を順に案内します。</p><button class="btn" type="button" data-onboarding-open>開く</button></div>
-      <div class="card" data-tab="basic"><h2>引っ越し</h2>
-        <p>同じMacでは、データを残してアプリだけ入れ直せば、そのまま使えます。</p>
-        <p>別のMacへは、作ったフォルダを「書類」の「ProjectHub-Move」に置き、対応するアプリを起動してください。会話・添付・プロジェクトを読み込みます。</p>
-        <p class="small">AIのログイン情報と利用コードは移しません。新しいMacで登録してください。作業中・順番待ち・未保存の変更がある場合は作成できません。</p>
-        <label class="chk"><input type="checkbox" id="move-backups"> 過去のバックアップも含める</label>
-        <button type="button" class="btn" id="move-export">引っ越し用データを作る</button>
-        <div id="move-status" aria-live="polite"></div>
-      </div>
-      <div class="card" data-tab="basic"><h2>利用コード</h2>
-        <p role="status">${esc(state.license?.edition === 'owner' ? '製作者版：鍵不要・全機能・期限なし' : state.license?.reason || '利用権を確認中です')}</p>
-        ${state.license?.edition !== 'owner' && state.license?.trial?.expiry ? UI.template`<p class="small" data-trial-dates>無料体験：${new Date(state.license.trial.startsAt * 1000).toLocaleString('ja-JP')} 〜 ${new Date(state.license.trial.expiry * 1000).toLocaleString('ja-JP')}（残り ${state.license.trial.remainingDays} 日）</p>` : ''}
-        ${state.license?.edition === 'owner' ? '' : UI.html('<form id="license-form"><label>お持ちの利用コード<input id="license-code" type="password" autocomplete="off" maxlength="256" required></label><button class="btn" type="submit">登録する</button><p id="license-notice" role="status"></p></form>')}
-      </div>
-      <div class="card" data-tab="basic"><h2>言語</h2><div id="language-box" aria-live="polite">${languageSettings ? languageSettingsHtml(languageSettings) : UI.text('確認中…')}</div></div>
-      <div class="card" data-tab="basic"><h2>表示の配色</h2>
-        <div class="theme-choices" role="group" aria-label="配色">
-          <button type="button" class="btn plain theme-choice" data-theme-choice="dark" aria-pressed="${(window.HubTheme?.current() || 'dark') === 'dark'}">ダーク</button>
-          <button type="button" class="btn plain theme-choice" data-theme-choice="light" aria-pressed="${window.HubTheme?.current() === 'light'}">ライト</button>
-        </div>
-        <p class="small">初期設定はダークです。選んだ配色はこのブラウザに保存されます。</p></div>
-      <div class="card" data-tab="basic"><h2>会話画面</h2>
-        <label class="chk"><input type="checkbox" id="set-detail" ${showDetail() ? 'checked' : ''}> コマンドなど、AI の細かい作業も会話に出す</label>
-        <label class="chk"><input type="checkbox" id="set-enter" ${enterSends() ? 'checked' : ''}> Enter だけで送る（改行は Shift + Enter。外すと今まで通り ⌘ + Enter）</label>
-        <details class="more"><summary>詳しく</summary><p class="small">作業中の印と返事、大事な知らせはいつも出ます。</p></details></div>
-      <div class="card" data-tab="basic"><h2>会話とターミナルの使い分け</h2>
-        <p>普段は［会話］、AIの画面を直接操作したいときは［ターミナル］。</p>
-        <details class="more"><summary>どちらを使う？</summary>
-          <h3>会話が向いているとき</h3>
-          <ul><li>相談する、質問する、作業をお願いする</li><li>前に決めたことを踏まえて続けたい</li><li>別のAIへ引き継ぎたい</li></ul>
-          <p>やり取りがHubに残り、別のAIにも背景を渡しやすい窓口です。自由対話（freetalk）もこちらです。添付や確認結果などは、引き継いだAIが必要に応じて改めて確認します。</p>
-          <h3>ターミナルが向いているとき</h3>
-          <ul><li>AIの画面を見ながら直接操作したい</li><li>同じAIと細かい指示を何度もやり取りしたい</li></ul>
-          <p>起動しているAIに直接指示する窓口です。その場で続けるのに向いていますが、やり取りはHubの会話履歴には入りません。</p>
-          <p><strong>画面を切り替えても、もう片方のAIは止まりません。</strong>会話とターミナルは別々に動きます。同じ作業への指示は、どちらか一方にまとめると混乱を防げます。</p>
-        </details></div>
-      <div class="card" data-tab="basic"><h2>新しく始めるときのAI</h2>
-        <p>新しい作業の初期値です。既存の作業は変わりません。</p>
-        <div id="initial-pick">${initialPickHtml()}</div></div>
-      <div class="card" data-tab="ai"><h2>AI の更新</h2>
-        <div id="ai-tools" aria-live="polite">確認中…</div></div>
-      <div class="card" data-tab="ai"><h2>スキル</h2>
-        <p>このパソコンで各AIの既定の置き場所に見つかったスキルです。有効・無効は判定しません。</p>
-        <div id="skills-box" aria-live="polite">${skillsHtml()}</div>
-        <p class="small">CLI内蔵・プラグイン・同期分・作業フォルダ内・追加アカウントのスキルは含みません。Codexの付属スキルは「付属」と表示します。</p>
-        <p class="small">作業で実際に使ったスキルは、各作業画面の「使ったスキル」に記録されます。</p>
-        <button class="btn plain sm" id="skills-check" type="button">もう一度確認</button></div>
-      <div class="card" data-tab="ai"><h2>選ぶ欄に出すモデル</h2>
-        <p>選ぶ欄に出すモデルと順番です。</p>
+      <section class="pref-section" data-tab="recovery"><h2 class="pref-caption">AIの緊急停止</h2><div class="pref-list recovery-card">
+        <div data-handoff-status>${chatHandoffHtml()}</div>
+        <div class="pref-row pref-stack"><div class="pref-text"><p>停止が効かない時は、Hubが起動したAIをすべて停止します。待ち指示と自動開始も保留します。会話と保存済み成果は残ります。停止・保存を確認できたらHubを一度再起動し、AIは保留したまま画面へ戻ります。</p></div>
+          <button type="button" class="btn emergency-stop" data-ai-emergency><span aria-hidden="true">■</span> すべてのAIを緊急停止</button></div>
+        <div class="pref-row pref-stack"><p id="emergency-status" role="status" aria-live="polite">停止状態を確認中…</p>
+          <div class="buttons"><button class="btn plain" type="button" data-ai-stop-refresh>状態を確認</button><button class="btn" type="button" data-ai-resume disabled>AIの開始を再び許可</button></div>
+          <p class="small">強制終了まで数秒かかる場合があります。所有を確認できないAIへは信号を送りません。外部サービスの生成終了は別に確認が必要です。Hub自体が応答しない場合、このボタンも動きません。</p></div>
+      </div></section>
+      <section class="pref-section" data-tab="basic"><h2 class="pref-caption">表示</h2><div class="pref-list">
+        <div class="pref-row"><div class="pref-text"><h3>配色</h3><p>初期設定はダークです。選んだ配色はこのブラウザに保存されます。</p></div>
+          <div class="pref-control"><div class="theme-choices pref-seg" role="group" aria-label="配色">
+            <button type="button" class="theme-choice" data-theme-choice="dark" aria-pressed="${(window.HubTheme?.current() || 'dark') === 'dark'}">ダーク</button>
+            <button type="button" class="theme-choice" data-theme-choice="light" aria-pressed="${window.HubTheme?.current() === 'light'}">ライト</button>
+          </div></div></div>
+        <div class="pref-row"><div class="pref-text"><h3>言語</h3><p>Hub を再起動すると切り替わります。Mac アプリのメニューは、アプリを開き直した時に切り替わります。</p></div>
+          <div id="language-box" class="pref-contents" aria-live="polite">${languageSettings ? languageSettingsHtml(languageSettings) : UI.text('確認中…')}</div></div>
+      </div></section>
+      <section class="pref-section" data-tab="basic"><h2 class="pref-caption">会話</h2><div class="pref-list">
+        <label class="pref-row"><span class="pref-text"><span class="pref-name">コマンドなど、AI の細かい作業も会話に出す</span><span class="pref-desc">作業中の印と返事、大事な知らせはいつも出ます。</span></span>
+          <input type="checkbox" class="pref-switch" id="set-detail" ${showDetail() ? 'checked' : ''}></label>
+        <label class="pref-row"><span class="pref-text"><span class="pref-name">Enter だけで送る</span><span class="pref-desc">改行は Shift + Enter。オフにすると ⌘ + Enter で送ります。</span></span>
+          <input type="checkbox" class="pref-switch" id="set-enter" ${enterSends() ? 'checked' : ''}></label>
+        <div class="pref-row pref-stack"><div class="pref-text"><h3>新しく始めるときのAI</h3><p>新しい作業の初期値です。既存の作業は変わりません。</p></div>
+          <div id="initial-pick">${initialPickHtml()}</div></div>
+      </div></section>
+      <section class="pref-section" data-tab="basic"><h2 class="pref-caption">利用コード</h2><div class="pref-list">
+        ${state.license?.edition === 'owner' || state.license?.supported === false ? '' : UI.html('<form id="license-form" class="pref-row">')}${state.license?.edition === 'owner' || state.license?.supported === false ? UI.html('<div class="pref-row">') : ''}
+          <div class="pref-text"><span class="pref-name" role="status">${esc(state.license?.edition === 'owner' ? '製作者版：鍵不要・全機能・期限なし' : state.license?.reason || '利用権を確認中です')}</span>
+          ${state.license?.edition !== 'owner' && state.license?.trial?.expiry ? UI.template`<p data-trial-dates>無料体験：${new Date(state.license.trial.startsAt * 1000).toLocaleString('ja-JP')} 〜 ${new Date(state.license.trial.expiry * 1000).toLocaleString('ja-JP')}（残り ${state.license.trial.remainingDays} 日）</p>` : ''}</div>
+        ${state.license?.edition === 'owner' || state.license?.supported === false ? UI.html('</div>') : UI.html('<div class="pref-control"><label class="pref-sr" for="license-code">お持ちの利用コード</label><input id="license-code" type="password" autocomplete="off" maxlength="256" required placeholder="お持ちの利用コード"><button class="btn" type="submit">登録する</button></div><p id="license-notice" role="status"></p></form>')}
+        ${purchase ? `<div class="pref-row pref-stack">${purchase}</div>` : ''}
+      </div></section>
+      <section class="pref-section" data-tab="basic"><h2 class="pref-caption">はじめに・引っ越し</h2><div class="pref-list">
+        <div class="pref-row"><div class="pref-text"><h3>はじめの設定</h3><p>AIの導入・ログイン・確認を順に案内します。</p></div>
+          <div class="pref-control"><button class="btn plain" type="button" data-onboarding-open>開く</button></div></div>
+        <div class="pref-row"><div class="pref-text"><h3>会話とターミナルの使い分け</h3><p>普段は［会話］、AIの画面を直接操作したいときは［ターミナル］。</p>
+          <details class="pref-more"><summary>どちらを使う？</summary>
+            <h4>会話が向いているとき</h4>
+            <ul><li>相談する、質問する、作業をお願いする</li><li>前に決めたことを踏まえて続けたい</li><li>別のAIへ引き継ぎたい</li></ul>
+            <p>やり取りがHubに残り、別のAIにも背景を渡しやすい窓口です。自由対話（freetalk）もこちらです。添付や確認結果などは、引き継いだAIが必要に応じて改めて確認します。</p>
+            <h4>ターミナルが向いているとき</h4>
+            <ul><li>AIの画面を見ながら直接操作したい</li><li>同じAIと細かい指示を何度もやり取りしたい</li></ul>
+            <p>起動しているAIに直接指示する窓口です。その場で続けるのに向いていますが、やり取りはHubの会話履歴には入りません。</p>
+            <p><strong>画面を切り替えても、もう片方のAIは止まりません。</strong>会話とターミナルは別々に動きます。同じ作業への指示は、どちらか一方にまとめると混乱を防げます。</p>
+          </details></div></div>
+        <div class="pref-row"><div class="pref-text"><h3>引っ越し</h3><p>別のMacへ移す時に使います。同じMacなら、データを残してアプリを入れ直すだけで使えます。</p>
+          <label class="chk pref-check"><input type="checkbox" id="move-backups"> 過去のバックアップも含める</label>
+          <details class="pref-more"><summary>詳しく</summary>
+            <p>別のMacへは、作ったフォルダを「書類」の「ProjectHub-Move」に置き、対応するアプリを起動してください。会話・添付・プロジェクトを読み込みます。</p>
+            <p>AIのログイン情報と利用コードは移しません。新しいMacで登録してください。作業中・順番待ち・未保存の変更がある場合は作成できません。</p>
+          </details></div>
+          <div class="pref-control"><button type="button" class="btn plain" id="move-export">引っ越し用データを作る</button></div>
+          <div id="move-status" aria-live="polite"></div></div>
+      </div></section>
+      <section class="pref-section" data-tab="ai"><h2 class="pref-caption">役割分担</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div id="role-settings-controls">${roleSettingsHtml()}</div></div>
+        <div class="pref-row pref-stack"><div class="role-head"><p class="pref-desc">役割ごとの担当と、上限の時の担当です。</p><div class="acts"><span id="role-account-status" class="small" role="status"></span><button id="role-account-check" class="btn plain sm" type="button">もう一度確認</button></div></div>
+        <div class="tbl role-table"><table><tr><th>役割</th><th>いつもの担当</th><th>上限の時</th><th>内容</th></tr>
+        ${rolesDraft.map((r, i) => UI.template`<tr><td class="now">${esc(UI.label(r.name))}</td><td class="role-main" data-label="いつもの担当">${cell(i, 'main', r.main)}</td><td class="role-backup" data-label="上限の時">${cell(i, 'backup', r.backup)}</td><td class="job" title="${esc(UI.label(r.job))}">${esc(UI.label(r.job))}</td></tr>`).join('')}</table></div></div>
+        <div class="pref-row pref-stack"><div class="acts ai-save-actions"><button class="btn" id="roles-save" type="button" ${dirty ? '' : 'disabled'}>役割分担・クレジットを保存</button>
+          <button class="btn plain" id="roles-reset" type="button" ${dirty ? '' : 'disabled'}>元に戻す</button>
+          <span class="${dirty ? 'dirty' : 'saved'}" role="status">${rolesSaveStatus()}</span></div>
+        <details class="more"><summary>詳しく</summary><p class="small">保存した設定は次の起動・上限時の交代に反映します。交代先も上限ならいつもの担当へ、両方が上限なら待機します。</p><p class="small"><span id="model-catalog">選べるモデル：Claude Code は ${esc((models['claude-code'] || []).join(' / '))}、Codex は ${esc((models.codex || []).join(' / '))}、Grok は ${esc((models.grok || []).join(' / '))}（思考は中・高・極高・MAX）、Gemini（Agy CLI）は取得したモデル一覧から選択・思考「高」。思考は ${esc(state.efforts.join(' → '))}。</span>保存先 <span class="path">${esc(state.root)}/_hub/roles.yaml</span></p></details></div>
+      </div></section>
+      <section class="pref-section ai-use-settings" data-tab="ai" id="ai-use-settings"><h2 class="pref-caption">AIの利用設定</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div id="ai-accounts"></div></div>
+        <div class="pref-row pref-stack"><section class="ai-use-section"><div class="ai-option-line"><h3>特殊モード</h3><div id="special-mode" class="ai-option-line">${specialModeHtml()}</div><details class="more" data-ai-fold="special-help"><summary>詳しく</summary><div class="ai-detail-body"><p class="small">リセット前やリセットチケットを使うとき、選んだAIに作業を集中します。</p><p class="small">今回の依頼にAI・モデルの直接指定がなければ、選んだAIを使い続けます。同じAI内のモデルはAIに任せます。人が指定・選択した依頼の後は特殊モードへ戻ります。通常の役割分担は保存したままです。</p><p class="small">次の依頼から反映します。作業中のAIや受付済みの待ち指示は変わりません。上限時は別のAIへ自動交代せず待機します。</p></div></details></div></section></div>
+        <div class="pref-row pref-stack">${creditSettingsHtml()}</div>
+      </div></section>
+      <section class="pref-section" data-tab="ai"><h2 class="pref-caption">選ぶ欄に出すモデル</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><p class="pref-desc">選ぶ欄に出すモデルと順番です。</p>
         <div id="model-order-list">${modelOrderHtml()}</div>
         <details class="more"><summary>並べ方・整理</summary>      <p>上から順に、会話などのモデルを選ぶ欄に並びます。［↑］［↓］で順番を変えられます。パソコンでは左の印をドラッグしても動かせます。役割の担当と今の選択は変わりません。</p>
         <div class="acts" style="margin-top:10px"><button class="btn plain" id="models-tidy" type="button">最新のモデルに整理する</button>
           <span class="small">役割で使っている古いモデル名（6sol など）を、同じ系統の一番新しいモデルに置き換え、roles.yaml の一覧も今のものにします。</span></div>
         <div id="tidy-result" class="small"></div></details></div>
-      <div class="card ai-use-settings" data-tab="ai" id="ai-use-settings"><h2>AIの利用設定</h2><div id="ai-accounts"></div>
-        <section class="ai-use-section"><div class="ai-option-line"><h3>特殊モード</h3><div id="special-mode" class="ai-option-line">${specialModeHtml()}</div><details class="more" data-ai-fold="special-help"><summary>詳しく</summary><div class="ai-detail-body"><p class="small">リセット前やリセットチケットを使うとき、選んだAIに作業を集中します。</p><p class="small">今回の依頼にAI・モデルの直接指定がなければ、選んだAIを使い続けます。同じAI内のモデルはAIに任せます。人が指定・選択した依頼の後は特殊モードへ戻ります。通常の役割分担は保存したままです。</p><p class="small">次の依頼から反映します。作業中のAIや受付済みの待ち指示は変わりません。上限時は別のAIへ自動交代せず待機します。</p></div></details></div></section>${creditSettingsHtml()}</div>
-      <div class="card" data-tab="ai"><h2>役割分担</h2>
-        <div id="role-settings-controls">${roleSettingsHtml()}</div>
-        <p>役割ごとの担当と、上限の時の担当です。</p><p class="small">保存した設定は次の起動・上限時の交代に反映します。交代先も上限ならいつもの担当へ、両方が上限なら待機します。</p><div class="acts"><span id="role-account-status" class="small" role="status"></span><button id="role-account-check" class="btn plain sm" type="button">もう一度確認</button></div>
-        <div class="tbl"><table><tr><th>役割</th><th>いつもの担当</th><th>上限の時</th><th>内容</th></tr>
-        ${rolesDraft.map((r, i) => UI.template`<tr><td class="now">${esc(UI.label(r.name))}</td><td>${cell(i, 'main', r.main)}</td><td>${cell(i, 'backup', r.backup)}</td><td class="job">${esc(UI.label(r.job))}</td></tr>`).join('')}</table></div>
-        <details class="more"><summary>詳しく</summary><p class="small"><span id="model-catalog">選べるモデル：Claude Code は ${esc((models['claude-code'] || []).join(' / '))}、Codex は ${esc((models.codex || []).join(' / '))}、Grok は ${esc((models.grok || []).join(' / '))}（思考は中・高・極高・MAX）、Gemini（Agy CLI）は取得したモデル一覧から選択・思考「高」。思考は ${esc(state.efforts.join(' → '))}。</span>保存先 <span class="path">${esc(state.root)}/_hub/roles.yaml</span></p></details>
-        <div class="acts ai-save-actions"><button class="btn" id="roles-save" type="button" ${dirty ? '' : 'disabled'}>役割分担・クレジットを保存</button>
-          <button class="btn plain" id="roles-reset" type="button" ${dirty ? '' : 'disabled'}>元に戻す</button>
-          <span class="${dirty ? 'dirty' : 'saved'}" role="status">${rolesSaveStatus()}</span></div></div>
-      <div class="card" data-tab="ai"><h2>Codex の加速（Fast）</h2>
-        <p>ONにしても自動では加速しません。作業画面のCodex欄で作業ごとに選びます。</p>
-        <p class="danger"><strong>速度約1.5倍・利用枠の消耗2.5倍</strong></p>
-        <div id="acceleration" aria-live="polite">確認中…</div>
-        <details class="more"><summary>詳しく</summary><p class="small">速度は一部モデルの目安で、モデルや状況で変わります。Claude Codeは対象外です。次の会話・ターミナル起動から反映します。OFFにすると全作業で加速しません。作業ごとの選択は残り、再びONにすると戻ります。</p></details></div>
-      <div class="card" data-tab="manage"><h2>Project Hub の自動更新</h2><div id="app-update-box" aria-live="polite">確認中…</div></div>
-      <div class="card" data-tab="ai"><details class="more"><summary>上級：CLIに渡すモデル名</summary>
+        <div class="pref-row pref-stack"><details class="more"><summary>上級：CLIに渡すモデル名</summary>
         <p>画面のモデルの呼び名を、Claude Code・Codex が受け付ける名前に直します。<b>空にすると、モデルを指定せず CLI の既定のモデルを使います。</b>モデル名が拒否された場合は理由を表示し、設定を勝手に変えません。</p>
         <div id="climodels" class="small">読み込み中…</div></details></div>
-      <div class="card" data-tab="connect"><h2>外から使う（iPhone）</h2>
-        <p>iPhoneからMacと同じ操作ができます。</p>
+      </div></section>
+      <section class="pref-section" data-tab="ai"><h2 class="pref-caption">AI の更新</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div id="ai-tools" aria-live="polite">確認中…</div></div>
+      </div></section>
+      <section class="pref-section" data-tab="ai"><h2 class="pref-caption">スキル</h2><div class="pref-list">
+        <div class="pref-row"><div class="pref-text"><p>このパソコンで各AIの既定の置き場所に見つかったスキルです。有効・無効は判定しません。</p></div><div class="pref-control"><button class="btn plain sm" id="skills-check" type="button">もう一度確認</button></div></div>
+        <div class="pref-row pref-stack"><div id="skills-box" aria-live="polite">${skillsHtml()}</div>
+        <details class="more"><summary>詳しく</summary><p class="small">CLI内蔵・プラグイン・同期分・作業フォルダ内・追加アカウントのスキルは含みません。Codexの付属スキルは「付属」と表示します。</p>
+        <p class="small">作業で実際に使ったスキルは、各作業画面の「使ったスキル」に記録されます。</p></details></div>
+      </div></section>
+      <section class="pref-section" data-tab="ai"><h2 class="pref-caption">Codex の加速（Fast）</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div class="pref-text"><p>ONにしても自動では加速しません。作業画面のCodex欄で作業ごとに選びます。</p><p class="danger"><strong>速度約1.5倍・利用枠の消耗2.5倍</strong></p></div>
+        <div id="acceleration" aria-live="polite">確認中…</div>
+        <details class="more"><summary>詳しく</summary><p class="small">速度は一部モデルの目安で、モデルや状況で変わります。Claude Codeは対象外です。次の会話・ターミナル起動から反映します。OFFにすると全作業で加速しません。作業ごとの選択は残り、再びONにすると戻ります。</p></details></div>
+      </div></section>
+      <section class="pref-section" data-tab="connect"><h2 class="pref-caption">iPhone から使う</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div class="pref-text"><h3>外から使う（iPhone）</h3><p>iPhoneからMacと同じ操作ができます。</p></div>
         <div id="remote-box" aria-live="polite">確認中…</div>
         <details class="more"><summary>使い始める手順</summary><ol class="small">
           <li>Mac と iPhone に Tailscale を入れ、同じアカウントでログインします。</li>
@@ -3679,25 +3632,34 @@ function renderSettings() {
           <li>ここで合言葉（8文字以上）を保存し、「外から使う」をオンにします。</li>
           <li><div>iPhone の Safari で、上の「iPhone で開くアドレス」を開き、合言葉を入れます。<br>アドレスが出ていない時は、Mac のターミナルで <code>tailscale serve status</code><button type="button" class="cp" data-copy="tailscale serve status" title="コピー" aria-label="コピー">⧉ コピー</button> を実行します。1行目の <code>https://〜.ts.net</code> が開くアドレスです。</div></li>
           <li>共有メニューの「ホーム画面に追加」で、アプリのように開けます。</li></ol></details></div>
-      <div class="card" data-tab="connect"><h2>スマホの表示</h2>
-        <p>スマホの会話で出すAIの名前です。</p>
+        <div class="pref-row pref-stack"><div class="pref-text"><h3>スマホの表示</h3><p>スマホの会話で出すAIの名前です。</p></div>
         <div id="phone-labels">${phoneLabelsHtml()}</div></div>
-      <div class="card" data-tab="connect"><h2>GitHub</h2><div id="github-box" aria-live="polite">確認中…</div></div>
-      <div class="card" data-tab="connect"><h2>Mac のファイルの許可</h2>
-        <p>Hubが書類などのフォルダを読めるか確かめます。</p><details class="more"><summary>詳しく</summary><p class="small">書類・デスクトップ・ダウンロードのフォルダを、Project Hub が読めるか確かめます。「システム設定 → プライバシーとセキュリティ → ファイルとフォルダ」に Project Hub が無い時は、［確認をもう一度出す］を押し、Mac の確認で「許可」を選んでください。</p></details>
+      </div></section>
+      <section class="pref-section" data-tab="connect"><h2 class="pref-caption">GitHub</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div id="github-box" aria-live="polite">確認中…</div></div>
+      </div></section>
+      <section class="pref-section" data-tab="connect"><h2 class="pref-caption">Mac</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div class="pref-text"><h3>Mac のファイルの許可</h3><p>Hubが書類などのフォルダを読めるか確かめます。</p></div>
+        <details class="more"><summary>詳しく</summary><p class="small">書類・デスクトップ・ダウンロードのフォルダを、Project Hub が読めるか確かめます。「システム設定 → プライバシーとセキュリティ → ファイルとフォルダ」に Project Hub が無い時は、［確認をもう一度出す］を押し、Mac の確認で「許可」を選んでください。</p></details>
         ${/ProjectHubApp/.test(navigator.userAgent) ? UI.template`<div class="acts"><a class="btn plain" href="hubapp://access">許可を確かめる</a><a class="btn" href="hubapp://access?reset=1">確認をもう一度出す</a></div>
         <details class="more"><summary>許可が出ない時</summary><p class="small">それでも出ない時は、確かめた後の画面の［フルディスクアクセスを開く］から、Project Hub をリストに入れてオンにしてください（アプリのメニューからも同じことができます）。</p></details>`
           : UI.html('<p class="small">アプリ（Project Hub.app）で開いた時に使えます。アプリが古い時は、ターミナルで <code>bash hub/app/build-app.sh</code> を実行して作り直してください。</p>')}</div>
-      <div class="card" data-tab="manage"><h2>作業画面</h2>
-        <p><span class="badge ${state.terminal ? '' : 'off'}"><i></i>${state.terminal ? UI.text('画面の中で Claude Code / Codex / Agy CLI を動かせます') : UI.text('部品（node-pty）が未設定です。ターミナルで setup.sh を実行してください。それまでは別の窓で開きます')}</span></p>
+      </div></section>
+      <section class="pref-section" data-tab="manage"><h2 class="pref-caption">更新とバージョン</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><div class="pref-text"><h3>Project Hub の自動更新</h3></div><div id="app-update-box" aria-live="polite">確認中…</div></div>
+        <div class="pref-row"><div class="pref-text"><h3>バージョン</h3><p>稼働：<b>v${esc(state.version || '')}</b> ／ 本体保存済み：<b>v${esc(state.saved?.version || state.latest || '')}</b>${state.latest && state.latest !== state.version ? UI.template`（新しい版 v${esc(state.latest)} を取り込み済み。上の［Update］で切り替わります）` : ''}</p></div><div class="pref-control">${hubUpdateButton()}</div>
+        <details class="more" id="verd" ${verOpen ? 'open' : ''}><summary>変更の記録</summary><div id="verbox" class="small">読み込み中…</div></details></div>
+      </div></section>
+      <section class="pref-section" data-tab="manage"><h2 class="pref-caption">作業</h2><div class="pref-list">
+        <div class="pref-row"><div class="pref-text"><h3>作業画面</h3><p><span class="badge ${state.terminal ? '' : 'off'}"><i></i>${state.terminal ? UI.text('画面の中で Claude Code / Codex / Agy CLI を動かせます') : UI.text('部品（node-pty）が未設定です。ターミナルで setup.sh を実行してください。それまでは別の窓で開きます')}</span></p></div>
         <details class="more"><summary>詳しく</summary><p class="small">権限：Claude Code は <code>${esc(state.roles.permissions['claude-code'] || '')}</code>、Codex は <code>${esc(state.roles.permissions.codex || '')}</code></p></details></div>
-      <div class="card" data-tab="manage"><h2>空の作業を片付ける</h2>
-        <p>会話が空の作業を探して、まとめてゴミ箱へ移します。</p><details class="more"><summary>詳しく</summary><p class="small">最初から選ばれるのは、派生・子プロジェクトで「やったこと」も空の作業だけです。</p></details>
-        <div class="acts"><button class="btn plain" data-act="emptyscan" type="button">探す</button></div>
+        <div class="pref-row"><div class="pref-text"><h3>空の作業を片付ける</h3><p>会話が空の作業を探して、まとめてゴミ箱へ移します。</p></div><div class="pref-control"><button class="btn plain" data-act="emptyscan" type="button">探す</button></div>
+        <details class="more"><summary>詳しく</summary><p class="small">最初から選ばれるのは、派生・子プロジェクトで「やったこと」も空の作業だけです。</p></details>
         <div id="empty-box">${emptyHtml()}</div></div>
-      <div class="card" data-tab="manage"><h2>バージョン</h2><p>稼働：<b>v${esc(state.version || '')}</b> ／ 本体保存済み：<b>v${esc(state.saved?.version || state.latest || '')}</b>${state.latest && state.latest !== state.version ? UI.template`（新しい版 v${esc(state.latest)} を取り込み済み。上の［Update］で切り替わります）` : ''}</p>
-        ${hubUpdateButton()}<details class="more" id="verd" ${verOpen ? 'open' : ''}><summary>変更の記録</summary><div id="verbox" class="small">読み込み中…</div></details></div>
-      <div class="card" data-tab="manage"><details class="more" id="logd"><summary>最近の操作（記録）</summary><div id="logbox" class="small">読み込み中…</div></details></div>
+      </div></section>
+      <section class="pref-section" data-tab="manage"><h2 class="pref-caption">記録</h2><div class="pref-list">
+        <div class="pref-row pref-stack"><details class="more" id="logd"><summary>最近の操作（記録）</summary><div id="logbox" class="small">読み込み中…</div></details></div>
+      </div></section>
     </div></div>`;
     selectSettingsTab(settingsTab);void refreshEmergencyStatus();
     renderedPhoneKey = phoneSettingsKey();
@@ -3744,23 +3706,29 @@ function languageSettingsHtml(settings) {
   const choices = settings.packs.filter(pack => pack.usable).filter((pack, index, rows) => rows.findIndex(row => row.id === pack.id) === index);
   const chosen = languageDraft ?? settings.saved;
   const selected = chosen === 'ja' || choices.some(pack => pack.id === chosen) ? chosen : 'ja';
-  return UI.template`<label>表示言語 <select id="language-choice" ${languageBusy ? 'disabled' : ''}>
+  return UI.template`<div class="pref-control"><select id="language-choice" aria-label="表示言語" ${languageBusy ? 'disabled' : ''}>
     <option value="ja" ${selected === 'ja' ? 'selected' : ''}>日本語（標準）</option>
-    ${choices.map(pack => `<option value="${esc(pack.id)}" ${selected === pack.id ? 'selected' : ''}>${esc(pack.name)}</option>`).join('')}</select></label>
-    <div class="acts"><button type="button" class="btn" data-language="save" ${languageBusy ? 'disabled' : ''}>保存する</button>
-    <button type="button" class="btn plain" data-language="import" ${languageBusy ? 'disabled' : ''}>言語パックを追加…</button></div>
-    <p class="small">展開した言語パックのフォルダを選んで追加できます。</p>
+    ${choices.map(pack => `<option value="${esc(pack.id)}" ${selected === pack.id ? 'selected' : ''}>${esc(pack.name)}</option>`).join('')}</select>
+    <button type="button" class="btn plain" data-language="save" ${languageBusy ? 'disabled' : ''}>保存する</button></div>
     ${settings.fallback ? UI.html('<p class="note">選んだ言語パックが読めないため、日本語で表示しています。</p>') : ''}
-    <ul>${settings.packs.map(pack => UI.template`<li><b>${esc(pack.name)}</b> <span class="small">${esc(pack.id)}・${pack.source === 'installed' ? UI.text('追加済み') : pack.source === 'external' ? UI.text('起動時に指定') : UI.text('本体同梱')}</span>
+    <details class="pref-more"><summary>言語パック</summary>
+    <ul class="pref-packs">${settings.packs.map(pack => UI.template`<li><span class="pref-pack-name"><b>${esc(pack.name)}</b> <span class="small">${esc(pack.id)}・${pack.source === 'installed' ? UI.text('追加済み') : pack.source === 'external' ? UI.text('起動時に指定') : UI.text('本体同梱')}</span></span>
+      ${pack.source === 'installed' ? UI.template`<button class="btn plain sm" type="button" data-language="remove" data-pack-id="${esc(pack.id)}" ${languageBusy ? 'disabled' : ''}>削除</button>` : ''}
       ${pack.reason ? `<p class="small">${esc(UI.text(pack.reason))}</p>` : ''}
-      ${pack.verifiedWith && pack.verifiedWith !== settings.version ? UI.template`<p class="small">v${esc(pack.verifiedWith)} で確認されたパックです。今の版と違うため、一部が日本語で表示されることがあります。</p>` : ''}
-      ${pack.source === 'installed' ? UI.template`<button class="btn plain sm" type="button" data-language="remove" data-pack-id="${esc(pack.id)}" ${languageBusy ? 'disabled' : ''}>削除</button>` : ''}</li>`).join('')}</ul>
-    <p class="small">Hub を再起動すると切り替わります。Mac アプリのメニューは、アプリを開き直した時に切り替わります。</p>
+      ${pack.verifiedWith && pack.verifiedWith !== settings.version ? UI.template`<p class="small">v${esc(pack.verifiedWith)} で確認されたパックです。今の版と違うため、一部が日本語で表示されることがあります。</p>` : ''}</li>`).join('')}</ul>
+    <div class="pref-packs-add"><button type="button" class="btn plain sm" data-language="import" ${languageBusy ? 'disabled' : ''}>言語パックを追加…</button><span class="small">展開した言語パックのフォルダを選んで追加できます。</span></div>
+    </details>
     <p id="language-notice" role="status" class="small">${esc(languageNotice)}</p>
-    ${settings.restartNeeded ? UI.template`<button type="button" class="btn" data-language="restart" ${languageBusy ? 'disabled' : ''}>今すぐ再起動</button>` : ''}`;
+    ${settings.restartNeeded ? UI.template`<div class="pref-actions"><button type="button" class="btn" data-language="restart" ${languageBusy ? 'disabled' : ''}>今すぐ再起動</button></div>` : ''}`;
 }
 function drawLanguageSettings() {
-  const box = $('#language-box'); if (box && languageSettings) box.innerHTML = languageSettingsHtml(languageSettings);
+  const box = $('#language-box');
+  if (box && languageSettings) {
+    const open = box.querySelector('details')?.open === true;
+    box.innerHTML = languageSettingsHtml(languageSettings);
+    const details = box.querySelector('details');
+    if (details) details.open = open;
+  }
 }
 async function loadLanguageSettings() {
   const box = $('#language-box'); if (!box || languageBusy) return;

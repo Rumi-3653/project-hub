@@ -372,9 +372,9 @@ test('auth Terminal focus lookup validates live PID, ignores exited/work markers
 test('resuming auth Terminal selects its TTY without running any login command', async () => {
   const vm=require('node:vm'), req=require('node:module').createRequire(require.resolve('../lib/launch'));
   let tty='ttys123', scriptError=false; const calls=[];
-  const context={module:{exports:{}},process,require:name=>name==='child_process'?{execFile:(file,args,cb)=>{
+  const context={module:{exports:{}},process,require:name=>name==='./platform'?require('../lib/platform').createDarwin({execFile:(file,args,cb)=>{
     calls.push({file,args}); cb(scriptError && file==='osascript'?Error('not found'):null,file==='/bin/ps'?tty+'\n':'');
-  }}:req(name)};
+  }}):req(name)};
   vm.runInNewContext(fs.readFileSync(require.resolve('../lib/launch'),'utf8'),context);
   const focus=context.module.exports.focusAuthTerminal;
   assert.equal((await focus(123,false)).existingTerminal,true);

@@ -1,14 +1,16 @@
 'use strict';
+const platforms = require('./platform');
 // Completed-App updates. No Git, npm, downloaded scripts, AI or elevated access.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFile, execFileSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const TRUST = require('./update-trust');
 const DAY = 86400000, HOUR = 3600000, MAX_ASSET = 256 * 1024 * 1024;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SHA = /^[a-f0-9]{64}$/;
 const REASONS = {
+  windows: 'Windowsでは未対応：アプリの自動更新はまだ使えません',
   owner: '製作者版は自動更新の対象外です',
   'not-configured': '準備中：配布元の設定がまだありません',
   'not-bundled': '完成アプリの中から起動している本体ではありません',
@@ -124,33 +126,33 @@ class PackagedUpdate {
     this.source = ''; this.ownerEdition = o.ownerEdition === true; this.trust = o.trust || TRUST;
     this.now = o.now || Date.now; this.run = o.run || run; this.fetch = o.fetch || fetch; this.testOrigin = o.testOrigin; // Constructor-only local fixture transport.
     this.platform = o.platform || process.platform; this.arch = o.arch || process.arch;
-    this.macOS = o.macOS || (() => this.run('/usr/bin/sw_vers', ['-productVersion'])); this.node = o.node || process.versions.node;
+    this.platformApi = o.platformApi || platforms.forPlatform(this.platform);
+    this.macOS = o.macOS || (() => this.platformApi.appUpdater.macOS(this.run.bind(this))); this.node = o.node || process.versions.node;
     this.busy = o.busy || (() => false); this.license = o.license; this.env = { ...process.env, ...(o.env || {}) };
     this.rename = o.rename || fs.renameSync; this.dry = o.dry === true; this.running = null; this.timer = null; this.restartNeeded = false;
     this.data = {}; this.stateError = false;
-    try { securePath(this.stateFile, this.root); this.data = readJSON(this.stateFile); } catch { this.stateError = true; }
-    try { securePath(this.settingsFile, this.root); this.enabled = readJSON(this.settingsFile).enabled === true; } catch { this.enabled = false; this.stateError = true; }
+    this.enabled = false;
+    if (this.platform !== 'win32') {
+      try { securePath(this.stateFile, this.root); this.data = readJSON(this.stateFile); } catch { this.stateError = true; }
+      try { securePath(this.settingsFile, this.root); this.enabled = readJSON(this.settingsFile).enabled === true; } catch { this.enabled = false; this.stateError = true; }
+    }
     if (this.ownerEdition) this.enabled = false;
     this.quarantined = false;
     if (!this.dry && !this.reason()) {
       try {
-        this.quarantined = execFileSync('/usr/bin/xattr', [this.appPath], { encoding: 'utf8', timeout: 5000 }).split('\n').includes('com.apple.quarantine');
-        if (this.quarantined) {
-          // Gatekeeper approval leaves this attribute on the running App.
-          // Downloaded candidates still reject any quarantine in inspectApp.
-          const flags = execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', this.appPath], { encoding: 'utf8', timeout: 5000 }).trim().split(';', 1)[0];
-          const mask = /^[0-9a-f]+$/i.test(flags) ? Number.parseInt(flags, 16) : NaN;
-          this.quarantined = !Number.isSafeInteger(mask) || !(mask & 0x40);
-        }
+        this.quarantined = this.platformApi.appUpdater.hasQuarantine(this.appPath);
+        // Keep the observed attribute if reading its approval flags fails.
+        if (this.quarantined) this.quarantined = !this.platformApi.appUpdater.quarantineApproved(this.appPath);
       }
       catch { this.stateError = true; }
     }
   }
   get mode() { return this.supported() ? 'packaged' : 'unsupported'; }
   reason() {
+    if (this.platform === 'win32') return 'windows';
     if (this.ownerEdition) return 'owner';
     if (!this.trust.feedUrl || !this.trust.assetPrefix || !Object.keys(this.trust.keys).length) return 'not-configured';
-    if (this.platform !== 'darwin' || this.arch !== 'arm64') return 'platform';
+    if (!this.platformApi.appUpdater.packagedSupported(this.arch)) return 'platform';
     if (!path.isAbsolute(this.appPath) || path.basename(this.appPath) !== 'Project Hub.app') return 'app-name';
     if (this.appPath.includes('/AppTranslocation/')) return 'translocated';
     if (this.quarantined) return 'quarantine';
@@ -178,7 +180,7 @@ class PackagedUpdate {
       rejected: this.data.rejected || null, previousVersion: this.data.previousVersion || '', restartNeeded: this.restartNeeded,
       autoTranslate: false, publishEnabled: false, upstream: this.trust.feedUrl || '', appPath: this.appPath };
   }
-  applying() { return ['installing', 'confirming'].includes(this.data.phase) || this.restartNeeded; }
+  applying() { if (this.platform === 'win32') return false; return ['installing', 'confirming'].includes(this.data.phase) || this.restartNeeded; }
   busyMessage() { return 'アプリの更新を適用中です。少し待ってください'; }
   idleMessage() { return 'AI・順番待ち・整理が終わるまで更新を待ちます'; }
   nextHub() { return path.join(this.appPath, 'Contents/Resources/runtime/hub'); }
@@ -289,12 +291,12 @@ class PackagedUpdate {
   }
   async inspectApp(app, m) {
     const hash = treeHash(app); if (hash.treeSha256 !== m.app.treeSha256 || hash.entries !== m.app.entries) fail('tree-hash');
-    await this.run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
-    const quarantine = await this.run('/usr/bin/xattr', [app]); if (quarantine.split('\n').includes('com.apple.quarantine')) fail('quarantine');
-    const plist = JSON.parse(await this.run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', path.join(app, 'Contents/Info.plist')]));
+    await this.platformApi.appUpdater.verify(app, undefined, this.run.bind(this), true);
+    const quarantine = await this.platformApi.appUpdater.quarantine(app, this.run.bind(this)); if (quarantine.split('\n').includes('com.apple.quarantine')) fail('quarantine');
+    const plist = await this.platformApi.appUpdater.bundlePlist(app, this.run.bind(this));
     if (plist.CFBundleIdentifier !== 'local.projecthub' || plist.CFBundleShortVersionString !== m.version || plist.HubDir !== '@bundle/runtime/hub' || plist.HubRoot || plist.HubStorageGuard || !/^[A-Za-z0-9_-]+$/.test(plist.CFBundleExecutable || '')) fail('plist');
     const executable = path.join(app, 'Contents/MacOS', plist.CFBundleExecutable);
-    if (!fs.lstatSync(executable).isFile() || !(fs.statSync(executable).mode & 0o111) || (await this.run('/usr/bin/lipo', ['-archs', executable])) !== 'arm64') fail('architecture');
+    if (!fs.lstatSync(executable).isFile() || !(fs.statSync(executable).mode & 0o111) || (await this.platformApi.appUpdater.architecture(executable, this.run.bind(this))) !== 'arm64') fail('architecture');
     const hub = path.join(app, 'Contents/Resources/runtime/hub');
     if (readJSON(path.join(hub, 'package.json')).version !== m.version) fail('runtime-version');
     const forbidden = new Set(['.git', 'owner-edition.js', 'license-issuer']);
@@ -314,14 +316,14 @@ class PackagedUpdate {
     fs.chmodSync(sibling, 0o700); const fresh = path.join(sibling, 'new.app');
     let attached = false, ready = false;
     try {
-      await this.run('/usr/bin/hdiutil', ['verify', dmg]);
+      await this.platformApi.appUpdater.verifyDmg(dmg, this.run.bind(this));
       this.data.mount = mount; this.persist(); attached = true; // Also detach after an interrupted attach.
-      await this.run('/usr/bin/hdiutil', ['attach', dmg, '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mount]);
+      await this.platformApi.appUpdater.attachDmg(dmg, mount, this.run.bind(this));
       const names = fs.readdirSync(mount);
       if (!names.includes('Project Hub.app') || names.some(x => !['Project Hub.app', 'Applications'].includes(x))) fail('dmg-content');
       if (names.includes('Applications') && (!fs.lstatSync(path.join(mount, 'Applications')).isSymbolicLink() || fs.readlinkSync(path.join(mount, 'Applications')) !== '/Applications')) fail('dmg-content');
       await this.inspectApp(path.join(mount, 'Project Hub.app'), m);
-      await this.run('/usr/bin/ditto', [path.join(mount, 'Project Hub.app'), fresh]);
+      await this.platformApi.appUpdater.copyApp(path.join(mount, 'Project Hub.app'), fresh, this.run.bind(this));
       await this.inspectApp(fresh, m);
       this.data.prepared = { sibling, dmg }; this.phase('ready', { reason: '', error: '' }); ready = true;
     } finally {
@@ -333,11 +335,12 @@ class PackagedUpdate {
   async detach(mount) {
     if (path.dirname(mount) !== this.home || !/^mnt-[A-Za-z0-9]+$/.test(path.basename(mount))) fail('mount');
     for (const extra of [[], ['-force']]) {
-      try { await this.run('/usr/bin/hdiutil', ['detach', mount, ...extra]); delete this.data.mount; this.persist(); return; } catch {}
+      try { await this.platformApi.appUpdater.detachDmg(mount, extra, this.run.bind(this)); delete this.data.mount; this.persist(); return; } catch {}
     }
     this.data.reason = 'ディスクイメージを閉じられません。次の起動時に確認します'; this.persist();
   }
   async install() {
+    if (this.platform === 'win32') return this.status();
     const job = this.data.prepared, m = this.data.manifest;
     if (!job || this.data.pendingConfirm) return this.status();
     if (this.busy()) { this.phase('deferred', { reason: this.idleMessage() }); return this.status(); }
@@ -372,6 +375,7 @@ class PackagedUpdate {
     return this.lock(async () => { try { await this.install(); } catch (e) { this.failed(e, this.data.manifest); } return this.status(); });
   }
   async recover() {
+    if (this.platform === 'win32') return;
     if (this.ownerEdition) return;
     if (this.data.confirmation) await this.finishConfirmation();
     if (this.data.mount) await this.detach(this.data.mount);
