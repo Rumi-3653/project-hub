@@ -991,6 +991,12 @@
       "529289c8f409d8d4b60a8892edbd8e7ec45c13bb1368323478f4581759a4d171"
     ]
   },
+  "platform/win32.js": {
+    "sites": [
+      "43b3ba439ed3e6599ee89774cd147d40356c7652141abcbfbe5a80ff27b07f35"
+    ],
+    "reason": "読取り用fs importのみ。PATH上のCLIの存在確認とnpmの.cmd起動用ファイルの読取りだけで書込みなし。Windowsの保存確定はpersistence.jsの非対応（persistence_unsupported）のまま。監督の同世代同梱対象。"
+  },
   "extensions.js": {
     "reason": "Reads only the fixed private bundle marker and bundled UI at startup; never writes project or workspace files.",
     "sites": [
