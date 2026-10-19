@@ -12,13 +12,13 @@ fs.writeFileSync(path.join(body, 'main.txt'), 'main'); git('add', '.'); git('com
 fs.writeFileSync(path.join(pdir, 'PROJECT.md'), `---\nname: P\nfolders:\n  本体: ${body}\n---\n`);
 fs.writeFileSync(path.join(pdir, '.ai/tasks/t.md'), '---\nid: t\ntitle: Parent\nstate: 未着手\nowner: codex\nworkspaceMode: isolated\n---\n');
 Object.assign(process.env, { HUB_ROOT: root, HUB_PORT: '0', HUB_DRY_RUN: '1', HUB_AI_HOME: path.join(root, 'home'), HUB_STORAGE_GUARD: '', HUB_AUTO_TRANSLATE: '0', HUB_AUTO_UPDATE: '0' });
-let server, sessions, base, network = 0, child, request;
+let server, sessions, chats, base, network = 0, child, request;
 const originalFetch = global.fetch;
 test.before(async () => {
   const probe = require('node:http').createServer();
   await new Promise(r => probe.listen(0, '127.0.0.1', r)); const port = probe.address().port;
   await new Promise(r => probe.close(r)); process.env.HUB_PORT = String(port);
-  ({ server, sessions } = require('../server'));
+  ({ server, sessions, chats } = require('../server'));
   await new Promise(r => server.listen(port, '127.0.0.1', r)); base = 'http://127.0.0.1:' + port;
   global.fetch = (url, options) => { if (new URL(url).origin !== base) { network++; throw Error('unexpected network'); } return originalFetch(url, options); };
 });
@@ -58,7 +58,8 @@ test('廃止Dot送信と認可なし送信は保存前に拒否する',async()=>
 });
 test('保存済み手動・アプリqueueは確認・起動前に拒否し、履歴・質問・待ち行を保持する',async()=>{
   const chat=require('../lib/chat'),rows=['chat','app'].map(model=>({id:'old-'+model,ai:'chatgpt',model,text:'old '+model}));
-  fs.writeFileSync(chat.files(pdir,'t').queue,JSON.stringify(rows));
+  // Seed through the live runner: startup recovery has already loaded its queue.
+  chats.setQueue('P','t',rows,true);
   chat.append(pdir,'t',{role:'assistant',ai:'chatgpt',model:'app',text:'old reply'});
   const files=[path.join(pdir,'.ai/tasks/t.md'),chat.files(pdir,'t').log,chat.files(pdir,'t').queue];
   const before=files.map(file=>fs.readFileSync(file));let checks=0;

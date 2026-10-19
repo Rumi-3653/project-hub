@@ -60,7 +60,8 @@ async function atomic(file, value) {
   const h = await fsp.open(tmp, 'wx', 0o600);
   try { await h.writeFile(JSON.stringify(value, null, 2) + '\n'); await h.sync(); } finally { await h.close(); }
   await fsp.rename(tmp, file);
-  const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); }
+  // Windows はディレクトリの fsync に非対応。上の書き込みハンドルの同期失敗は隠さない
+  if (process.platform !== 'win32') { const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); } }
 }
 async function copyFile(from, to, expected) {
   const input = await fsp.open(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);

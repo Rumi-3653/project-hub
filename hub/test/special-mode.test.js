@@ -219,16 +219,3 @@ test('画面：ON/OFF・AI選択・即時保存、失敗時の復元、他の設
   assert.equal(f.run('state.specialMode.ai'), 'codex'); assert.equal(f.run('JSON.stringify(state.roles)'), roles);
   f.context.fail = true; await f.run(`saveSpecialMode({enabled:false,ai:'claude'})`); assert.equal(f.run('state.specialMode.enabled'), true); assert.equal(f.run('state.specialMode.ai'), 'codex');
 });
-test('上限：特殊モードはAI跨ぎを拒否し、OFFで設定の交代先、同AI候補は維持', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
-  const start = source.indexOf('function limitBackup('), end = source.indexOf('// ChatGPT アプリ・Codex', start);
-  assert.ok(start >= 0 && end > start, 'limitBackup extraction boundaries');
-  const fn = source.slice(start, end);
-  let enabled = true, allowed = true, backup = { ai: 'claude', model: 'Opus 5.5' };
-  const context = vm.createContext({ discussionRuntime: {isRequest:request=>/^discussion-/.test(String(request||''))}, license: { require: features => { assert.deepEqual([...features], ['limit_switch']); if (!allowed) throw Object.assign(Error('trial ended'), { code: 'license_held' }); } }, integrationPolicyRequest: () => false, store: { readProject: () => ({ tasks: [{ id: 't', role: 'コーディング' }] }) }, rolesData: () => data, modelView: { special: () => ({ enabled }) }, limitRoute: () => backup, accountFor: () => 'default', permCmd: () => 'fixture' }); vm.runInContext(fn, context);
-  const request = { ai: 'codex', project: 'p', task: 't' }; assert.equal(context.limitBackup(request), null);
-  enabled = false; assert.equal(context.limitBackup(request).ai, 'claude'); enabled = true;
-  backup = { ai: 'codex', model: 'GPT-6-Luna' }; assert.equal(context.limitBackup(request).model, 'GPT-6-Luna');
-  assert.equal(context.limitBackup({...request, request:'discussion-test'}), null);
-  allowed = false; assert.equal(context.limitBackup(request), null);
-});

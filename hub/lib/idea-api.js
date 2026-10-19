@@ -7,7 +7,7 @@ function humanRequest(req) {
   try { const u = new URL(req.headers.origin); return u.host === req.headers.host && ['http:', 'https:'].includes(u.protocol); } catch { return false; }
 }
 class IdeaAPI {
-  constructor({ ideas, source, runner, release, available = () => false, wake = () => {}, lane, authorizeRecord } = {}) { Object.assign(this, { ideas, source, runner, release, available, wake, lane, authorizeRecord }); }
+  constructor({ ideas, source, runner, release, available = () => false, wake = () => {}, lane, authorizeRecord, automation } = {}) { Object.assign(this, { ideas, source, runner, release, available, wake, lane, authorizeRecord, automation }); }
   async handle(req, res, url, b, send) {
     const route = url.pathname, project = b?.project || url.searchParams.get('project');
     try {
@@ -35,9 +35,10 @@ class IdeaAPI {
       else if (route === '/api/ideas/update') out = this.ideas.update(project, b);
       else if (route === '/api/ideas/reorder') out = this.ideas.reorder(project, b);
       else if (route === '/api/ideas/delete') out = this.ideas.erase(project, b);
-      else if (route === '/api/ideas/auto') { U.check(!b.enabled || this.available(), 'not-installed', '自動進行は導入後に利用できます'); out = this.ideas.auto(project, b); }
-      else if (route === '/api/ideas/lane') { U.check(this.lane, 'not-installed', '実行先の設定は導入後に利用できます'); out = this.lane.set(project, b); }
-      else if (route.startsWith('/api/ideas/release/') || route === '/api/ideas/runtime-confirm') { U.check(this.release && this.available(), 'not-installed', '反映準備は導入後に利用できます'); const action = route === '/api/ideas/runtime-confirm' ? 'runtimeConfirm' : route.split('/').at(-1); U.check(['prepare', 'apply', 'cancel', 'keepalive', 'runtimeConfirm'].includes(action), 'route', '操作が見つかりません', 404); out = await this.release[action](project, b); if (action === 'prepare') status = 202; }
+      else if (['/api/ideas/auto','/api/ideas/lane','/api/ideas/runtime-confirm'].includes(route)||route.startsWith('/api/ideas/release/')) {
+        U.check(this.automation,'feature_not_included','この版には含まれていません',404);
+        ({out,status}=await this.automation(this,route,project,b));
+      }
       else throw U.fail('route', '操作が見つかりません', 404);
       this.wake(project); return send(res, status, out);
     } catch (e) { return send(res, e.status || 503, { error: e.message, message: e.message, code: e.code || 'storage', saved: e.saved ?? false, opId: b?.opId, retry: e.saved === 'unknown' ? 'receipt' : 'after-change' }); }

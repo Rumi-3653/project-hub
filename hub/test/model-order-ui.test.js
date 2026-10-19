@@ -12,7 +12,7 @@ function fixture() {
  const document={querySelector:el,querySelectorAll:()=>[],addEventListener:(n,f)=>(events[n]||=[]).push(f)};
  const ctx=vm.createContext({document,window:{matchMedia:()=>({matches:false})},navigator:{userAgent:''},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>new Promise(()=>{}),setInterval(){},clearInterval(){},setTimeout(){},clearTimeout(){},requestAnimationFrame(){},console,URLSearchParams,ModelOrder,ProjectOrder:require('../public/project-order'),confirm:()=>true});
  ctx.window.HubChatHistory = require('../public/chat-history');
- const run=s=>vm.runInContext(s,ctx);run(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'));
+ const run=s=>vm.runInContext(s,ctx);const paid=path.join(__dirname,'../public/paid/webchat.js');if(fs.existsSync(paid))run(fs.readFileSync(paid,'utf8'));run(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'));
  run(fs.readFileSync(path.join(__dirname,'../public/role-settings.js'),'utf8'));
  ctx.stubApi=async(route,b)=>{calls.push({route,b:JSON.parse(JSON.stringify(b))});if(ctx.hold)await ctx.hold;if(ctx.fail){const e=Error(ctx.fail);e.status=ctx.status;throw e;}if(route==='/api/models/hidden')return{modelOrder:mixed,hiddenModels:{codex:b.hidden?[b.model]:[]}};return {modelOrder:b.order,hiddenModels:{codex:['GPT-6-Astra']}};};
  ctx.notice=x=>messages.push(x);
@@ -43,7 +43,7 @@ test('上下保存はAI横断で会話と単一AI欄に反映、非表示の現�
  const f=fixture(),before=f.run('JSON.stringify([state.roles,state.cliFlags,state.projects,chatPick(proj("p"),taskOf(proj("p"),"t"))])');
  await f.run(`saveModelOrder(${JSON.stringify(mixed)},{id:'codex|GPT-6-Astra',direction:'down'})`);
  assert.deepEqual(f.calls[0].b.before,defaults);assert.deepEqual(f.calls[0].b.order,mixed);assert.deepEqual(JSON.parse(f.run(`JSON.stringify(shownModels('codex','GPT-6-Astra'))`)),['GPT-6-Astra','GPT-6.1-Sol']);
- f.run(`state.hiddenModels={};`);const html=f.run('chatHtml(proj("p"),taskOf(proj("p"),"t"))');const ids=[...html.matchAll(/<option value="([^\"]+)"/g)].map(x=>x[1]);assert.deepEqual(ids,[...mixed.map(x=>x.replace('claude-code|','claude|')),'chatgpt|auto']);assert.match(html,/<option value="chatgpt\|auto"[^>]+disabled/);assert.match(html,/<option value="agy[^>]+disabled/);assert.match(html,/codex\|GPT-6.1-Sol"[^>]+selected/);
+ f.run(`state.hiddenModels={};`);const html=f.run('chatHtml(proj("p"),taskOf(proj("p"),"t"))');const ids=[...html.matchAll(/<option value="([^\"]+)"/g)].map(x=>x[1]);assert.deepEqual(ids,[...mixed.map(x=>x.replace('claude-code|','claude|')),...(f.ctx.window.HubPaidWebchat?['chatgpt|auto']:[])]);if(f.ctx.window.HubPaidWebchat)assert.match(html,/<option value="chatgpt\|auto"[^>]+disabled/);else assert.doesNotMatch(html,/value="chatgpt\|auto"/);assert.match(html,/<option value="agy[^>]+disabled/);assert.match(html,/codex\|GPT-6.1-Sol"[^>]+selected/);
  assert.equal(f.run('JSON.stringify([state.roles,state.cliFlags,state.projects,chatPick(proj("p"),taskOf(proj("p"),"t"))])'),before);assert.deepEqual(f.focus(),{id:'codex|GPT-6-Astra',direction:'down'});
 });
 test('保存中は二重送信なし、失敗は復元して理由、遅いpollは保存を上書きしない',async()=>{

@@ -1,4 +1,7 @@
 'use strict';
+// Keep the existing server-wrapper fixtures bound to the extracted execution checks.
+function parallelFixture(ctx){return require('../lib/engines/parallel')({...ctx,getAiTools:()=>ctx.aiTools,getAppUpdate:()=>ctx.appUpdate,getChats:()=>ctx.chats,getConversationHistory:()=>ctx.conversationHistory,getFreetalkHistory:()=>ctx.freetalkHistory,getGithub:()=>ctx.github,getGithubProject:()=>ctx.githubProject,getGpt:()=>ctx.gpt,getIdeaRunner:()=>ctx.ideaRunner,getMaintenance:()=>ctx.maintenance,getProcwatch:()=>ctx.procwatch,getRemoval:()=>ctx.removal,getRemovalReview:()=>ctx.removalReview,getReqCtx:()=>ctx.reqCtx,getRestartControl:()=>ctx.restartControl,getSessions:()=>ctx.sessions,getTaskIntegrate:()=>ctx.taskIntegrate,getWebchat:()=>ctx.webchat});}
+
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process');
@@ -414,7 +417,7 @@ for(const place of ['body','copy'])test('復旧R1 保存先の未解消衝突か
  const vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8'),fn=source.slice(source.indexOf('function assertWorkspaceIdle('),source.indexOf('const inWork ='));
  let prepares=0,active=[];const p=f.store.readProject('Fixture'),parent=f.store.readTask(f.store.taskFile('Fixture',f.parent.id));
  const ctx={executionGate:{assert:()=>{}},discussion:null,restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,appUpdate:{applying:()=>false},fs,path,expandHome:x=>x,baseOf:()=>f.body,DRY:false,taskIntegrate:f.integrate,gitw:{prepare:()=>{prepares++;throw Error('new copy forbidden');}},workRoot:()=>f.removal.workRoot(p),store:f.store,maintenance:{locked:()=>false},github:{assertStart:()=>{}},githubProject:p=>p,sessions:{list:()=>active},chats:{running:new Map()}};
- vm.createContext(ctx);vm.runInContext(fn,ctx);assert.equal(ctx.startDir(p,parent).dir,target);assert.equal(prepares,0);
+ ctx.parallelEngine=parallelFixture(ctx);vm.createContext(ctx);vm.runInContext(fn,ctx);assert.equal(ctx.startDir(p,parent).dir,target);assert.equal(prepares,0);
  assert.equal(f.store.readTask(f.store.taskFile('Fixture',f.parent.id)).workdir,'');assert.deepEqual(git.inspect(target),before);assert.equal(sh(target,'rev-parse','MERGE_HEAD'),mergeHead);
  assert.throws(()=>git.recoveryTarget(target,f.body,{clean:false}),/取り込みが途中/);
  if(place==='copy')f.store.updateTask('Fixture',f.parent.id,{workdir:target});
@@ -549,7 +552,7 @@ for(const who of ['target','source'])for(const after of [false,true])test('統�
 });
 test('保存先が本体のAI再開も同時作業保護を維持し、保存先がコピーなら従来の隔離を維持する',t=>{
  const f=fixture(t),other=f.child('別作業'),vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8'),fn=source.slice(source.indexOf('function assertWorkspaceIdle('),source.indexOf('function workDir('));
- let active=[],seen;const chats={running:new Map()},ctx={executionGate:{assert:()=>{}},restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,appUpdate:{applying:()=>false,busyMessage:()=>"fixture update applying"},fs,path,expandHome:x=>x,baseOf:()=>f.body,maintenance:{locked:()=>false},github:{assertStart:(p,t)=>{seen=t.workdir;}},githubProject:p=>p,taskIntegrate:f.integrate,sessions:{list:()=>active},chats,store:f.store};vm.createContext(ctx);vm.runInContext(fn,ctx);
+ let active=[],seen;const chats={running:new Map()},ctx={executionGate:{assert:()=>{}},restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,appUpdate:{applying:()=>false,busyMessage:()=>"fixture update applying"},fs,path,expandHome:x=>x,baseOf:()=>f.body,maintenance:{locked:()=>false},github:{assertStart:(p,t)=>{seen=t.workdir;}},githubProject:p=>p,taskIntegrate:f.integrate,sessions:{list:()=>active},chats,store:f.store};ctx.parallelEngine=parallelFixture(ctx);vm.createContext(ctx);vm.runInContext(fn,ctx);
  const p=f.store.readProject('Fixture'),parent=f.store.readTask(f.store.taskFile('Fixture',f.parent.id));
  active=[{project:p.id,task:other.id,running:true}];assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,{...parent,workspaceMode:'shared',workdir:f.body}));
  f.integrate.save({id:'pending-base',project:p.id,task:parent.id,target:f.body,items:[],complete:false});
@@ -568,7 +571,7 @@ for (const surface of ['chat', 'terminal']) test('freetalkの別話題だけ並�
  const chats={running:new Map()},active=surface==='terminal'?[{project:p.id,task:a.id,running:true}]:[];
  if(surface==='chat')chats.running.set(p.id+'\0'+a.id,{});
  const ctx={executionGate:{assert:()=>{}},restartControl:null,webchatActive:()=>false,lt:require('../lib/locale').lt,fs,path,expandHome:x=>x,baseOf:()=>os.tmpdir(),appUpdate:{applying:()=>false,busyMessage:()=> 'update applying'},maintenance:{locked:()=>false},github:{assertStart:()=>{}},githubProject:p=>p,taskIntegrate:{read:()=>null},sessions:{list:()=>active},chats,store:{listProjects:()=>[p,ordinary]}};
- vm.createContext(ctx);vm.runInContext(fn,ctx);
+ ctx.parallelEngine=parallelFixture(ctx);vm.createContext(ctx);vm.runInContext(fn,ctx);
  const blocked=error=>error.status===409&&/本体での同時作業/.test(error.message);
  assert.doesNotThrow(()=>ctx.assertWorkspaceIdle(p,b));
  assert.throws(()=>ctx.assertWorkspaceIdle(p,a),blocked);

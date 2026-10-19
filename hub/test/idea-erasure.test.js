@@ -84,14 +84,6 @@ test('captured long source, snapshots, old withdrawn item and blob disappear wit
  const conversation=path.join(f.root,'conversation.jsonl');fs.writeFileSync(conversation,'original source conversation');assert.ok(files(s.controlDir).some(f=>f.includes('/blobs/')));
  f.ideas.backup('P',{opId:U.uuid()});f.ideas.erase('P',request(f,a.id));absent(f.root,'CANARY-');assert.equal(fs.readFileSync(conversation,'utf8'),'original source conversation');
 });
-test('late runner completion is ignored only for erased runs; record-delete ledger flights and verification block while code leases remain independent',async t=>{
- const f=require('./idea-fixture.cjs').fixture(t),a=f.add('CANARY-late','record');await f.runner.tick('P');const r=f.current(),meta=f.dispatch.metadata(f.ideas.read('P'),r),row=f.finish(r,{schema:1,runId:r.id,kind:'organize',items:r.targets.map(t=>({itemId:t.itemId,contentRev:t.contentRev,basePlanRev:t.planRev,summary:'CANARY-late',background:{kind:'unknown',refs:[],text:'unknown'},suggestions:[]}))});await f.runner.tick('P');
- const op={opId:U.uuid(),id:a.id,baseContentRev:1,baseControlRev:1,confirm:true};
- f.runner.flights.set('P',Promise.resolve());assert.throws(()=>f.ideas.erase('P',op),{code:'erase-busy'});f.runner.flights.delete('P');
- f.verification.active.set('P',Promise.resolve());assert.throws(()=>f.ideas.erase('P',op),{code:'erase-busy'});f.verification.active.delete('P');
- const lease=f.gate.acquire({dir:f.work,owner:'deletion-fixture'});assert.equal(f.ideas.eraseAvailability('P',a.id).allowed,true);
- assert.equal(f.ideas.erase('P',op).deleted,true);assert.equal(f.gate.leases.get('deletion-fixture').id,lease.id);f.gate.release('deletion-fixture',lease.id);const before=fs.readFileSync(f.ideas.resolve('P').file);f.runner.settled({project:'P',automation:meta},row);assert.deepEqual(fs.readFileSync(f.ideas.resolve('P').file),before);assert.throws(()=>f.runner.settled({project:'P',automation:{...meta,runId:U.uuid()}},row),{code:'idea-result'});assert.throws(()=>f.runner.mayStart('P',r),{code:'idea-paused'});absent(f.root,'CANARY-late');
-});
 test('unbound legacy and failed verification logs are shared; a separately bound check remains intact',t=>{
  const f=fixture(t),a=f.add('CANARY-failed-check'),b=f.add('keep'),s=f.ideas.resolve('P'),shared=U.uuid(),independent=U.uuid();
  for(const [id,text] of [[shared,'CANARY-failed-check'],[independent,'independent output']]){const dir=path.join(s.controlDir,'verification',id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'stdout'),text);fs.writeFileSync(path.join(dir,'stderr'),'');}

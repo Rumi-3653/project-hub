@@ -5,9 +5,10 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const tmp=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'hub-ft-lifecycle-http-'))),root=path.join(tmp,'root'),home=path.join(tmp,'home'),bin=path.join(tmp,'bin');
 fs.mkdirSync(bin);fs.mkdirSync(path.join(root,'_hub'),{recursive:true});
 fs.copyFileSync(path.join(__dirname,'../../docs/project-hub/templates/_hub/roles.yaml'),path.join(root,'_hub/roles.yaml'));
+const summaryHold=path.join(tmp,'summary-hold');
 fs.writeFileSync(path.join(bin,'codex'),`#!${process.execPath}
 if(process.argv.includes('--version')){console.log('fake codex');process.exit(0)}
-process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'fake-'+process.pid}));setTimeout(()=>{console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'AIがまとめた要約'}}));console.log(JSON.stringify({type:'turn.completed'}));},250);});`,{mode:0o755});
+process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'thread.started',thread_id:'fake-'+process.pid}));const finish=()=>{if(require('node:fs').existsSync(${JSON.stringify(summaryHold)}))return setTimeout(finish,20);console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'AIがまとめた要約'}}));console.log(JSON.stringify({type:'turn.completed'}));};setTimeout(finish,250);});`,{mode:0o755});
 const port=46000+Math.floor(Math.random()*1000);Object.assign(process.env,{HUB_ROOT:root,HUB_FREETALK_HOME:home,HOME:home,HUB_DRY_RUN:'1',HUB_PORT:String(port),PATH:bin+path.delimiter+process.env.PATH});
 const procwatch=require('../lib/procwatch'),createWatch=procwatch.create;let background=[],parents=new Map();
 procwatch.create=opts=>({...createWatch(opts),list:()=>background.slice(),hasAncestor:(pid,matches)=>procwatch.hasAncestor(pid,parents,matches)});
@@ -56,15 +57,30 @@ test('話題削除HTTP：監督中PIDがあっても外部・不明・監督を�
  parents=new Map([[41004,41005],[41005,child.pid]]);
  const orphan=await post('/api/freetalk/delete',{project:'freetalk',task:a.id,confirm:true});assert.equal(orphan.status,409);assert.ok(store.taskFile('freetalk',a.id));
 });
-test('3段目HTTP：認証・別表記と稼働/待機保護、現在AIへの要約',async()=>{
+test('3段目HTTP：認証・別表記と稼働/待機保護、現在AIへの要約',async t=>{
  assert.equal((await post('/api/freetalk/clean',{project:'freetalk',confirm:true},{})).status,403);
  for(const project of ['FreeTalk','FREETALK','normal'])assert.equal((await post('/api/freetalk/clean',{project,confirm:true})).status,409);
  const p=store.readProject('freetalk');chat.append(p.dir,a.id,{role:'assistant',ai:'codex',model:'GPT-6.1-Sol',text:'相談'});
+ // Hold the fake CLI until the busy/queue assertions finish; elapsed milliseconds are not proof of activity.
+ fs.writeFileSync(summaryHold,'hold');let autoQueue;
+ try {
  const s=await post('/api/freetalk/summary',{project:p.id,task:a.id});assert.equal(s.status,200);
  assert.equal((await post('/api/freetalk/clean',{project:p.id,confirm:true})).status,409);
  assert.equal((await post('/api/freetalk/project-preview',{project:p.id,task:a.id})).status,409);
- const q=await post('/api/chat/send',{project:p.id,task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'もう一つ確認',mode:'queue'});assert.equal(q.status,200);assert.equal((await q.json()).queued,true);
- assert.equal((await post('/api/freetalk/clean',{project:p.id,confirm:true})).status,409);await idle(a.id);
+ const view=await(await fetch(base+'/api/state')).json();autoQueue=view.extensions.included.includes('queue_auto')&&(!view.license.enforcement||view.license.features.queue_auto.allowed);
+ const beforeQueue=chats.queue(p.id,a.id).slice();
+ const q=await post('/api/chat/send',{project:p.id,task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'もう一つ確認',mode:'queue'});
+ if(autoQueue){assert.equal(q.status,200);assert.equal((await q.json()).queued,true);}
+ else{assert.equal(q.status,403);const denied=await q.json();assert.equal(denied.error,view.license.reason);assert.deepEqual(chats.queue(p.id,a.id),beforeQueue);
+  chats.setQueue(p.id,a.id,[...beforeQueue,{id:'fixture-manual-wait',ai:'codex',model:'GPT-6.1-Sol',text:'もう一つ確認',stopHeld:true}]);}
+ t.diagnostic('queue_auto fixture: '+(autoQueue?'included and entitled':'held; existing manual waiting entry'));
+ assert.equal((await post('/api/freetalk/clean',{project:p.id,confirm:true})).status,409);
+ }finally{fs.rmSync(summaryHold,{force:true});}
+ if(!autoQueue){for(let i=0;i<300&&chats.busy(p.id,a.id);i++)await new Promise(r=>setTimeout(r,20));assert.equal(chats.busy(p.id,a.id),null);assert.match((await status(a.id)).reason,/順番待ち/);
+  assert.ok(!chat.read(p.dir,a.id).some(row=>row.text==='もう一つ確認'));assert.equal((await post('/api/chat/unqueue',{project:p.id,task:a.id,id:'fixture-manual-wait'})).status,200);
+  // A normal manual conversation is free and makes the earlier summary stale, too.
+  const normal=await post('/api/chat/send',{project:p.id,task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'もう一つ確認'});assert.equal(normal.status,200);}
+ await idle(a.id);assert.ok(chat.read(p.dir,a.id).some(row=>row.role==='user'&&row.text==='もう一つ確認'));
  // 待機した普通の回答は承認要約にしない。改めて現在AIへ要約。
  assert.equal((await post('/api/freetalk/project-preview',{project:p.id,task:a.id})).status,409);
  await post('/api/freetalk/summary',{project:p.id,task:a.id});await idle(a.id);

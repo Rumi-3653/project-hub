@@ -81,7 +81,7 @@ test('selection postflight switch accepts limit-request JSON without a second de
  assert.equal(done.generation,2);assert.equal(done.auto.attempt,0);assert.deepEqual(f.calls().map(r=>r.ai),['claude','codex']);
  for(const call of f.calls()){assert.doesNotMatch(call.input,/<previous_conversation>|\[\[質問\]\]/);assert.ok(!call.args.includes('--resume')&&!call.args.includes('resume'));}
  assert.match(f.rows()[0].text,/SELECTION_ACCEPTED_codex/);
- const rows=f.archived(),users=rows.filter(r=>r.role==='user'&&r.origin==='delegate');assert.equal(users.length,2);assert.equal(users[1].request,'limit-'+done.auto.selectionRequest);
+ const rows=f.archived(),users=rows.filter(r=>r.role==='user'&&r.origin==='hub-internal');assert.equal(users.length,2);assert.equal(users[1].request,'limit-'+done.auto.selectionRequest);
  assert.equal(rows.filter(r=>r.role==='event'&&r.limitSwitch).length,1);
 });
 test('both preflight limits keep reservation across server restart and resume once',async t=>{

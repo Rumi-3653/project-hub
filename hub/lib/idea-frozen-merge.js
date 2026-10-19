@@ -1,6 +1,6 @@
 'use strict';
 // Called only inside git.withCommonGit, before legacy auto-save/bookkeeping/cleanup.
-const U=require('./idea-utils'),{binding,sameBinding}=require('./idea-lane');
+const U=require('./idea-utils'),{binding,sameBinding}=require('./idea-location');
 function mergeFrozen(o) {
   const {dir,target,sourceHead,targetHead,sourceTree,strictFrozen:f}=o;
   try {

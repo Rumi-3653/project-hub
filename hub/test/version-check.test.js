@@ -9,6 +9,3 @@ test('日本語の版・履歴不一致と資料不足を固定前に拒否す�
 test('通常の自動検査は未更新・欠落した言語パックを読まず日本語だけで完了する',()=>{
   for(const unavailable of ['outdated','missing']){const reads=[];const result=checkVersion(f=>{reads.push(f);if(!['hub/package.json','hub/CHANGELOG.md','README.md'].includes(f))throw Error(unavailable);return read(f);});assert.equal(result.ok,true,result.error);assert.deepEqual(reads,['hub/package.json','hub/CHANGELOG.md','README.md']);}
 });
-test('標準の検証方法は日本語で通常試験を実行し言語パック専用試験を含めない',()=>{
-  const p=new(require('../lib/idea-verification').IdeaVerification)({}).get('project-hub');assert.equal(p.env.HUB_LANG,'ja');assert.ok(p.argv.includes('test/version-check.test.js'));assert.equal(p.argv.some(a=>/langpacks|zh-TW|test:langpack/.test(a)),false);
-});

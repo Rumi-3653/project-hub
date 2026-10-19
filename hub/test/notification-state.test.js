@@ -20,17 +20,20 @@ test('正式HTTP：待ち順は件数と停止フラグだけを一覧へ出し�
   fs.copyFileSync(path.join(__dirname,'../../docs/project-hub/templates/_hub/roles.yaml'),path.join(root,'_hub/roles.yaml'));
   const store = new (require('../lib/store').Store)(root);
   const p = store.createProject({name:'Fixture'}).project;
-  const waiting = store.createTask(p.id,{title:'順番待ち'}), blocked = store.createTask(p.id,{title:'停止した待ち'}), malformed = store.createTask(p.id,{title:'不正な待ち記録'}), held = store.createTask(p.id,{title:'停止保留'});
+  const waiting = store.createTask(p.id,{title:'順番待ち'}), blocked = store.createTask(p.id,{title:'停止した待ち'}), held = store.createTask(p.id,{title:'停止保留'});
   const chatDir = path.join(p.dir,'.ai/chat');fs.mkdirSync(chatDir,{recursive:true});
   fs.writeFileSync(path.join(chatDir,waiting.id+'.queue.json'),JSON.stringify([{id:'one',text:'private queued instruction'},{id:'two',text:'another private instruction'}]));
   fs.writeFileSync(path.join(chatDir,blocked.id+'.queue.json'),JSON.stringify([{id:'held',error:'fixture error',limitWaiting:true,text:'private held instruction'}]));
-  fs.writeFileSync(path.join(chatDir,malformed.id+'.queue.json'),JSON.stringify([null,'invalid',[]]));
   const heldFile=path.join(chatDir,held.id+'.queue.json');
   const heldBytes=JSON.stringify([{id:'stop-held',stopHeld:true,ai:'codex',model:'GPT-6.1-Sol',text:'private stopped instruction',attachmentDraft:{text:'private draft',attachments:[{id:'retained-image'}]}}]);
   fs.writeFileSync(heldFile,heldBytes);
   let hub = require('../server'), {server} = hub;
   await new Promise(r=>server.listen(port,'127.0.0.1',r));
   const base = 'http://127.0.0.1:'+server.address().port;
+  // Startup now validates existing queues. Create this corrupt display fixture
+  // afterward, so the HTTP projection still has to reject uncached invalid data.
+  const malformed = store.createTask(p.id,{title:'不正な待ち記録'});
+  fs.writeFileSync(path.join(chatDir,malformed.id+'.queue.json'),JSON.stringify([null,'invalid',[]]));
   // 同じポートの停止・再起動を試すため、停止前の接続をクライアントが再利用しない。
   const request = fetch;
   try {

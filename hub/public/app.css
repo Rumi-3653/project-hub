@@ -724,13 +724,11 @@ input.cm{width:100%;border:1px solid var(--line);background:var(--panel);border-
 .ai-account-detail[open]{grid-column:1/-1;grid-row:2}
 .ai-account-line:has(.ai-account-detail)>.ai-account-note{display:none}
 .ai-account-line:has(.ai-account-detail)>.acts{grid-column:4;grid-row:1}
-.ai-use-settings #webchat-details label:not(.chk){display:flex;flex-direction:column;gap:4px;margin:8px 0}
 .ai-use-settings input:not([type=checkbox]),.ai-use-settings select{max-width:100%;min-width:0}
 .ai-use-settings #special-mode-ai{width:auto}
 .ai-save-actions{align-items:center;margin-top:12px}
 .ai-save-actions span{font-size:12px}
 .ai-use-settings .ai-chatgpt-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:14px}
-.ai-chatgpt-row #webchat-box{min-width:0}
 .ai-mcp-detail{grid-column:2;grid-row:1;min-width:0}
 .ai-mcp-detail[open]{grid-column:1/-1;grid-row:2}
 .ai-chatgpt-row #chatgpt-shell-alert{grid-column:1/-1}

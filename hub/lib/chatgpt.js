@@ -218,7 +218,9 @@ class Chatgpt {
 function run(command, cwd, sec) {
   return new Promise(resolve => {
     const out = { stdout: '', stderr: '' }; let size = 0, truncated = false, timedOut = false;
-    const child = spawn(SHELL, ['-lc', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const shell = SHELL || require('./launch').gitBash();
+    if (!shell) { resolve({ code: -1, ...out, stderr: lt('Git for Windows の bash.exe が見つかりません'), truncated, timedOut }); return; }
+    const child = spawn(shell, ['-lc', command], { cwd, detached: !WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const take = k => c => { if (size >= OUT_MAX) { truncated = true; return; } const s = c.toString('utf8').slice(0, OUT_MAX - size); size += s.length; out[k] += s; if (s.length < c.length) truncated = true; };
     child.stdout.on('data', take('stdout')); child.stderr.on('data', take('stderr'));
     const timer = setTimeout(() => { timedOut = true; try { platform.killTree(child, 'SIGKILL', { fallback: false }); } catch (e) { child.kill('SIGKILL'); } }, sec * 1000);

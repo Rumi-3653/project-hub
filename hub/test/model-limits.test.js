@@ -3,7 +3,7 @@ const AGY_FIXTURE = { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' 
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
 const { ModelLimits } = require('../lib/model-limits');
-const { limitRoute, limitIdentity } = require('../lib/limit-route');
+const { limitIdentity } = require('../lib/limit-route');
 const { parse, ChatRunner } = require('../lib/chat');
 const launch = require('../lib/launch');
 process.env.HUB_LANG = 'ja';
@@ -94,38 +94,10 @@ test('構造付きCodex/Opus正式文だけ検知し、引用・認証・混雑�
   for (const value of [{ type: 'item.completed', item: { type: 'agent_message', text: error } }, { type: 'error', message: 'authentication failed' }, { type: 'error', message: 'Too many requests' }, { type: 'error', message: 'quote: ' + error }]) assert.ok(!parse('codex', value).some(e => e.kind === 'limit'));
   assert.ok(parse('claude', { type: 'result', is_error: true, result: "You've reached your 5-hour limit." }).some(e => e.kind === 'limit'));
 });
-test('役割の保存済みmain/backupを双方向に選び、画像生成だけGemini', () => {
-  const data = config();
-  for (const [role, ai, model, target] of [['司令塔', 'claude', 'Fable 5.1', 'gpt-6-astra'], ['司令塔', 'codex', 'GPT-6-Astra', 'claude-fable-5-1'], ['調査', 'claude', 'Opus 5.5', 'gpt-6.1-sol'], ['調査', 'codex', 'GPT-6.1-Sol', 'claude-opus-5-5'], ['画像生成', 'codex', 'GPT-6.1-Sol', AGY_FIXTURE.id], ['コーディング', 'codex', 'GPT-6.1-Sol', 'claude-opus-5-5']]) assert.equal(limitRoute(data, { role, ai, model }).requiredModel, target);
-  data.roles[0].backup = slot('codex', 'GPT-6.1-Sol', 'MAX');
-  assert.equal(limitRoute(data, { role: '司令塔', ai: 'claude', model: 'Fable 5.1' }).requiredModel, 'gpt-6.1-sol');
-  assert.equal(limitRoute(data, { role: '司令塔', ai: 'claude', model: 'Fable 5.1' }).effort, 'MAX');
-  data.switch.auto = false; assert.equal(limitRoute(data, { role: '司令塔', ai: 'claude', model: 'Fable 5.1' }), null);
-});
 test('将来設定されたCodexモデルにも共有枠を適用する', () => {
   const { dir } = fixture(); const state = new ModelLimits(path.join(dir, 'future.json'), { now: () => NOW, models: () => ({ claude: ['claude-opus-5-5'], codex: ['gpt-future'] }) });
   state.observe(full('codex', [win('codex:primary')])); assert.ok(state.forRequest({ ai: 'codex', model: 'gpt-future' }));
 });
-test('稼働中にmain/backupの保存値を変更しても元の欄から最新の交代先を選ぶ', () => {
-  const data = config(), source = { role: '調査', ai: 'claude', model: 'Opus 5.5' };
-  const identity = limitIdentity(data, source);
-  data.roles[1].main = slot('claude-code', 'Fable 5.1'); data.roles[1].backup = slot('codex', 'GPT-6-Astra', 'MAX');
-  const next = limitRoute(data, { ...source, ...identity });
-  assert.equal(next.requiredModel, 'gpt-6-astra'); assert.equal(next.effort, 'MAX'); assert.equal(next.limitSlot, 'backup');
-  assert.equal(limitRoute(data, next).requiredModel, 'claude-fable-5-1');
-  assert.equal(limitRoute(data, source), null); // 手動指定の別モデルを設定欄として推測しない。
-});
-test('開始前交代は役割の思考と元依頼を保ち、両側100%なら1つも起動しない', () => {
-  const { dir, state } = fixture(); const data = config(); let captured;
-  const runner = new ChatRunner({ limitPreflight: o => state.forRequest(o), limitTarget: o => state.forRequest(o), limitBackup: o => limitRoute(data, o) });
-  runner.run = o => { captured = o; return { startedP: Promise.resolve(true) }; };
-  state.observe(full('claude', [win('five_hour')]));
-  runner.send({ project: 'p', task: 't', pdir: dir, ai: 'claude', model: 'Opus 5.5', role: '調査', text: 'original' });
-  assert.equal(captured.ai, 'codex'); assert.equal(captured.requiredModel, 'gpt-6.1-sol'); assert.match(captured.text, /original/);
-  state.observe(full('codex', [win('codex:primary')])); captured = null;
-  assert.throws(() => runner.send({ project: 'p', task: 'both', pdir: dir, ai: 'claude', model: 'Opus 5.5', role: '調査', text: 'remaining' }), /待機/); assert.equal(captured, null);
-});
-
 test('共有正式CLI上限と別インスタンスの個別解除をアカウントごとに保存して読める', () => {
   const { state } = fixture();
   state.record({ ai: 'claude', model: 'Opus 5.5', account: 'work', limitError: "You've reached your 5-hour limit." });

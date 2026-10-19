@@ -28,6 +28,45 @@ for (let i = 0; i < 600; i++) {
 fs.writeFileSync(path.join(root, '_hub/webchat.json'), JSON.stringify({ enabled: true, location: path.join(root, 'fake-unused') }));
 Object.assign(process.env, { HUB_ROOT: root, HUB_DRY_RUN: '1', HUB_AI_HOME: path.join(root, 'home'),
   HUB_FREETALK_HOME: path.join(root, 'freetalk-home'), HUB_STORAGE_GUARD: '', HUB_AUTO_UPDATE: '0', HUB_AUTO_TRANSLATE: '0', HUB_UPDATE_SOURCE: '', GIT_OPTIONAL_LOCKS: '0' });
+// Test-only issuer and device secrets stay in memory, including in exported trees.
+// Keep the real License prepare/status/require/guard and signed proof/time validation.
+const licenseModule = require('../lib/license'), OriginalLicense = licenseModule.License;
+const codec = require('../lib/license/codec');
+const hasWebchat = require('../lib/extensions').loadExtensions().state().included.includes('webchat');
+let fixtureLicense;
+class HandoffLicense extends OriginalLicense {
+  constructor(options) {
+    const issuer = crypto.generateKeyPairSync('ed25519'), secrets = new Map(), documents = new Map(), challenges = new Map();
+    const now = 1800000000, scope = { channel: 'release', product: 'handoff-fixture', bugfixOf: [] };
+    let sequence = 0;
+    const sign = value => codec.signEnvelope(value, issuer.privateKey, 'fixture');
+    super({ ...options, owner: false, platform: 'darwin',
+      config: { licenseEnforcement: true, endpoint: 'http://127.0.0.1', trialDays: 30,
+        build: { ...scope, buildId: 'handoff-fixture-mac' }, trustedKeys: { fixture: { publicKey: issuer.publicKey, purposes: ['proof', 'time'] } } },
+      store: { read: name => documents.get(name), write: (name, value) => documents.set(name, structuredClone(value)) },
+      secret: { get: name => secrets.get(name), put: (name, value) => secrets.set(name, value), elapsed: () => 0 },
+      elapsed: () => 0, wall: () => now, machineHint: () => 'A'.repeat(43),
+      fetcher: async (url, options) => {
+        assert.equal(new URL(url).origin, 'http://127.0.0.1');
+        const route = new URL(url).pathname, body = JSON.parse(options.body);
+        if (route === '/challenge') {
+          const nonce = crypto.randomBytes(32).toString('base64url'); challenges.set(nonce, body);
+          return Response.json({ nonce });
+        }
+        const challenge = challenges.get(body.nonce); assert.ok(challenge); challenges.delete(body.nonce);
+        const { sig, ...claim } = body;
+        const key = crypto.createPublicKey({ key: Buffer.from(challenge.publicKeySpkiB64, 'base64'), type: 'spki', format: 'der' });
+        assert.equal(codec.fingerprint(key), body.dev);
+        assert.equal(crypto.verify(null, Buffer.from(JSON.stringify(claim)), key, Buffer.from(sig, 'base64url')), true);
+        if (route === '/trial') return Response.json({ proof: sign({ v: 1, ent: 'handoff-trial', kind: 'trial', dev: body.dev,
+          features: [...codec.PAID], scope, iat: now, nbf: now, exp: now + 30 * codec.DAY,
+          entStartsAt: now, entEndsAt: now + 30 * codec.DAY, seq: ++sequence }) });
+        assert.equal(route, '/time');
+        return Response.json({ time: sign({ v: 1, typ: 'time', dev: body.dev, nonce: body.timeNonce, serverTime: now, seq: ++sequence }) });
+      } });
+    fixtureLicense = this;
+  }
+}
 let hub, updater, port, calls = 0, scans = 0, metrics = [];
 const pendingModule = require('../lib/cli-spool'), pending = pendingModule.pending;
 const failureFile = path.join(runDirs[0], 'failure.json');
@@ -51,6 +90,7 @@ test.before(async () => {
   const updateModule = require('../lib/app-update'), OriginalUpdate = updateModule.AppUpdate;
   updateModule.AppUpdate = class extends OriginalUpdate { constructor(opts) { super(opts); updater = this; } };
   const file = require.resolve('../server');
+  licenseModule.License = HandoffLicense;
   try {
     if (process.env.HUB_PERF_BASELINE_FILE) {
       // Measurement only: compile the unchanged old state branch beside the new
@@ -63,7 +103,10 @@ test.before(async () => {
       const m = new Module(file, module); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file)); require.cache[file] = m;
       m._compile(source.slice(0, a) + baseline + source.slice(a), file); hub = m.exports;
     } else hub = require(file);
-  } finally { updateModule.AppUpdate = OriginalUpdate; }
+  } finally { updateModule.AppUpdate = OriginalUpdate; licenseModule.License = OriginalLicense; }
+  await fixtureLicense.prepare();
+  assert.equal(fixtureLicense.owner, false); assert.equal(fixtureLicense.status().trial.state, 'active');
+  assert.doesNotThrow(() => fixtureLicense.require(['webchat']));
   await hub.restoreReady;
   const handoffErrors = hub.chats.handoffErrors;
   hub.chats.handoffErrors = function (...args) { calls++; return handoffErrors.apply(this, args); };
@@ -88,14 +131,16 @@ test('600 completed runs: each state build validates once, including unchanged/3
   const same = await get('/api/state', { 'If-None-Match': first.headers.etag });
   assert.equal(same.status, 304); assert.equal(same.body, '');
   assert.deepEqual(metrics.at(-1), { mode: 'after', calls: 1, scans: 1 });
-  assert.equal(reason(JSON.parse(first.body), 't0'), '');
+  assert.equal(reason(JSON.parse(first.body), 't0'), hasWebchat ? '' : 'feature_not_included');
 });
 test('unresolved save keeps per-task availability, update/restart blocks and reserved restart display', async () => {
   setFailure(); hub.restartControl.reserved = { at: 'fixture-reserved' };
   try {
     const s = await state(); assert.deepEqual(metrics.at(-1), { mode: 'after', calls: 1, scans: 1 });
     assert.equal(s.chatHandoffErrors.length, 1); assert.equal(s.chatHandoffErrors[0].error, 'fixture unresolved save');
-    assert.equal(reason(s, 't0'), 'webchat_task_busy'); assert.equal(reason(s, 't1'), '');
+    assert.equal(reason(s, 't0'), hasWebchat ? 'webchat_task_busy' : 'feature_not_included'); assert.equal(reason(s, 't1'), hasWebchat ? '' : 'feature_not_included');
+    assert.throws(() => hub.chats.assertHandoffReady('P', 't0'), /終了保存/);
+    assert.doesNotThrow(() => hub.chats.assertHandoffReady('P', 't1'));
     assert.equal(s.updateBlocked, true); assert.equal(s.restartBusy, true);
     assert.ok(s.restartWaiting.some(x => x.kind === 'chat-handoff' && x.task === 't0'));
     assert.deepEqual(s.restart.waiting, s.restartWaiting);
@@ -106,7 +151,8 @@ test('fresh action checks reject a failure created AFTER a clean state; no send/
   const p = { id: 'P', dir: pdir }, t = { id: 't0', state: '未着手' }, o = { project: 'P', task: 't0', ai: 'codex' };
   const fresh = fn => { const n = calls; const result = fn(); assert.ok(calls > n); return result; };
   try {
-    fresh(() => assert.throws(() => hub.webchat.submit(p, t, 'never sent'), /終了保存/));
+    if (hasWebchat) fresh(() => assert.throws(() => hub.webchat.submit(p, t, 'never sent'), /終了保存/));
+    else { assert.equal(typeof hub.webchat.submit, 'undefined'); assert.throws(() => hub.webchat.availability(p, t), error => error.message === 'feature_not_included' && error.status === 404); }
     fresh(() => assert.throws(() => hub.chats.send(o), /終了保存/));
     let n = calls; await assert.rejects(hub.chats.sendQueued(o), /終了保存/); assert.ok(calls > n);
     fresh(() => assert.throws(() => hub.chats.detachForRestart(), /終了保存/));
@@ -114,17 +160,23 @@ test('fresh action checks reject a failure created AFTER a clean state; no send/
     fresh(() => assert.ok(hub.restartBlockers().some(x => x.kind === 'chat-handoff')));
     fresh(() => assert.equal(updater.busy(), true));
     assert.equal(hub.restartControl.committed, false); assert.equal(hub.restartControl.executions, 0);
-    assert.equal(hub.webchat.jobs.length, 0); assert.equal(hub.chats.running.size, 0);
+    assert.equal(hub.webchat.jobs?.length || 0, 0); assert.equal(hub.chats.running.size, 0);
     assert.equal(fs.readdirSync(spoolRoot).length, 600);
   } finally { clearFailure(); }
   // A displayed failure must not survive a receipt change into the next action.
-  const n = calls; hub.webchat.availability(p, t); assert.ok(calls > n);
+  const n = calls;
+  if (hasWebchat) hub.webchat.availability(p, t);
+  else hub.chats.assertHandoffReady('P', 't0');
+  assert.ok(calls > n);
   assert.equal(updater.busy(), false); assert.equal(hub.restartBlockers().some(x => x.kind === 'chat-handoff'), false);
 });
 test('unknown handoff owner still blocks every task without extra scans', async () => {
   hub.chats.adoptErrors.push({ run: 'unknown-fixture', stage: 'spool', error: 'unknown owner' });
   try { const s = await state(); assert.deepEqual(metrics.at(-1), { mode: 'after', calls: 1, scans: 1 });
-    assert.ok(s.projects.find(p => p.id === 'P').tasks.every(t => t.webchatReason === 'webchat_task_busy'));
+    assert.ok(s.projects.find(p => p.id === 'P').tasks.every(t => t.webchatReason === (hasWebchat ? 'webchat_task_busy' : 'feature_not_included')));
+    for (const task of tasks) assert.throws(() => hub.chats.assertHandoffReady('P', task), /終了保存/);
+    assert.ok(s.restartWaiting.some(x => x.kind === 'chat-handoff'));
+    assert.equal(s.updateBlocked, true); assert.equal(s.restartBusy, true);
   } finally { hub.chats.adoptErrors = []; }
 });
 test('state summarizes steps; separate detail read preserves unread and updates its version/ETag',async()=>{

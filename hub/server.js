@@ -20,8 +20,8 @@ if (require.main === module && move.needsStartup()) {
   return;
 }
 require('./lib/store').loadMovePathMap(ROOT);
-const license = new (require('./lib/license').License)({ root: ROOT });
 langpacks.setRoot(ROOT);
+const license = new (require('./lib/license').License)({ root: ROOT });
 const launch = require('./lib/launch');
 const roles = require('./lib/roles');
 const roleHistory = require('./lib/role-history');
@@ -29,6 +29,7 @@ let roleReview;
 const extensions = require('./lib/extensions').loadExtensions();
 const discussionRuntime = extensions.definition('discussion');
 const roleReviewRuntime = extensions.definition('role_review');
+const limitEngine = require('./lib/engines/limit-switch')({ getTerminalLimits: () => TerminalLimits, accountFor, getAccounts: () => accounts, getAiTools: () => aiTools, getAppUpdate: () => appUpdate, assertWorkspaceIdle, getBuildHandoffCard: () => buildHandoffCard, getCaptureTerminalLimit: () => captureTerminalLimit, getChat: () => chat, getChats: () => chats, codexFastFor, crypto, getDiscussion: () => discussion, discussionRuntime, expandHome, extensions, fs, getGitSnapshot: () => gitSnapshot, integrationPolicyRequest, launch, license, getLimitEvidence: () => limitEvidence, lt, modelError, getModelView: () => modelView, path, permCmd, record, getRestartControl: () => restartControl, roleReviewRuntime, rolesData, getSessions: () => sessions, setUnread, getStopControl: () => stopControl, getStore: () => store, taskPrompt, getTranscript: () => transcript, getUsage: () => usage, verifyIntegrationAssignmentSend });
 let discussion;
 const specialMode = require('./public/special-mode');
 const { Sessions } = require('./lib/sessions');
@@ -41,7 +42,7 @@ const { listSkills } = require('./lib/skills');
 const { Onboarding } = require('./lib/onboarding');
 const { Usage } = require('./lib/usage');
 const { ModelLimits } = require('./lib/model-limits');
-const { limitRoute, limitIdentity, capacityRoute } = require('./lib/limit-route');
+const { limitIdentity } = require('./lib/limit-route');
 const { TerminalLimits, capture: captureTerminalLimit } = require('./lib/terminal-limits');
 const { buildHandoffCard, snapshot: gitSnapshot } = require('./lib/handoff-card');
 const remoteLib = require('./lib/remote');
@@ -58,14 +59,7 @@ const DRY = process.env.HUB_DRY_RUN === '1'; // テスト用：実際には起�
 const stopControl = new (require('./lib/stop-control').StopControl)({dir:path.join(ROOT,'_hub','stop-control')});
 const accounts = new (require('./lib/accounts').Accounts)({ file: path.join(ROOT, '_hub', 'accounts.json'), dry: DRY, busy: accountBusy });
 launch.setAccounts(accounts);
-function limitModels() {
-  const out = { claude: [...require('./lib/model-limits').MODELS.claude], codex: [...require('./lib/model-limits').MODELS.codex] };
-  for (const r of rolesData().roles) for (const slot of [r.main, r.backup]) {
-    const ai = slot.ai === 'claude-code' ? 'claude' : slot.ai, flag = launch.flagFor(ai, slot.model);
-    if (out[ai] && flag && !out[ai].includes(flag)) out[ai].push(flag);
-  }
-  return out;
-}
+function limitModels() { return limitEngine.limitModels(); }
 const limitEvidence = new ModelLimits(path.join(ROOT, '_hub', 'limits.json'), { models: limitModels,
   creditPolicy: rolesData, creditState: (ai, account) => usage.creditState(ai, account) });
 const usage = new Usage({ dry: DRY, accounts, resetFile:path.join(ROOT, '_hub', 'reset-ticket-attempts.json'),
@@ -75,27 +69,8 @@ const usage = new Usage({ dry: DRY, accounts, resetFile:path.join(ROOT, '_hub', 
 } });
 // Private role-review requests cannot use paid-credit overrides. Without that
 // optional hook, ordinary conversations retain their existing limit policy.
-function roleReviewLimit(request) {
-  return roleReviewRuntime.heldLimit ? roleReviewRuntime.heldLimit(request, limitEvidence) : limitEvidence.forRequest(request);
-}
-async function refreshLimitEvidence(request) {
-  verifyIntegrationAssignmentSend(request);
-  if (discussionRuntime.isRequest(request.request)) { discussion.verify(request); return; }
-  if (!['claude', 'codex'].includes(request.ai)) return;
-  if (rolesData().checkCredits[request.ai]) await usage.checkCredits(request.ai, request.account || 'default');
-  if (integrationPolicyRequest(request)) {
-    if (!limitEvidence.active(request.account || 'default',launch.flagFor(request.ai,request.model))) await usage.status(false,{[request.ai]:request.account || 'default'});
-    return;
-  }
-  if (!limitRoutingEnabled()) return;
-  const target = roleReviewLimit(request) ? limitBackup(request) : request;
-  if (!target || !['claude', 'codex'].includes(target.ai)) return;
-  // 元担当が保持中でも、確認ONの交代先は起動前に既存クレジットを判定する。
-  if (target !== request && rolesData().checkCredits[target.ai]) await usage.checkCredits(target.ai, target.account || 'default');
-  if (roleReviewLimit({ ...request, ...target })) return;
-  // 状態だけ読む（prompt/turnは送らない）。TTL/アカウント隔離はUsageの共通経路。
-  await usage.status(false, { [target.ai]: target.account || 'default' });
-}
+function roleReviewLimit(request) { return limitEngine.roleReviewLimit(request); }
+async function refreshLimitEvidence(request) { return limitEngine.refreshLimitEvidence(request); }
 const PUBLIC = path.join(__dirname, 'public');
 const bootModules=require('./lib/runtime-generation').preload(__filename,{optional:[path.join(__dirname,'lib/license/owner-edition'),path.join(__dirname,'paid')]});
 const extensionUI = extensions.uiSource(), extensionCSS = extensions.uiSource('style');
@@ -109,6 +84,7 @@ const ideas = new Ideas({store,root:ROOT,baseOf});
 const ideaSource = new IdeaSource({store,generation:(p,t)=>taskHistory.state(p,t).generation,blocked:()=>Boolean(taskHistory.failure)});
 const ideaAPI = new IdeaAPI({ideas,source:ideaSource});
 const executionGate = new (require('./lib/execution-gate').ExecutionGate)();
+const parallelEngine = require('./lib/engines/parallel')({ getAiTools: () => aiTools, getAppUpdate: () => appUpdate, baseOf, getChats: () => chats, getConversationHistory: () => conversationHistory, executionGate, expandHome, extensions, getFreetalkHistory: () => freetalkHistory, fs, getGithub: () => github, getGithubProject: () => githubProject, getGpt: () => gpt, historyBusy, getIdeaRunner: () => ideaRunner, license, lt, getMaintenance: () => maintenance, path, getProcwatch: () => procwatch, getRemoval: () => removal, getRemovalReview: () => removalReview, getReqCtx: () => reqCtx, getRestartControl: () => restartControl, getSessions: () => sessions, stopControl, store, getTaskIntegrate: () => taskIntegrate, getWebchat: () => webchat, webchatActive });
 let ideaRunner, ideaDispatch, ideaLane, ideaRelease, queueRetreat;
 const freetalkLib = require('./lib/freetalk');
 // DRY_RUN は明示した一時 HOME または隔離 ROOT の中だけを使う。
@@ -124,80 +100,10 @@ let restartControl = null, emergencyRestart = null;
 let activeRequests = 0;
 const queueActions = new Set();
 const queueEdit = require('./lib/queue-edit');
-const queueEditable = item => !item.automation && !item.readOnly && !item.selectionOnly && !item.limitSwitch && !item.resultsOrganize && !item.integrationAssignment && !item.isolatedReview && !item.integrationReviewRequest;
-const chats = new chat.ChatRunner({stopControl,queueGuard:o=>queueRetreat?.guard(o),prepareContext:o=>{
-  if(o.project==='freetalk'||o.readOnly||o.automation)return o;
-  const token=o.ideaRecord?.token||crypto.randomUUID();
-  const instruction=`\n別の改善を思いついた時は原文だけ台帳へ残せます。作る許可は付与しません。POST /api/ideas/add (Hubと同じ接続先), headers X-Hub:1 / X-Idea-Record:${token} / Content-Type:application/json, body {project:${JSON.stringify(o.project)},opId:UUID,text:原文,intent:record}。送信識別は再送時も同じにし、結果不明ならreceiptを照合する。`;
-  return {...o,ideaRecord:{token},basePrompt:(o.basePrompt||'')+instruction};
-}, spoolRoot:path.join(ROOT,'_hub','cli-runs'),onAdoptEnd:(o,row)=>{if(!o.automation&&!o.discussionTurn&&!o.isolatedReview&&!o.selectionOnly&&row.asks?.length)store.updateTask(o.project,o.task,{state:'返事待ち',question:row.asks.map(a=>a.question).join(' / ').slice(0,300)});chatEnded(o.project,o.task);}, dirOf: id => { const p = store.readProject(id); return p ? p.dir : ''; },
-  delegates: (p, t) => [...readLog(5000), ...readLog(5000, LOG_FILE.replace(/\.jsonl$/, '.old.jsonl'))].filter(r => r.project === p && r.task === t),
-  permFor: permCmd,
-  limitBackup: limitBackup,
-  capacityBackup,
-  limitIdentity: o => limitIdentity(rolesData(), o),
-  accountFor, fastFor: codexFastFor,
-  onSettled: async (o,row) => { if(o.automation){await ideaRunner.settled(o,row);return;} if(discussionRuntime.isRequest(o.request)) { await discussion?.settled(o,row); return; } if(roleReviewRuntime.isRequest(o.request)) { await roleReview?.settled(o,row); return; } integrateAuto.settled(o,row);setImmediate(()=>{
-    try{if(stopControl.held({project:o.project,task:o.task}))return;stopControl.assert(o,o.stopTicket);chats.assertHandoffReady(o.project,o.task);}catch{return;}
-    if(o.selectionOnly){void autoTick(o.project,o.task);return;}
-    void integrateAuto.tick();if(!o.isolatedReview)void resultsGate.trigger(o.project,o.task,{row,organized:Boolean(o.resultsOrganize)}).catch(e=>record('results-organize-error',{project:o.project,task:o.task},{error:e.message}));
-  }); },
-  limitHold: o => Boolean(discussionRuntime.isRequest(o.request) || integrationPolicyRequest(o)),
-  limitPreflight: o => discussionRuntime.isRequest(o.request) ? limitEvidence.active(o.account || 'default',launch.flagFor(o.ai,o.model),true) : integrationPolicyRequest(o) ? limitEvidence.active(o.account || 'default',launch.flagFor(o.ai,o.model)) : limitRoutingEnabled() || roleReviewRuntime.isRequest(o.request) ? roleReviewLimit(o) : null,
-  limitTarget: o => roleReviewLimit(o),
-  beforeQueued: async o => { void license.prepare(); await refreshLimitEvidence(o); assertCapacityHandoff(o); },
-  startBarrier:o=>{stopControl.assert(o,o.stopTicket);executionGate.assert({dir:o.dir||store.readProject(o.project)?.dir,owner:'chat:'+o.project+':'+o.task});if(o.automation&&o.automation.kind!=='idea')throw Error('不明な自動実行は開始しません');},
-  beforeSend:o=>o.automation?ideaDispatch.verify(o):verifyIntegrationReviewSend(o),
-  beforeAdopt:o=>{if(o.automation)ideaDispatch.verify(o,{adoption:true});},
-  startGate:(o,{adoption})=>{if(o.automation)ideaDispatch.verify(o,{adoption});executionGate.acquire({dir:o.dir,owner:'chat:'+o.project+':'+o.task,kind:o.readOnly?'frozen-review':'write',adoption});},
-  endGate:o=>executionGate.release('chat:'+o.project+':'+o.task),
-  onHandoffError:(o,e,run)=>executionGate.block('chat-handoff:'+run,o.dir,'会話の終了保存の復旧が必要です：'+e.message),
-  onHandoffRecovered:(o,run)=>executionGate.unblock('chat-handoff:'+run),
-  afterCompleted:o=>{if(ideaRunner)for(const p of store.listProjects())if(p.id!=='freetalk'&&ideas.readRegistry().projects[p.id])ideaRunner.wake(p.id);},
-  onStop:(project,task)=>{if(project==='freetalk'||store.readProject(project)?.kind==='freetalk')return;const d=ideas.read(project);if(d.projectUid!=='uninitialized'&&(d.settings.lane?.task===task||Object.values(d.runs).some(r=>!r.closed&&r.task===task)))ideas.auto(project,{opId:require('./lib/idea-utils').uuid(),settingsRev:d.settings.rev,enabled:false});},
-  onLimit: o => {
-    try { limitEvidence.record(o,o.discussionTurn?discussion.limitModels():undefined,discussionRuntime.isRequest(o.request)); }
-    catch (e) { record('limit-save-error', o); throw e; }
-    void usage.status(true, { [o.ai]: o.account || 'default' }).catch(() => {});
-  },
-  onFableSuccess: started => limitEvidence.success(started),
-  refreshQueued: o => {
-    const p = store.readProject(o.project), t = p?.tasks.find(t => t.id === o.task);
-    if (!p || !t) throw Error(lt('作業が見つかりません'));
-    if(o.automation)return ideaDispatch.refresh(o);
-    if(discussionRuntime.isRequest(o.request)){discussion.verify(o);return {dir:isolatedReviewDir(p,t),basePrompt:discussionRuntime.basePrompt,policy:discussionRuntime.basePrompt};}
-    if(roleReviewRuntime.isRequest(o.request)){roleReview.verify(o);return {dir:isolatedReviewDir(p,t),basePrompt:roleReviewRuntime.basePrompt,policy:roleReviewRuntime.basePrompt};}
-    verifyIntegrationReviewSend(o); // Reject lost review classification before workspace preparation too.
-    if(o.selectionOnly)return {dir:p.dir,basePrompt:selectionPrompt(p),policy:selectionPrompt(p)};
-    if(o.isolatedReview)return {dir:isolatedReviewDir(p,t),basePrompt:integrationReviewPrompt(p,t)};
-    if(o.readOnly)return {dir:p.dir,basePrompt:lt('読み取り専用の共有確認です。ファイルを編集せず、判定のJSONだけを返してください。')};
-    const dir = o.dir && fs.existsSync(o.dir) ? o.dir : workDir(p, t).dir;
-    if (!dir || !fs.existsSync(dir)) throw Error(lt('作業場所を用意できませんでした'));
-    return { dir, policy: modelPolicy(p, t), basePrompt: taskPrompt(p, t, store.taskFile(p.id, t.id), dir) + lt(' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。') };
-  },
-  canStart: (ai, model, o) => {
-    try{executionGate.assert({dir:o?.dir||store.readProject(o?.project)?.dir,owner:'chat:'+o?.project+':'+o?.task});if(o?.automation)ideaDispatch.verify(o);}catch(e){return e.message;}
-    if (o && !discussionRuntime.isRequest(o.request) && discussion?.active(o.project,o.task)) return '話し合いが進行中です。停止または完了後に送ってください';
-    if (appUpdate.applying()) return appUpdate.busyMessage();
-    if (restartControl?.committed) return lt('再起動を開始しています');
-    if (aiTools.isOperating(ai)) return lt('AI の更新・モデル再取得が進行中です');
-    const invalid=modelError(ai,model); if(invalid)return invalid;
-    if (o && modelView.special().enabled && limitEvidence.forRequest({ ...o, ai, model })) return lt('特殊モードのAIが上限中です。解除後に再開してください');
-    if(o) { const p=store.readProject(o.project), t=p?.tasks.find(t=>t.id===o.task);
-      if(!p || !t)return lt('作業が見つかりません');
-      if(p.kind==='freetalk' && freetalkHistory.state(t.id).migrated)return lt('移行済みの話題は読み取り専用です');
-      if(o.resultsRecoveryHash && t.completionHash!==o.resultsRecoveryHash)return lt('成果整理の開始前に子作業が変わりました');
-      if(o.requireModel && t.state === '完了' && !o.resultsRecoveryHash)return DELEGATE_COMPLETED_ERROR;
-      if(o.requireModel) {const blocked=delegateTerminalError(p.id,t.id);if(blocked)return blocked;}
-      try { accounts.available(ai, o.account || 'default', { forWork: true }); } catch (e) { return e.message; }
-      try {assertWorkspaceIdle(p,t,false);} catch(e) {return e.message;}
-    }
-    return '';
-  } });
-queueRetreat = new (require('./lib/queue-retreat').QueueRetreat)({ideas,chats,actions:queueActions,related:(p,t,q)=>{
-  const a=taskIntegrate.read(p,t)?.auto;
-  return Object.values(a?.attempts||{}).some(x=>[x.delivery?.request,x.delivery?.queueId].some(id=>id&&[q.id,q.request].includes(id)));
-}});
+const queueEditable = item => item.origin !== 'hub-internal' && !item.automation && !item.readOnly && !item.selectionOnly && !item.limitSwitch && !item.resultsOrganize && !item.integrationAssignment && !item.isolatedReview && !item.integrationReviewRequest;
+const queueEngine = require('./lib/engines/queue')({ getDelegateCompletedError: () => DELEGATE_COMPLETED_ERROR, getLogFile: () => LOG_FILE, ROOT, accountFor, accounts, getAiTools: () => aiTools, getAppUpdate: () => appUpdate, assertWorkspaceIdle, autoTick, chat, getChatEnded: () => chatEnded, getChats: () => chats, codexFastFor, crypto, delegateTerminalError, getDiscussion: () => discussion, discussionRuntime, executionGate, getFreetalkHistory: () => freetalkHistory, fs, gitw, getIdeaDispatch: () => ideaDispatch, getIdeaRunner: () => ideaRunner, ideas, getIntegrateAuto: () => integrateAuto, integrationPolicyRequest, integrationReviewPrompt, isolatedReviewDir, launch, license, licenseGuard, limitBackup, capacityBackup, assertCapacityHandoff, limitEvidence, limitIdentity, limitRoutingEnabled, lt, modelError, modelPolicy, getModelView: () => modelView, path, permCmd, queueActions, getQueueRetreat: () => queueRetreat, readLog, record, refreshLimitEvidence, requestAccount, getRestartControl: () => restartControl, getResultsGate: () => resultsGate, getRoleReview: () => roleReview, roleReviewLimit, roleReviewRuntime, roles, rolesData, selectionPrompt, send, specialMode, startDir, stopControl, store, getTaskIntegrate: () => taskIntegrate, taskPrompt, usage, verifyIntegrationAssignmentSend, verifyIntegrationReviewSend, webchatActive, workDir });
+const chats = queueEngine.createChatRunner();
+queueRetreat = queueEngine.createQueueRetreat();
 const { Maintenance } = require('./lib/maintenance');
 const emptyLib = require('./lib/empty');
 const maintenance = new Maintenance({store,baseOf,busy:id=>{
@@ -229,9 +135,7 @@ const removalReview=new (require('./lib/removal-review').RemovalReview)({store,r
  }});
 const aiTools = new AiTools({ root: ROOT, dry: DRY, busy: ai => sessions.list().filter(x => x.running && (!ai || x.ai === ai)).length + [...chats.running.values()].filter(x => !ai || x.ai === ai).length + procwatch.list().filter(x => x.project && (!ai || !x.ai || x.ai === ai)).length + Number(accounts.terminalBusy(ai)) });
 aiTools.canOperate = () => restartControl?.committed ? lt('再起動を開始しています') : taskIntegrate.active || integrateAuto.active ? lt('統合の処理が進行中です') : appUpdate.applying() || appShell.rebuilding ? lt('Hubの更新が進行中です') : '';
-sessions.startGate=o=>executionGate.acquire({dir:o.dir,owner:'terminal:'+o.project+':'+o.task+':'+o.ai});
-sessions.endGate=o=>{executionGate.release('terminal:'+o.project+':'+o.task+':'+o.ai);ideaRunner?.wake(o.project);};
-sessions.canStart = (ai,o) => {try{executionGate.assert({dir:o.dir,owner:'terminal:'+o.project+':'+o.task+':'+ai});}catch(e){return e.message;}return  restartControl?.committed ? lt('再起動を開始しています') : aiTools.isOperating(ai) ? lt('AI の更新・モデル再取得が進行中です') : '';};
+parallelEngine.installTerminal();
 const aiUpdates = new (require('./lib/ai-updates').AiUpdates)({ tools: aiTools, accounts, root: ROOT, onCatalog: applyModelCatalog });
 const onboarding = new Onboarding({ root: ROOT, home: aiTools.home, tools: aiTools,
   projects: () => store.listProjects(), terminal: () => sessions.available(), dry: DRY });
@@ -373,10 +277,7 @@ function cliModelHints() {
 }
 
 function rolesData() { return roles.read(ROLES_FILE).data; }
-function limitRoutingEnabled() {
-  try { license.require(['limit_switch']); } catch (e) { if (e.code === 'license_held') return false; throw e; }
-  return rolesData().switch.auto === true || modelView.special().enabled;
-}
+function limitRoutingEnabled() { return limitEngine.limitRoutingEnabled(); }
 function executionRoles() {
   const raw = rolesData(), mode = modelView.special();
   return mode.enabled ? { ...raw, specialMode: mode, roles: raw.roles.map(r => ({ ...r,
@@ -390,46 +291,12 @@ function delegateTerminalError(project, task) {
   return lt`この作業のターミナルで AI（${names}）が動いているため、委任できません。人に「この作業の作業画面で［ターミナル］に切り替え、${names}の欄の［停止］を押してから、会話でもう一度頼んでください」と案内してください。会話画面の［停止］は押させない（待っている指示も取り消されます）。裏で別の CLI を起動したり、この依頼を繰り返し送ったりしないでください。`;
 }
 
-function capacityOptions() {
-  return { models: aiTools.catalog().codex?.models || [], available: (models, account) =>
-    usage.subscriptionAvailable(models, account) && !models.some(model => limitEvidence.active(account, model, true)) };
-}
-async function capacityBackup(o) {
-  const account = o.account || 'default';
-  if (accountFor(o.project, o.task, 'codex') !== account ||
-      !capacityRoute(rolesData(), o, { ...capacityOptions(), available: () => true })) return null;
-  // Fixed contract-status request only, after the failed CLI has exited. A long
-  // turn's old cache must not be mistaken for remaining subscription quota.
-  await usage.status(true, { codex: account }, { only: { ai: 'codex', account } });
-  return limitBackup(o, 'capacity');
-}
-function assertCapacityHandoff(o) {
-  const link = o.limitSwitch;
-  if (link?.reason !== 'capacity') return;
-  const account = o.account || 'default';
-  const source = { ...o, ai: link.sourceAI, model: link.sourceModel, effort: link.sourceEffort, limitSwitch: null };
-  const options = capacityOptions(), target = capacityRoute(rolesData(), source, options);
-  const current = launch.flagFor(o.ai, o.model), row = options.models.find(m => m.id === current);
-  if (o.ai !== 'codex' || account !== (link.sourceAccount || 'default') ||
-      accountFor(o.project, o.task, 'codex') !== account || target?.requiredModel !== current ||
-      o.requiredModel !== current || Array.isArray(row?.efforts) && !row.efforts.includes(o.effort)) {
-    throw Error('モデル混雑の自動再開条件（契約枠の残量・同じアカウント・最新のSol／Astra候補）を確認できないため、待機します');
-  }
-}
-function limitBackup(o, reason) {
-  try { license.require(['limit_switch']); } catch (e) { if (e.code === 'license_held') return null; throw e; }
-  if(discussionRuntime.isRequest(o.request)||integrationPolicyRequest(o))return null;
-  const p = o.project && store.readProject(o.project), t = p?.tasks.find(t => t.id === o.task);
-  const role = o.role || t?.role || '';
-  if (!['claude', 'codex'].includes(o.ai)) return null;
-  if (reason === 'capacity' && accountFor(o.project, o.task, 'codex') !== (o.account || 'default')) return null;
-  const backup = reason === 'capacity' ? capacityRoute(rolesData(), { ...o, role }, capacityOptions()) : limitRoute(rolesData(), { ...o, role });
-  if (modelView.special().enabled && backup?.ai !== o.ai) return null;
-  return backup && { ...backup, account: accountFor(o.project, o.task, backup.ai), perm: permCmd(backup.ai) };
-}
+function limitBackup(o, reason) { return limitEngine.limitBackup(o, reason); }
+async function capacityBackup(o) { return limitEngine.capacityBackup(o); }
+function assertCapacityHandoff(o) { return limitEngine.assertCapacityHandoff(o); }
 // ChatGPT アプリ・Codex の設定ファイル（~/.codex/config.toml）に、Hub の MCP が登録されているか
 const CODEX_CONFIG = () => path.join(process.env.HUB_AI_HOME || os.homedir(), '.codex', 'config.toml');
-const MCP_BLOCK = () => lt`\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js')}"]\n`;
+const MCP_BLOCK = () => lt`\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js').split(path.sep).join('/')}"]\n`;
 function codexMcpStatus() {
   let text = '';
   try { text = fs.readFileSync(CODEX_CONFIG(), 'utf8'); } catch (e) { return { registered: false, configFile: CODEX_CONFIG(), configExists: false }; }
@@ -480,76 +347,13 @@ function pruneUnread() {
 // 会話の1回分が終わった時：誰も会話画面を見ていなければ未読にする
 const chatEnded = (project, task) => { if (!(chats.watchers.get(chats.key(project, task))?.size > 0)) setUnread(project, task, true); };
 // 作業画面（端末）が終わった時：見ている画面が無く、人が止めたのでなければ未読にする
-function terminalLimitNotice(o, text) {
-  const p = store.readProject(o.project); if (!p) return;
-  const row = chat.append(p.dir, o.task, { role: 'event', ai: o.ai, text });
-  chats.emit(o.project, o.task, { type: 'row', row }); setUnread(o.project, o.task, true);
-  record('terminal-limit', o, { text });
-}
-function terminalPendingFile(p, t) { return path.join(p.dir, '.ai', 'handoff', `${t.id}-limit.json`); }
-function terminalPending(p, t) {
-  try { const data = JSON.parse(fs.readFileSync(terminalPendingFile(p, t), 'utf8')); return data.pending && data.task === t.id ? data : null; } catch { return null; }
-}
-function saveTerminalPending(p, t, data) {
-  const file = terminalPendingFile(p, t); fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n'); fs.renameSync(tmp, file);
-}
-function terminalBusy(p, t, exceptAI) {
-  return sessions.list().some(r => r.running && r.project === p.id && r.task === t.id && r.ai !== exceptAI) || chats.busy(p.id, t.id);
-}
-async function terminalLimitHandoff(o, src) {
-  const stopTicket=stopControl.ticket(o);if(stopControl.held(o))return;
-  const p = store.readProject(o.project), t = p?.tasks.find(t => t.id === o.task);
-  if (!p || !t || t.state === '完了') throw Error(lt('作業が見つからないか完了したため、交代先を開始していません'));
-  if (!src.exited || src.stopped) return;
-  let backup = limitBackup(o); if (!backup) return;
-  const file = store.taskFile(p.id, t.id), board = path.join(p.dir, '.ai', 'board.md');
-  const from = `${launch.AI_LABEL[o.ai]}・${launch.modelLabel(o.ai, o.model)}`;
-  const original = src.original || src.prompt || '';
-  const packetFile = path.join(p.dir, '.ai', 'handoff', `${t.id}-limit-${src.started}.md`);
-  const convo = transcript.collect({ ai: o.ai, dir: src.dir, since: src.started, buf: src.buf, accountDir: accounts.location(o.ai, src.account), source: src.limitWatch?.file });
-  const pending = { pending: true, task: t.id, packet: packetFile, dir: src.dir, original, sourceAI: o.ai, sourceModel: o.model, role: o.role, from };
-  const savePacket = () => {
-    pending.to = `${launch.AI_LABEL[backup.ai]}・${backup.model}`;
-    const card = buildHandoffCard({ original, user: { head: src.head, status: src.status }, rows: [], dir: src.dir, pdir: p.dir, task: t.id, from, to: pending.to });
-    fs.mkdirSync(path.dirname(packetFile), { recursive: true });
-    fs.writeFileSync(packetFile, card + '\n\n' + transcript.packet({ fromLabel: from, toLabel: pending.to, taskFile: file, board, convo, extra: lt('済んだ手順・変更・送信済み委任を繰り返さず、残りを続ける。操作記録も確認する。') }));
-    saveTerminalPending(p, t, pending); // 起動失敗/両方上限でも資料と続きを残す。
-  };
-  savePacket();
-  await refreshLimitEvidence({...o,...backup});
-  if (src.stopped || stopControl.held(o) || stopControl.changed(o,stopTicket)) return;
-  const latest = limitBackup(o); if (!latest) return;
-  if (JSON.stringify(latest) !== JSON.stringify(backup)) { backup = latest; savePacket(); await refreshLimitEvidence({...o,...backup}); }
-  if (JSON.stringify(limitBackup(o)) !== JSON.stringify(backup)) throw Error(lt('交代先の設定が変更されたため、資料を保存して待機します'));
-  if (src.stopped || stopControl.held(o) || stopControl.changed(o,stopTicket)) return;
-  if (appUpdate.applying()) throw Error(appUpdate.busyMessage());
-  if (aiTools.isOperating(backup.ai)) throw Error(lt('AI の更新・モデル再取得が進行中です'));
-  const current = store.readProject(p.id)?.tasks.find(t => t.id === o.task);
-  if (!current || current.state === '完了') throw Error(lt('作業が見つからないか完了したため、交代先を開始していません'));
-  if (limitEvidence.forRequest(backup)) throw Error(lt('引き継ぎ先も上限中のため待機します。資料を保存しました。解除後にターミナルで再開してください'));
-  if (terminalBusy(p, t)) throw Error(lt('同じ作業で別のAIが動いているため、資料を保存して待機します'));
-  assertWorkspaceIdle(p, t, false);
-  if (!fs.existsSync(src.dir) || expandHome(current.workdir) && !transcript.same(expandHome(current.workdir), src.dir)) throw Error(lt('作業場所が変わったため、交代先を開始していません'));
-  const invalid = modelError(backup.ai, backup.model); if (invalid) throw Error(invalid);
-  accounts.available(backup.ai, backup.account, { forWork: true });
-  const limitMarker = crypto.randomUUID();
-  const prompt = lt`利用上限による交代です。引き継ぎ資料 ${packetFile} を読み、実物を確かめて残りを続けてください。` + '\n' + taskPrompt(p, t, file, src.dir, 'terminal', backup) + `\n[Hub terminal: ${limitMarker}]`;
-  const argv = launch.buildArgv({ ...backup, prompt, cmd: permCmd(backup.ai), fast: codexFastFor(p.id, t.id) });
-  const next = sessions.start({ project: p.id, task: t.id, dir: src.dir, ...backup, ...gitSnapshot(src.dir), prompt, limitMarker, command: argv.command, args: argv.args });
-  next.original = original;
-  saveTerminalPending(p, t, { ...pending, pending: false });
-  terminalLimitNotice(o, lt`${from} の終了を確認し、同じターミナル作業を ${pending.to} で続けます`);
-}
-sessions.prepare = o => ['claude', 'codex'].includes(o.ai) ? captureTerminalLimit(o.ai, accounts.location(o.ai, o.account), o.limitMarker) : null;
-const terminalLimits = new TerminalLimits({ sessions, limits: limitEvidence, enabled: () => limitRoutingEnabled(),
-  backup: limitBackup, handoff: terminalLimitHandoff, refresh: refreshLimitEvidence, notify: terminalLimitNotice });
-sessions.onExit = (project, task, ai, s) => {
-  if (!s?.stopped && !(s?.watchers.size > 0)) setUnread(project, task, true);
-  void terminalLimits.check(project, task, ai, s, true).catch(e => terminalLimitNotice({ project, task, ai }, e.message));
-};
-const terminalLimitTimer = setInterval(() => { if(restartControl?.committed)return; void terminalLimits.tick().catch(e => record('terminal-limit-error', {}, { error: e.message })); }, 2000);
-terminalLimitTimer.unref();
+function terminalLimitNotice(o, text) { return limitEngine.terminalLimitNotice(o, text); }
+function terminalPendingFile(p, t) { return limitEngine.terminalPendingFile(p, t); }
+function terminalPending(p, t) { return limitEngine.terminalPending(p, t); }
+function saveTerminalPending(p, t, data) { return limitEngine.saveTerminalPending(p, t, data); }
+function terminalBusy(p, t, exceptAI) { return limitEngine.terminalBusy(p, t, exceptAI); }
+async function terminalLimitHandoff(o, src) { return limitEngine.terminalLimitHandoff(o, src); }
+const { terminalLimits, terminalLimitTimer } = limitEngine.installTerminal();
 
 // ChatGPT との連携：mcp.js から /api/mcp/* で呼ばれる道具。報告は会話画面にも流し、未読にする
 // 子プロジェクトの結果を親へ渡す（親の受け取る作業に書き、会話に流し、未読にする）。失敗しても元の操作は続ける
@@ -578,7 +382,7 @@ gpt.gptChildren = new (require('./lib/gpt-children').GptChildren)({ store, chat,
     if (chats.queue(p.id, t.id).length) { const e = Error(lt('AI・整理・確認が動いています')); e.status = 409; throw e; }
     assertWorkspaceIdle(p, t, false, false, owner, true);
   } });
-webchat = new (require('./lib/webchat').Webchat)({ root: ROOT, gpt, store, chat, assertIdle: assertConversationIdle, onSettled: dispatchAfterWebchat,
+webchat = extensions.create('webchat', { root: ROOT, gpt, store, chat, assertIdle: assertConversationIdle, onSettled: dispatchAfterWebchat,
   onReply: (p,t,row) => {
     if (p.kind !== 'freetalk' && row.asks?.length) {
       try { store.updateTask(p.id,t.id,{state:'返事待ち',question:row.asks.map(a=>a.question).filter(Boolean).join(' / ').slice(0,300)}); }
@@ -588,52 +392,14 @@ webchat = new (require('./lib/webchat').Webchat)({ root: ROOT, gpt, store, chat,
   for (const j of webchat?.jobs || []) for (const task of new Set([j.task, j.parent].filter(Boolean))) chats.emit(j.project, task, { type: 'webchat' });
 } });
 // Conversations need a stable history and exclusive turn, not a clean Git tree.
-function licenseGuard(options, stage = 'start') {
-  if(options.project&&options.task){const ctx=reqCtx.getStore(),snapshot=ctx?.stopSnapshot,manual=ctx?.manualResume;
-    if(manual&&options.project===manual.project&&options.task===manual.task)stopControl.checkManual(options,manual.ticket);
-    else stopControl.assert(options,options.stopTicket || (snapshot?{epoch:snapshot.epoch,task:snapshot.tasks[JSON.stringify([options.project,options.task])]?.epoch||0}:undefined));}
-  const active = [...sessions.list(), ...[...chats.running].map(([key, run]) => {
-    const [project, task] = key.split('\0'); return { project, task, ai: run.ai, running: true };
-  }), ...(webchat?.busy() || []).map(j => ({ project: j.project, task: j.task, ai: 'chatgpt', running: true })),
-    ...procwatch.list().filter(p => !chats.supervisedPid(p.pid)).map(p => ({ ...p, running: true }))];
-  return license.guard(options, { active, stage });
-}
+function licenseGuard(options, stage = 'start') { return parallelEngine.licenseGuard(options, stage); }
 chats.licenseGuard = licenseGuard;
 sessions.licenseGuard = licenseGuard;
 webchat.licenseGuard = licenseGuard;
 webchat.stopControl = stopControl;
 webchat.licensePrepare = () => { void license.prepare(); };
-function assertConversationIdle(p, t, owner, handoffErrors) {
-  const fail = code => { const e = Error(code); e.status = 409; throw e; };
-  if (restartControl?.committed || appUpdate.applying()) fail('webchat_restarting');
-  chats.assertHandoffReady(p.id, t.id, handoffErrors);
-  if (historyBusy(p.id, t.id) || removal.locked(p.id) || removalReview.active(p.id) ||
-      chats.busy(p.id, t.id) || !owner && chats.queue(p.id, t.id).some(q=>!q.stopHeld) ||
-      sessions.list().some(s => s.running && s.project === p.id && s.task === t.id) ||
-      procwatch.list().some(s => s.project === p.id && (!s.task || s.task === t.id) &&
-        !chats.supervisedPid(s.pid) && !procwatch.hasAncestor(s.pid,pid=>chats.supervisedPid(pid,{activeOnly:true})))) fail('webchat_task_busy');
-  if (p.kind === 'freetalk') {
-    const state = freetalkHistory.state(t.id);
-    if (state.migrated || state.summary?.intent === 'promote' && state.summary.automatic && !state.summary.automatic.error) fail('webchat_topic_readonly');
-  }
-}
-async function dispatchAfterWebchat(j) {
-  if(stopControl.held({project:j.project,task:j.task}))return;
-  const next = chats.queue(j.project, j.task)[0];
-  if (!next || next.stopHeld || next.error || next.limitWaiting || restartControl?.committed || webchatActive(j.project,j.task)) return;
-  const p = store.readProject(j.project); if (!p) return;
-  try {
-    const r = await chats.sendQueued({ ...next, project:p.id, task:j.task, pdir:p.dir, dir:undefined,
-      request:next.id, mode:'queued', onEnd:row=>{
-        if(!next.isolatedReview && row.asks?.length) store.updateTask(p.id,j.task,{state:'返事待ち',question:row.asks.map(a=>a.question).join(' / ').slice(0,300)});
-        chatEnded(p.id,j.task);
-      } });
-    if (!(await r.started)) throw Error(lt('AIを起動できませんでした'));
-    chats.unqueue(p.id,j.task,next.id);
-  } catch(e) {
-    if (chats.queue(p.id,j.task).some(q=>q.id===next.id)) chats.setQueue(p.id,j.task,chats.queue(p.id,j.task).map(q=>q.id===next.id?{...q,error:e.message}:q));
-  }
-}
+function assertConversationIdle(p, t, owner, handoffErrors) { return parallelEngine.assertConversationIdle(p, t, owner, handoffErrors); }
+async function dispatchAfterWebchat(j) { return queueEngine.dispatchAfterWebchat(j); }
 const github = require('./lib/github').createGithub({ settingsFile: path.join(ROOT, '_hub', 'github.json'), dry: DRY,
   idle: p => {
     assertWorkspaceIdle(p, { workspaceMode: 'isolated' }, false, true);
@@ -742,38 +508,7 @@ function baseOf(p) {
   const d = body && expandHome(body.path);
   return d && fs.existsSync(d) ? d : p.dir;
 }
-function assertWorkspaceIdle(p, t, permitChat, githubOperation = false, gptOwner, gptOperation = false) {
-  executionGate.assert({dir:expandHome(t.workdir)||baseOf(p),owner:permitChat?'chat:'+p.id+':'+t.id:undefined});
-  if (restartControl?.committed) { const e=Error(lt('再起動を開始しています'));e.status=409;throw e; }
-  const own = gptOwner && (gpt.gptChildren.owners.get(p.id + '/' + t.id) === gptOwner || webchat?.current?.lease === gptOwner && webchat.current.project === p.id && webchat.current.task === t.id);
-  if ((!own && webchatActive(p.id, t.id)) || gptOperation && conversationHistory?.organizing(p.id, t.id)) { const e = Error(lt('AI・整理・確認が動いています')); e.status = 409; throw e; }
-  if (appUpdate.applying()) { const error = Error(appUpdate.busyMessage()); error.status = 409; throw error; }
-  if (maintenance.locked(p.id)) {const e=Error(lt('同じ本体で検証中です。終わってからAIを始めてください'));e.status=409;throw e;}
-  const canonical = dir => { try { return fs.realpathSync(dir); } catch(e) { return path.resolve(dir); } };
-  const base = canonical(baseOf(p));
-  const chosenDir = (p,t) => {
-    const wd=expandHome(t.workdir);if(wd&&fs.existsSync(wd))return wd;
-    const r=taskIntegrate.read(p.id,t.id);return r&&!r.complete?r.target:wd;
-  };
-  const onBase = (p,t) => {
-    if(t.workspaceMode==='direct')return true;
-    const r=t.id&&taskIntegrate.read(p.id,t.id),dir=chosenDir(p,t);
-    return Boolean(r&&!r.complete&&dir&&canonical(dir)===canonical(baseOf(p)));
-  };
-  const targetDirect = onBase(p,t);
-  if (!githubOperation) github.assertStart(githubProject(p), { ...t, workdir: chosenDir(p,t) });
-  const active = [...sessions.list().filter(s=>s.running), ...[...chats.running.keys()].map(k=>{const [project,task]=k.split('\u0000');return {project,task,chat:true};})];
-  if (!active.length) return;
-  const all = store.listProjects();
-  for (const a of active) {
-    if (p.kind==='freetalk' && t.id && a.project===p.id && a.task!==t.id) continue;
-    if (permitChat && a.chat && a.project===p.id && a.task===t.id) continue;
-    const q=all.find(x=>x.id===a.project), at=q?.tasks.find(x=>x.id===a.task); if(!q || !at)continue;
-    if(gptOperation && (a.project===p.id && a.task===t.id || chosenDir(q,at) && chosenDir(p,t) && canonical(chosenDir(q,at))===canonical(chosenDir(p,t))) || canonical(baseOf(q))===base && (targetDirect || onBase(q,at))) {
-      const e=Error(lt('同じ本体でAIが作業中です。本体での同時作業はできません'));e.status=409;throw e;
-    }
-  }
-}
+function assertWorkspaceIdle(p, t, permitChat, githubOperation = false, gptOwner, gptOperation = false) { return parallelEngine.assertWorkspaceIdle(p, t, permitChat, githubOperation, gptOwner, gptOperation); }
 function workDir(p, t) {
   if (p.kind === 'freetalk') { freetalk.verify(); return { dir: freetalk.dir }; }
   const wd = expandHome(t.workdir);
@@ -928,19 +663,11 @@ function tailscaleUrl() {
   });
   return tryAt(0).then(u => { tsCache = { at: Date.now(), url: u }; return u; });
 }
-// 別の AI に作業を渡す時の決まり（AI が裏で codex/claude を起動すると Hub に見えず、画面では終わったことになるため）
-const CHAT_DELEGATE_NOTE = lt('この委任APIは会話画面からだけ使えます。委任が「この作業のターミナルで AI が動いています」と断られた時だけ、人に次のように頼む：「この作業の作業画面で［ターミナル］に切り替え、動いている AI の欄の［停止］を押してから、もう一度この会話で頼んでください」。断られていない時は、ターミナルの停止や終了を人に頼まない。裏で別のCLIを起動したり、この依頼を繰り返し送ったりしないでください。');
+// User delegation guidance is supplied by the optional paid extension.
 const TERMINAL_LIMIT_NOTE = lt('ターミナルでもHubが確定上限または新鮮な100%を確認して共通フラグを保持し、元AIの終了を確認してから同じ作業を交代先へ引き継ぐ。自分で別のCLIを起動しない。人の停止では自動交代しない。');
 const TERMINAL_HANDOFF_NOTE = lt('あなたはターミナルで動いている。ここからは別の AI に委任できない。渡したい時は、渡す内容と指定モデルを作業ファイルに書いて返事を終える。人には「この作業の作業画面で［会話］に切り替えて、記録した依頼を送ってください」とだけ案内する。ターミナルを止める操作は頼まない（会話から送った依頼が断られた時に、会話側の AI が案内する）。');
 const DELEGATE_COMPLETED_ERROR = lt('この作業は完了済みのため委任できません。続ける場合は、人がこの作業の作業画面の上部の［再開する］を押してから依頼してください。新しい作業は作っていません');
-function delegateRule(p, t) {
-  const d = executionRoles();
-  const coding = roles.delegateSlot(d, 'コーディング');
-  let examples = ['チェック', '文章', '調査', 'デザイン'].map(name => { const s = roles.delegateSlot(d, name); return s ? lt`${name}は ai: ${s.ai}・model: ${s.model}` : lt`${name}は人が担当`; }).join('、');
-  if (roles.delegateSlot(d, 'チェック')?.model === 'claude-fable-5-1' && ['文章', '調査', 'デザイン'].every(name => roles.delegateSlot(d, name)?.ai === 'claude' && roles.delegateSlot(d, name)?.model === 'claude-opus-5-5')) examples = lt('チェックは ai: claude・model: claude-fable-5-1、文章・調査・デザインは claude-opus-5-5');
-  const ids = p && t ? `"project":"${p.id}","task":"${t.id}"` : lt('"project":"<プロジェクトID>","task":"<作業ID>"');
-  return lt`【別の AI に作業を渡す時】自分で codex / claude / agy / grok を裏で起動しない。${CHAT_DELEGATE_NOTE} 会話画面で渡す時は Hub を使う：curl -s -X POST http://127.0.0.1:${PORT}/api/delegate -H 'X-Hub: 1' -H 'Content-Type: application/json' -d '{${ids},"ai":"${coding?.ai || 'codex'}","model":"${coding?.model || 'gpt-6.1-sol'}","title":"短い名前","text":"頼む内容（必要な背景も）"}'。ai は codex / claude / agy / grok。model は依頼文の中だけでなく、この欄で必ず指定する（${examples}）。Hub は同じ作業の会話で担当 AI を切り替え、今の AI が動いている間は順番待ちにする。子作業は作らない。画面に順番待ち・作業中と出て、結果もこの会話に残る。相手に「実際のモデルを確かめて違えば止まれ」と書かない。モデルは model 欄で Hub が起動設定として保証する（実際のモデルの証明ではない）。モデル名を返させる時は「起動設定のモデル名」と頼む。上記の自動交代が有効な時は、Hub が保存した役割分担に従って引き継ぐので、自分で別のモデルへ委任し直さない。渡したらこの番を終えること。\n【プロジェクトや作業を増やさない】新しいプロジェクト・子プロジェクト・作業ファイル（.ai/tasks）を自分で作らない。分ける必要がある時は、人に提案して決めてもらう。やっていない手順に [x] を付けない。`;
-}
+function delegateRule(p,t) { return userDelegate?.policy?.(p,t) || ''; }
 // 人が決めた役割とモデル（roles.yaml）。AI が他のファイル（エージェントの設定など）の古い指定に従わないよう、毎回伝える
 function modelPolicy(p, t, where = 'chat', projects) {
   // startDir が保存したコピーの場所・手順なども、同じ台帳の最新値で渡す。
@@ -1357,86 +1084,8 @@ function verifyIntegrationReviewSend(o) {
   if(!head||head.status||head.head!==a.reviewHead||gitw.merging(r.target))throw Error('Integration review range changed');
   integrateAuto.verifySavedReview(r,a);
 }
-async function delegateRequest(b,res,{beforeStart,allowCompleted=false,resultsRecovery,resultsOrganize=false,preserveTaskState=false,isolatedReview=false,selectionOnly=false,review,requestKey,integrationAssignment,automation}={}) {
-    try { void license.prepare(); licenseGuard({ ...b, origin: 'delegate' }, 'accept'); }
-    catch (e) { return send(res, e.status || 403, { error: e.message, code: e.code, delivery: 'not-sent' }); }
-    if(b.automation&&!automation)return send(res,403,{error:'台帳の実行は保存されたHubの依頼だけを受け付けます'});
-    if(b.integrationAssignment&&!integrationAssignment)return send(res,409,{error:'統合の担当指定は正式な統合開始からだけ受け付けます'});
-    const p = store.readProject(b.project);
-    const file = p && store.taskFile(b.project, b.task);
-    const text = typeof b.text === 'string' ? b.text.trim() : '';
-    let ai = b.ai === 'claude-code' ? 'claude' : b.ai;
-    if (!p || !file || !launch.AIS.includes(ai)) return send(res, 400, { error: lt('project・task・ai（codex / claude / agy / grok）を確かめてください') });
-    if(discussion.active(p.id,b.task))return send(res,409,{error:'話し合いが進行中です。停止または完了後に渡してください'});
-    if (!text || text.length > 8000) return send(res, 400, { error: lt('text は1〜8000文字') });
-    if (aiTools.isOperating(ai)) return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です') });
-    const t = store.readTask(file);
-    const sizeNote = text.length > 1500 ? lt(' Hub が付ける内容を除き、差分だけにすると短くなります') : '';
-    const title = String(b.title || text.split('\n')[0]).trim().slice(0, 60) || lt('渡した作業');
-    if (t.state === '完了' && !allowCompleted) return send(res, 409, { error: DELEGATE_COMPLETED_ERROR });
-    // 委任先の役割は元の担当と異なることがある。親の role/model や CLI の既定へは戻さない。
-    const automatic = !b.model && specialMode.pick(modelView.special(), rolesData(), b.role || t.role);
-    if (automatic) ai = automatic.ai;
-    const role = b.role && rolesData().roles.find(r => r.name === b.role);
-    if (!integrationAssignment && b.role && (!role || (!modelView.special().enabled && !automatic && role.main.ai !== launch.AI_KEY[ai]))) return send(res, 400, { error: lt('role は指定した AI が主担当の役割を選んでください') });
-    const model = launch.modelLabel(ai, typeof b.model === 'string' && b.model.trim() ? b.model.trim() : automatic?.model || role?.main.model || '');
-    if (!model) return send(res, 400, { error: lt('model 又は role を明示してください。例：チェックは ai: claude・model: claude-fable-5-1、書込は ai: codex・model: gpt-6.1-sol。作業は増やしていません') });
-    const invalid = modelError(ai, model);
-    if (invalid) return send(res, 409, { error: invalid });
-    if (!launch.flagFor(ai, model)) return send(res, 409, { error: lt('委任には CLI に渡すモデル名が必要です。指定なしでは起動しません') });
-    const terminalError = delegateTerminalError(p.id, t.id);
-    if (terminalError) return send(res, 409, { error: terminalError });
-    const sourceTurn = chats.busy(p.id, t.id)?.userRow?.turn || null;
-    const busy = Boolean(chats.busy(p.id, t.id) || webchatActive(p.id, t.id));
-    let dir;
-    try { if(automation){dir=ideaDispatch.location(p.id,ideas.read(p.id).runs[automation.runId]).dir;assertWorkspaceIdle(p,t,busy);}else if(isolatedReview){assertWorkspaceIdle(p,t,busy);dir=isolatedReviewDir(p,t);}else if(!beforeStart && !webchatActive(p.id,t.id))({ dir } = startDir(p, t, busy)); } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
-    if (ai === 'grok' && b.effort === 'Ultra') return send(res, 400, { error: lt('Grok の思考は 中・高・極高・MAX です') });
-    const effort = integrationAssignment ? b.effort : ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : automatic?.effort || role?.main.effort || '';
-    const verifyReviewResults=()=>{
-      if(!review?.savedResults)return;
-      const r=taskIntegrate.read(p.id,t.id),a=r?.auto?.attempts[review.key],i=r?.items.find(i=>i.project===review.savedResults.project&&i.task===review.savedResults.task);
-      if(!a||a.phase!=='review'||a.delivery?.request!==requestKey||JSON.stringify(a.savedResults)!==JSON.stringify(review.savedResults))throw Error('Saved result review request changed');
-      taskIntegrate.simple.validate(r);require('./lib/integration-review-results').verify(review.savedResults,taskIntegrate,r,i);
-      if(a.evidenceRecovery)require('./lib/integration-review-results').verifyRecovery(a.evidenceRecovery,integrateAuto.savedCompletion(r,a.previousAttempt,'review'));
-    };
-    let evidence;
-    if(isolatedReview){try{verifyReviewResults();evidence=require('./lib/integration-review').prepare({dir,pdir:p.dir,task:t.id,...review});}catch(e){return send(res,409,{error:e.message});}}
-    const shown = automation?text:lt`【渡した依頼：${title}】\n${text}`+(evidence?`\n保存差分原物：${evidence.file}（SHA256 ${evidence.sha256}）。Readでintegration・child・resolution・history${review?.savedResults?'・saved-results・saved-commit・original（原文行範囲と全体SHA。省略範囲は元ファイルを読む）':''}を照合し、試験原物も読む。`:'');
-    const account = requestAccount(p, t.id, ai, b.account);
-    const request = { stopTicket:stopControl.ticket({project:p.id,task:t.id}), ...(automation?{automation,contextMode:'idea',freshContext:true,preserveTaskState:true,reviewKind:automation.purpose==='review'?'idea':undefined,readOnly:automation.readOnly,readDirs:[p.dir,dir],request:requestKey}:{}), ...(integrationAssignment?{integrationAssignment,limitPolicy:'hold'}:{}), ...(requestKey?{request:requestKey}:{}), ...(isolatedReview?{isolatedReview:true,integrationReviewRequest:requestKey,readOnly:true,readDirs:[p.dir]}:{}), ...(selectionOnly?{selectionOnly:true}:{}), origin: 'delegate', resultsOrganize, ai, account, model, effort, sourceTurn, role: b.role || '', requireModel: true, requiredModel: launch.flagFor(ai, model), shown, text: automation?text:shown + lt('\n\n新しい作業・子作業を作らず、この既存作業で依頼を行い、結果をこの会話へ返してください。'), perm: permCmd(ai) };
-    const enqueue = () => {
-      if(resultsOrganize)return send(res,409,{error:lt('別の依頼が作業中・順番待ちのため成果整理を開始していません')});
-      res.integrationDelivery?.begin();
-      const item = chats.enqueue(p.id, t.id, request);
-      record('delegate', { project: p.id, task: t.id, ai }, { title, model, effort, queued: true, id: item.id, sourceTurn, ...(requestKey?{request:requestKey}:{}) });
-      return send(res, 200, { ok: true, project: p.id, task: t.id, title, model, effort, queued: true, id: item.id, queue: chats.queue(p.id, t.id).length, note: (chats.busy(p.id, t.id) || webchatActive(p.id,t.id) ? lt('今の AI が終わったら、同じ作業で指定の AI が始まります。開始時に上限を確かめた時は保存した交代先で始めます。この番を終えてください') : lt('同じ作業の順番待ちに追加しました。画面の［始める］で再開できます')) + sizeNote });
-    };
-    if (busy || webchatActive(p.id,t.id) || chats.queue(p.id, t.id).length) return enqueue();
-    const basePrompt = automation?ideaDispatch.policy(ideas.read(p.id).runs[automation.runId]):selectionOnly?selectionPrompt(p):isolatedReview?integrationReviewPrompt(p,t):beforeStart?null:taskPrompt(p, t, file, dir) + lt(' 同じ作業で担当 AI から渡された依頼です。結果と残った課題をこの会話へ返してください。');
-    const onEnd = row => {
-      if (!preserveTaskState && row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || lt('選んでください') });
-      chatEnded(p.id, t.id);
-      record('delegateend', { project: p.id, task: t.id, ai: row.ai }, { title, model: row.model, error: Boolean(row.error) });
-    };
-    try {
-      const stopVersion = chats.stops.get(chats.key(p.id, t.id)) || 0;
-      await refreshLimitEvidence({ ...request, project: p.id, task: t.id });
-      verifyIntegrationAssignmentSend({...request,project:p.id,task:t.id});
-      if(integrationAssignment&&limitEvidence.active(account,launch.flagFor(ai,model)))throw Error('指定した統合担当が上限中です。担当を替えず解除まで待機します');
-      if(beforeStart){beforeStart();if(selectionOnly){assertWorkspaceIdle(p,t,false);dir=p.dir;}else ({dir}=startDir(p,t));if(resultsRecovery)request.resultsRecoveryHash=store.readTask(file).completionHash;}
-      if ((chats.stops.get(chats.key(p.id, t.id)) || 0) !== stopVersion) throw Error(lt('利用上限の確認中に停止されたため、委任を開始していません'));
-      const terminalError = delegateTerminalError(p.id, t.id);
-      if (terminalError) throw Error(terminalError);
-      // 状態要求を待つ間に他の依頼が始まった場合も同じ待ち順へ入れる。
-      if (chats.busy(p.id, t.id) || webchatActive(p.id,t.id) || chats.queue(p.id, t.id).length) return enqueue();
-      const prompt=basePrompt??taskPrompt(p,t,file,dir)+lt(' 同じ作業で担当 AI から渡された依頼です。結果と残った課題をこの会話へ返してください。');
-      const r = chats.send({ ...request, project: p.id, task: t.id, pdir: p.dir, dir, basePrompt:prompt, policy: automation?basePrompt:selectionOnly?selectionPrompt(p):modelPolicy(p, t), beforeSend:()=>{verifyReviewResults();res.integrationDelivery?.begin();}, onEnd });
-      if (!(await r.started)) throw Error(lt('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません'));
-      if(!preserveTaskState)store.updateTask(p.id, t.id, { state: '実行中', question: '' });
-      record('delegate', { project: p.id, task: t.id, ai: r.ai }, { title, ...(requestKey?{request:requestKey}:{}), model: r.model, effort: r.effort, queued: false, preflight: Boolean(r.limitSwitch?.preflight), sourceTurn, receivedTurn: r.userRow.turn });
-      return send(res, 200, { ok: true, project: p.id, task: t.id, title, ai: r.ai, model: r.model, effort: r.effort, queued: false, resume: r.resume, note: lt`${r.limitSwitch?.preflight ? lt`${r.limitSwitch.from} 上限保持中のため ${r.model} で開始しました。` : ''}同じ作業で ${launch.AI_LABEL[r.ai]}・${r.model} が作業中です。結果もこの会話へ届きます` + sizeNote });
-    } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
-}
+function delegateRequest(b,res,options={}) { return queueEngine.delegateRequest(b, res, options); }
+function userDelivery(b,res,options) { return queueEngine.userDelivery(b, res, options); }
 
 // 場所リンクの候補順は、Mac操作とブラウザ表示で共通にする。
 const placeRoots = () => [os.homedir(), ROOT].map(d => path.resolve(d));
@@ -1489,6 +1138,51 @@ function documentHtml(fd, info, size) {
 
 const stateOffers = new (require('./lib/state-offers').StateOffers)({transfer:taskTransfer,removal,baseOf});
 
+const routes = require('./lib/routes').createRoutes([
+  { name: 'queuecontrol', create: require('./lib/routes/queue-control'), ctx: { ROLES_FILE, chats, freetalkAttachments, fromRemote, fs, launch, limitIdentity, lt, modelError, permCmd, pickSpec, queueActions, queueEdit, queueEditable, getQueueRetreat: () => queueRetreat, record, requestAccount, roleHistory, getRoleReview: () => roleReview, roles, rolesData, send, store } },
+  { name: 'terminalstart', create: require('./lib/routes/terminal-start'), ctx: { DRY, accountFor, accounts, aiTools, codexFastFor, crypto, fs, gitSnapshot, launch, license, licenseGuard, limitBackup, limitEvidence, limitIdentity, lt, modelError, modelView, path, permCmd, pickSpec, record, refreshLimitEvidence, requestAccount, getRestartControl: () => restartControl, rolesData, saveTerminalPending, send, sessions, startDir, store, taskPrompt, terminalBusy, terminalPending, transcript } },
+  { name: 'chatsend', create: require('./lib/routes/chat-send'), ctx: { DELEGATE_COMPLETED_ERROR, assertWorkspaceIdle, chat, chatEnded, chats, getDiscussion: () => discussion, extensions, freetalk, freetalkAttachments, fs, holdStoppedQueue, getIdeaDispatch: () => ideaDispatch, ideas, integrationReviewPrompt, isolatedReviewDir, launch, license, licenseGuard, lt, modelError, modelPolicy, modelView, permCmd, pickSpec, queueActions, queueEdit, queueEditable, record, refreshLimitEvidence, removalReview, reqCtx, requestAccount, roles, rolesData, send, sessions, specialMode, start, startDir, stopControl, store, taskPrompt, verifyIntegrationReviewSend, getWebchat: () => webchat, webchatActive } },
+  { name: 'ideaimage', create: require('./lib/routes/idea-image-upload'), ctx: { send, ideas } },
+  { name: 'chatrecovery', create: require('./lib/routes/chat-recovery'), ctx: { send, chats, store } },
+  { name: 'terminalio', create: require('./lib/routes/terminal-io'), ctx: { send, lt, sessions, setUnread, launch, modelError, store, pickSpec, limitIdentity, rolesData, record } },
+  { name: 'localfiles', create: require('./lib/routes/local-files'), ctx: { send, lt, resolvePlace, viewInfo, fs, documentHtml, fromRemote, record, store, expandHome, denied, launch, DRY, path, platform } },
+  { name: 'mcpsettings', create: require('./lib/routes/mcp-settings'), ctx: { send, lt, gpt, readBody, freetalkHistory, codexMcpStatus, codexMcpRegister, record } },
+  { name: 'rolesettings', create: require('./lib/routes/role-settings'), ctx: { send, lt, roleHistory, ROLES_FILE, roles } },
+  { name: 'taskmanagement', create: require('./lib/routes/task-management'), ctx: { send, lt, store, fs, acceleration, chat, record, webchatActive, sessions, chats, emptyLib, removal } },
+  { name: 'taskattachments', create: require('./lib/routes/task-attachments'), ctx: { send, lt, store, taskHistory, freetalk, freetalkAttachments, readRaw, MAX_UPLOAD, record, saveUpload, launch, sessions, path, fs } },
+  { name: 'taskintegration', create: require('./lib/routes/task-integration'), ctx: { send, lt, store, inWork, copyMissing, expandHome, gitw, mainMergeDelivery, getMainMergeFlow: () => mainMergeFlow, workRoot, mainMergeTokens, crypto, integrationBlockers, HUB_INSTANCE, lastMerge, record, taskIntegrate, launch, sessions, taskTransfer, setUnread, integrationFailure, integrationAbandon, integrateAuto, pruneUnread, resultsGate, executionRoles, delegateRequest } },
+  { name: 'taskbodywrite', create: require('./lib/routes/task-body-write'), ctx: { send, textBudget, record } },
+  { name: 'taskcontinuation', create: require('./lib/routes/task-continuation'), ctx: { send, taskHistory, textBudget, autoTick, record } },
+  { name: 'taskhistorywrite', create: require('./lib/routes/task-history-write'), ctx: { send, lt, taskHistory, autoTick, autoView, rolesData, delegateRequest } },
+  { name: 'phase', create: require('./lib/routes/phase'), ctx: { send, lt, store, sessions, chats, record } },
+  { name: 'taskcopy', create: require('./lib/routes/task-copy-record'), ctx: { send, lt, store, copyMissing, lastMerge, record, inWork } },
+  { name: 'taskprogress', create: require('./lib/routes/task-progress'), ctx: { send, lt, getDiscussion: () => discussion, webchatActive, chats, launch, sessions, resultsGate, store, record, reportChild, handoff } },
+  { name: 'chatnote', create: require('./lib/routes/chat-note'), ctx: { send, lt, store, freetalk, chat, chats } },
+  { name: 'tasksettings', create: require('./lib/routes/task-settings'), ctx: { send, lt, store, fromRemote, record, chats, sessions, setUnread } },
+  { name: 'taskread', create: require('./lib/routes/task-read'), ctx: { send, lt, store, stepSummary, inWork, gitw, expandHome, workRoot, taskIntegrate } },
+  { name: 'taskbody', create: require('./lib/routes/task-body-read'), ctx: { send, lt, textBudget, path, store, fs } },
+  { name: 'taskhistory', create: require('./lib/routes/task-history-read'), ctx: { send, taskHistory, autoView } },
+  { name: 'chatread', create: require('./lib/routes/chat-read'), ctx: { send, lt, store, setUnread, taskHistory, ideaRows, chat, chats, getWebchat: () => webchat, freetalkHistory } },
+  { name: 'freetalk', create: require('./lib/routes/freetalk'), ctx: { send, lt, freetalkHistory, freetalkAttachments, freetalk, specialMode, modelView, rolesData, freetalkLifecycle, chats, setUnread, cleanFreetalkMemory, startAutomaticFreetalk, delegateRequest } },
+  { name: 'project', create: require('./lib/routes/project'), ctx: { send, projectNotes, store, expandHome, github, githubProject, fs, path, gitw, lt, handoff, sessions, chats, record, reportChild, activePack, __dirname } },
+  { name: 'start', create: require('./lib/routes/start'), ctx: { store, start, send, fs, lt, readRaw, quickStart: (...args) => quickStart(...args) } },
+  { name: 'state', create: require('./lib/routes/state'), ctx: { gitw, __dirname, pruneUnread, getDiscussion: () => discussion, rolesData, modelView, stepSummary, chats, restartBlockers, extensions, stopControl, ROOT, HUB_INSTANCE, VERSION, readVersion, BOOT_HEAD, license, appUpdate, appShell, freetalkStatus, onboarding, aiUpdates, aiTools, updateBusy, getRestartControl: () => restartControl, bodyNoticeState, github, accounts, store, projectOrder, taskTransfer, stateOffers, taskIntegrate, launch, handoff, baseOf, githubProject, start, workRoot, copyMissing, chat, path, expandHome, fs, resultsGate, freetalkHistory, inWork, getWebchat: () => webchat, sessions, modelError, roles, unread, procwatch, acceleration, remote, gpt, crypto, fromRemote, getUpdateRestoreReady: () => updateRestoreReady, record, sendEncoded, lt } },
+  { name: 'acceleration', create: require('./lib/routes/acceleration'), ctx: { send, acceleration, record } },
+  { name: 'modelsettings', create: require('./lib/routes/model-settings'), ctx: { send, saveCliModels, record, launch, modelView, rolesData, modelError, roles, ROLES_FILE, lt } },
+  { name: 'limits', create: require('./lib/routes/limits'), ctx: { send, usageSelection, accounts, usage, limitEvidence, record, usageWithLimit, lt, limitModels, getDiscussion: () => discussion } },
+  { name: 'aiupdate', create: require('./lib/routes/ai-update'), ctx: { send, aiUpdates, applyModelCatalog, record, lt } },
+  { name: 'hierarchy', create: require('./lib/routes/hierarchy'), ctx: { send, removal, removalReview, ideas, crypto, pruneUnread, record, projectOrder, store, sessions, chats } },
+  { name: 'accounts', create: require('./lib/routes/accounts'), ctx: { send, accounts, launch, usage, aiTools, applyModelCatalog, lt, sessions, store, chat, DRY, limitEvidence, record } },
+  { name: 'modelinfo', create: require('./lib/routes/model-info'), ctx: { send, aiUpdates, applyModelCatalog, listSkills, accounts, rolesData, launch, cliModelHints, acceleration } },
+  { name: 'information', create: require('./lib/routes/information'), ctx: { send, procwatch, VERSION, readVersion, changelog, sessions, readLog } },
+  { name: 'remote', create: require('./lib/routes/remote'), ctx: { send, remote, tailscaleUrl, record } },
+  { name: 'usage', create: require('./lib/routes/usage'), ctx: { send, usage, usageSelection, usageWithLimit, accounts, PORT, lt } },
+  { name: 'onboarding', create: require('./lib/routes/onboarding'), ctx: { send, onboarding, lt } },
+  { name: 'maintenance', create: require('./lib/routes/maintenance'), ctx: { send, maintenance, problemResolution, executionGate, baseOf, store, record, lt } },
+  { name: 'github', create: require('./lib/routes/github'), ctx: { send, github, store, githubProject, record, lt } },
+  { name: 'language', create: require('./lib/routes/language'), ctx: { send, localeConfig, fromRemote, allowed, langpacks, ROOT, VERSION, readBody } },
+]);
+
 async function api(req, res, url) {
   const mutation = req.method === 'POST' && !['/api/restart','/api/restart/cancel','/api/quit'].includes(url.pathname);
   // GETの利用枠取得も、非同期取得後に上限記録を保存するまで再起動を待たせる。
@@ -1499,13 +1193,7 @@ async function api(req, res, url) {
   try { return await reqCtx.run({...reqCtx.getStore(),stopSnapshot:structuredClone(stopControl.data)},()=>apiRequest(req,res,url)); } finally { if (active) activeRequests--; }
 }
 async function apiRequest(req, res, url) {
-  if (req.method === 'GET' && url.pathname === '/api/chat/queue/draft') {
-    const p = store.readProject(url.searchParams.get('project')), task = url.searchParams.get('task');
-    const item = p && store.taskFile(p.id, task) && chats.queue(p.id, task).find(x => x.id === url.searchParams.get('id'));
-    if (!item) return send(res, 404, { error: 'その指示はもう待っていません' });
-    if (!queueEditable(item)) return send(res, 409, { error: 'この待ち指示は編集できません' });
-    return send(res, 200, { draft: queueEdit.draft(p, task, item, freetalkAttachments), expectedItem: JSON.stringify(item) });
-  }
+  if (routes.queuecontrol.draft.matches(req, url)) return routes.queuecontrol.draft.handle(req, res, url);
   if(req.method==='GET'&&url.pathname==='/api/ai/stop/status')return send(res,200,{...stopControl.view(),targets:emergencyStop.targets()});
   if(req.method==='POST'&&['/api/ai/stop','/api/ai/resume','/api/chat/stop','/api/term/stop'].includes(url.pathname)){
     let b;try{b=await readBody(req);if(!b||typeof b!=='object'||Array.isArray(b))throw Error('形式が違います');}catch(e){return send(res,400,{error:e.message});}
@@ -1521,25 +1209,13 @@ async function apiRequest(req, res, url) {
   }
 
   if (fromRemote() && ['/api/langpacks', '/api/langpacks/import', '/api/langpacks/remove', '/api/language'].includes(url.pathname)) return send(res, 403, { error: 'forbidden' });
-  if(req.method==='GET'&&url.pathname==='/api/task/continue/status'){
-    if(req.headers['x-hub']!=='1')return send(res,403,{error:'forbidden'});
-    try{return send(res,200,taskHistory.continueStatus(url.searchParams.get('project'),url.searchParams.get('task'),url.searchParams.get('requestId')));}catch(e){return send(res,409,{error:e.message});}
-  }
-  if(req.method==='GET'&&url.pathname.startsWith('/api/task/history/')){
-    if(req.headers['x-hub']!=='1')return send(res,403,{error:'forbidden'});
-    const project=url.searchParams.get('project'),task=url.searchParams.get('task');
-    try{if(url.pathname.endsWith('/status'))return send(res,200,{...taskHistory.status(project,task),...(url.searchParams.get('selection')==='0'?{}:{selection:taskHistory.selectionPreview(project,task)})});
-      if(url.pathname.endsWith('/auto'))return send(res,200,autoView(project,task));
-      if(url.pathname.endsWith('/archives'))return send(res,200,{archives:taskHistory.archives(project,task)});
-      if(url.pathname.endsWith('/archive'))return send(res,200,taskHistory.archive(project,task,url.searchParams.get('archiveId'),url.searchParams.get('offset')));
-    }catch(e){return send(res,409,{error:e.message});}
-    return send(res,404,{error:'not found'});
-  }
+  if (routes.taskhistory.continuation.matches(req, url)) return routes.taskhistory.continuation.handle(req, res, url);
+  if (routes.taskhistory.history.matches(req, url)) return routes.taskhistory.history.handle(req, res, url);
 
   // Preview, start and resume report the same blockers without mutating while waiting.
   const integrationWaitingRoute=['/api/task/integrate/preview','/api/task/integrate/resume','/api/task/integrate','/api/task/absorb'].includes(url.pathname);
   if (req.method === 'POST' && appShell.rebuilding && !integrationWaitingRoute && !['/api/restart','/api/restart/cancel'].includes(url.pathname)) return send(res, 409, { error: lt('アプリを作り直しています') });
-  if(req.method==='GET' && url.pathname==='/api/locale')return send(res,200,localeConfig());
+  if (routes.language.locale.matches(req, url)) return routes.language.locale.handle(req, res, url);
   if (req.method === 'GET' && url.pathname === '/api/app-update') return send(res, 200, appUpdate.status());
   if (req.method === 'POST' && ['/api/app-update', '/api/app-update/check'].includes(url.pathname)) {
     if (fromRemote()) return send(res, 403, { error: 'forbidden' });
@@ -1554,19 +1230,7 @@ async function apiRequest(req, res, url) {
     try { return send(res, 200, await appUpdate.settings(body.enabled)); } catch (error) { return send(res, 400, { error: error.message }); }
   }
   if (req.method === 'POST' && appUpdate.applying() && !integrationWaitingRoute && !(['/api/restart','/api/restart/cancel'].includes(url.pathname)) && !(['/api/quit'].includes(url.pathname) && appUpdate.status().phase === 'installed')) return send(res, 409, { error: appUpdate.busyMessage() });
-  if (['/api/langpacks', '/api/langpacks/import', '/api/langpacks/remove', '/api/language'].includes(url.pathname)) {
-    if (fromRemote() || !allowed(req)) return send(res, 403, { error: 'forbidden' });
-    if (req.method === 'GET' && url.pathname === '/api/langpacks') return send(res, 200, langpacks.packSettings(ROOT, VERSION));
-    if (req.method !== 'POST' || url.pathname === '/api/langpacks') return send(res, 405, { error: 'method' });
-    try {
-      const body = await readBody(req);
-      if (!body || typeof body !== 'object' || Array.isArray(body)) throw Error('形式が違います');
-      if (url.pathname === '/api/langpacks/import') langpacks.importPack(ROOT, body.dir);
-      else if (url.pathname === '/api/langpacks/remove') langpacks.removePack(ROOT, body.id);
-      else langpacks.selectLanguage(ROOT, body.language);
-      return send(res, 200, langpacks.packSettings(ROOT, VERSION));
-    } catch (error) { return send(res, 400, { error: error.message }); }
-  }
+  if (routes.language.packs.matches(req, url)) return routes.language.packs.handle(req, res, url);
   // SSE・添付などJSON共通guardより前の経路も、別表記で別セッションを作らない。
   if (freetalkLib.hasTarget(Object.fromEntries(url.searchParams), true)) { req.resume(); return send(res, 409, { error: lt('freetalk は正規の名前「freetalk」で指定してください') }); }
   // 本体が台帳のフォルダ（書類フォルダの中）を読めるか。Mac の許可が本体に効いているかをアプリが確かめる
@@ -1576,434 +1240,91 @@ async function apiRequest(req, res, url) {
   }
   // 一覧
   // 生きているかだけ答える（ファイルを読まないので、台帳が大きくても・iCloud が遅くてもすぐ返る）
-  if(req.method==='GET' && url.pathname==='/api/chat/queue/retreat') {
-    try { if(req.headers['x-hub']!=='1')return send(res,403,{error:'接続を確認してください'});return send(res,200,queueRetreat.receipt(Object.fromEntries(url.searchParams))); }
-    catch(e){return send(res,e.status||503,{error:e.message,code:e.code});}
-  }
+  if (routes.queuecontrol.receipt.matches(req, url)) return routes.queuecontrol.receipt.handle(req, res, url);
   if(req.method==='GET' && (url.pathname==='/api/ideas' || url.pathname.startsWith('/api/ideas/'))) return ideaAPI.handle(req,res,url,null,send);
   if (req.method === 'GET' && url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, pid: process.pid, runtimePath: __dirname, instance: HUB_INSTANCE, restored: updateRestoreReady, updateConfirm: process.env.HUB_UPDATE_CONFIRM || '' });
-  if (req.method === 'GET' && url.pathname === '/api/roles/history') {
-    const current = roleHistory.load(ROLES_FILE);
-    return send(res,200,{...roleHistory.summary(current),history:current.journal.history,defaults:current.journal.defaults});
-  }
-  if (req.method === 'GET' && url.pathname === '/api/task/integrate/wait') return send(res,200,{waiting:integrateAuto.waiting(Object.fromEntries(url.searchParams))});
+  if (routes.rolesettings.history.matches(req, url)) return routes.rolesettings.history.handle(req, res, url);
+  if (routes.taskintegration.wait.matches(req, url)) return routes.taskintegration.wait.handle(req, res, url);
   if (req.method === 'GET' && url.pathname === '/api/discussion') return extensions.route('discussion',req,res,url,null,send);
-  if (req.method === 'GET' && url.pathname === '/api/state') {
-    const t0 = Date.now();
-    res.on('finish', () => { const ms = Date.now() - t0; if (ms > 2000) console.log(lt`[遅い] 一覧を作るのに ${ms}ms かかりました（台帳のファイルの読み込みが遅い可能性）`); });
-    const savedHead = gitw.savedHeadAsync(__dirname);
-    pruneUnread(); // Keep notification writes outside the display read scope.
-    const state = require('./lib/state-read').run(() => {
-    const discussionSessions = discussion?.read().sessions || {};
-    const roleData = rolesData(), modelSettings = modelView.read(), initialPick = modelView.initial(modelSettings);
-    // 画面で使う物だけ送る：作業の「やったこと」「注意」「メモ」の本文は送らず、「次にやること」は1行目だけ（1MB → 数百KB）
-    const slim = t => { const { done, note, memo, next, steps, ...rest } = t; return { ...rest, stepSummary: stepSummary(steps), next: String(next || '').split('\n')[0] }; };
-    // Share only within this synchronous read. Action paths omit these arguments
-    // and still validate current receipts before sending, starting or restarting.
-    const handoffErrors = chats.handoffErrors({display:true}), restartWaiting = restartBlockers(handoffErrors);
-    return {
-      extensions:extensions.state(), stopControl:stopControl.view(), root: ROOT, hubInstance: HUB_INSTANCE, roles: roleData, version: VERSION, latest: readVersion(), runtime:{version:VERSION,bootHead:BOOT_HEAD}, saved:{version:readVersion(),mainHead:null}, license: license.status(), appUpdate: appUpdate.status(), appShell: appShell.status(req.headers['user-agent']), freetalk: freetalkStatus(),
-      onboarding: onboarding.state(),
-      aiCliUpdate: { available: Object.values(aiUpdates.status().tools).some(t => t.eligible && t.installed && t.updateCheck?.ok && t.updateCheck.available === true && t.updateCheck.applicable === true), busyCount: aiTools.busy() },
-      updateBlocked: Boolean(updateBusy(handoffErrors)), restart: restartControl.status(restartWaiting), restartBusy:restartWaiting.length>0, restartWaiting, chatHandoffErrors:handoffErrors,
-      bodyNotices:bodyNoticeState(),
-      github: github.summary(), accounts: accounts.list(),
-      completionWarning: store.completion.warning, projectOrder: projectOrder.read(), projectPins: projectOrder.readPins(),
-      taskHandoffs: taskTransfer.pending(),
-      taskOffers: stateOffers.view(store.listProjects()), taskIntegrations: taskIntegrate.pending(),
-      cliFlags: Object.fromEntries(launch.AIS.map(ai => [ai, Object.fromEntries((roleData.models[launch.AI_KEY[ai]] || []).map(m => [m, launch.flagFor(ai, m)]))])),
-      // github：origin の場所と今のブランチ（120秒覚えておく）。作業は作業用コピーがある物だけ（ブランチが別のため）
-      projects: (all => { const kids = handoff.childCounts(all); return all.map(p => {
-        const base = baseOf(p);
-        const {notes,...summary}=p;
-        const githubRemote = github.projectRemote(githubProject(p));
-        return { ...summary, children: kids[p.id], startSpec: start.lastSpec(p), copies: gitw.countCopies(workRoot(p)), githubHasOrigin: githubRemote.hasOrigin, github: githubRemote.value, githubTargetError: githubRemote.error || '', tasks: p.tasks.map(t => {
-          const missing = copyMissing(p, t);
-          const meta = chat.readMeta(p.dir, t.id);
-          const queue = chats.queue(p.id, t.id);
-          const githubFolder = t.workdir && !missing ? path.join(expandHome(t.workdir), githubRemote.target || '.') : '';
-          const taskGithub = githubFolder && (githubRemote.target === '.' || fs.existsSync(path.join(githubFolder, '.git'))) ? gitw.remoteSummary(githubFolder).value : null;
-          return { ...slim(resultsGate.decorate(p,t,all,{issue:stateOffers.issue(p,t)})), discussion: (()=>{const d=discussionSessions[JSON.stringify([p.id,t.id])];return d?{id:d.id,status:d.status}:null;})(), chatQueueCount: queue.length, chatQueueHeld: queue.some(q => Boolean(q?.stopHeld)), chatQueueBlocked: queue.some(q => !q || typeof q !== 'object' || Array.isArray(q) || Boolean(q.stopHeld || q.error || q.limitWaiting)), ...(p.kind === 'freetalk' ? { freetalkHistory: (()=>{try{return freetalkHistory.status(t.id);}catch(e){return {reason:e.message};}})() } : {}), accounts: meta.accounts || {}, codexFast: meta.codexFast === true, copy: inWork(p, t) && !missing, copyMissing: missing, webchatReason: (()=>{try{webchat.availability(p,t,undefined,handoffErrors);return '';}catch(e){return /^webchat_[a-z_]+$/.test(e.message)?e.message:'webchat_task_busy';}})(), ...(t.workdir && !missing ? { github: taskGithub } : {}) };
-        }) };
-      }); })(store.listProjects()),
-      sessions: sessions.list(), terminal: sessions.available(),
-      chatting: [...chats.running.entries()].map(([k, r]) => { const [project, task] = k.split('\u0000'); return { project, task, ai: r.ai, model: r.model }; }),
-      specialMode: modelView.special(modelSettings),
-      initialPick, initialPickError: modelError(initialPick.ai, initialPick.model),
-      efforts: roles.EFFORTS, hiddenModels: modelView.hidden(modelSettings), modelOrder: modelView.saved(modelSettings), phoneLabels: modelView.phone(modelSettings),
-      unread: [...unread].map(k => { const [project, task] = k.split('\u0000'); return { project, task }; }),
-      background: procwatch.list().filter(x => x.project),
-      acceleration: acceleration.settings(), remote: { enabled: remote.enabled() }, chatgpt: gpt.settings(), webchat: webchat.view(), hubDir: __dirname,
-      grokAvailable: Boolean(aiTools.find('grok') && aiTools.catalog().grok.models.length),
-      agyAvailable: Boolean(aiTools.find('agy') && aiTools.catalog().agy.models.length && !['failed','auth-required'].includes(aiTools.catalog().agy.state) && !launch.agyAccountError()),
-      agyModels: aiTools.catalog().agy.models, agyModelsState: aiTools.catalog().agy.state || 'unconfirmed',
-      agyModelError: aiTools.catalog().agy.error || '',
-    };
-    });
-    state.saved.mainHead = await savedHead || null;
-    // 変わっていなければ中身を送らない（304）。画面は15秒ごとに聞いてくるので、何も変わらない時はほぼ空の返事で済む
-    // 止まっている秒数（quiet）は毎秒変わるので印には入れない（画面は別に /api/sessions で取る）
-    const body = JSON.stringify(state);
-    const tagBody = state.sessions.length ? JSON.stringify({ ...state, sessions: state.sessions.map(({ quiet, ...x }) => x) }) : body;
-    // Identity/gzip (and quiet-only updates) share a semantic, weak validator.
-    const tag = `W/"${crypto.createHash('sha1').update(tagBody).digest('hex').slice(0, 20)}"`;
-    if (req.headers['if-none-match'] === tag) { res.writeHead(304, { ETag: tag, 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' }); return res.end(); }
-    // Only a complete, successful local state response proves the new backend
-    // is healthy. Error/304 responses and a closed stream leave recovery pending.
-    if (!fromRemote() && appUpdate.healthy) res.once('finish', () => {
-      if (res.statusCode !== 200 || !res.writableFinished || req.aborted) return;
-      void appUpdate.healthy({ version: VERSION, hubPath: __dirname, token: process.env.HUB_UPDATE_CONFIRM, restored: updateRestoreReady, instance: HUB_INSTANCE }).catch(e => record('app-update-confirm-error', {}, { error: e.message }));
-    });
-    return sendEncoded(req, res, body, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ETag: tag });
-  }
+  if (routes.state.read.matches(req, url)) return routes.state.read.handle(req, res, url);
   // Full steps are fetched only for the open task. Reading never marks it read.
-  if (req.method === 'GET' && url.pathname === '/api/task/steps') {
-    const p=store.readProject(url.searchParams.get('project')),t=p?.tasks.find(t=>t.id===url.searchParams.get('task'));
-    return t ? send(res,200,{steps:t.steps,version:stepSummary(t.steps).version}) : send(res,404,{error:lt('作業が見つかりません')});
-  }
+  if (routes.taskread.steps.matches(req, url)) return routes.taskread.steps.handle(req, res, url);
   // 裏で動いている AI の全部（どのプロジェクトにも当たらない物も含む）
-  if (req.method === 'GET' && url.pathname === '/api/background') return send(res, 200, { items: procwatch.list() });
-  if (req.method === 'GET' && url.pathname === '/api/ai-tools') {
-    const status = aiUpdates.status();
-    applyModelCatalog();
-    return send(res, 200, status);
-  }
-  if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, listSkills({ accounts, fresh: url.searchParams.get('fresh') === '1' }));
-  if (req.method === 'GET' && url.pathname === '/api/accounts') {
-    if (url.searchParams.get('status') === '1' && req.headers['x-hub'] !== '1') return send(res, 403, { error: 'forbidden' });
-    const filterAi = url.searchParams.get('ai');
-    if (filterAi && !launch.AIS.includes(filterAi)) return send(res, 400, { error: 'invalid ai' });
-    const rows = accounts.list().filter(row => !filterAi || row.ai === filterAi);
-    const checked = url.searchParams.get('status') === '1' ? await Promise.all(rows.map(async r => {
-      const status = await accounts.status(r.ai, r.id); usage.loginChecked(r.ai, r.id, status.status);
-      if (r.ai === 'agy') {
-        try {
-          if (status.modelObservation) aiTools.saveCatalog('agy', status.modelObservation);
-          else if (status.modelsState === 'failed') aiTools.modelFailure('agy', status.message);
-          applyModelCatalog();
-        } catch { return { ...r, ...status, message: lt('モデル一覧を保存できませんでした。再取得してください') }; }
-      }
-      return { ...r, ...status };
-    })) : rows;
-    return send(res, 200, { accounts: checked, ...(url.searchParams.get('status') === '1' ? {
-      agyCatalog: { ...aiTools.catalog().agy, available: Boolean(aiTools.find('agy') && aiTools.catalog().agy.models.length && !['failed','auth-required'].includes(aiTools.catalog().agy.state) && !launch.agyAccountError()) },
-    } : {}) });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/usage') {
-    const origin = req.headers.origin;
-    if (req.headers['x-hub'] !== '1' || origin && ![`http://127.0.0.1:${PORT}`,`http://localhost:${PORT}`].includes(origin)) return send(res,403,{ error:'forbidden' });
-    return send(res, 200, usageWithLimit(await usage.status(false, usageSelection(url))));
-  }
+  if (routes.information.background.matches(req, url)) return routes.information.background.handle(req, res, url);
+  if (routes.modelinfo.tools.matches(req, url)) return routes.modelinfo.tools.handle(req, res, url);
+  if (routes.modelinfo.skills.matches(req, url)) return routes.modelinfo.skills.handle(req, res, url);
+  if (routes.accounts.read.matches(req, url)) return routes.accounts.read.handle(req, res, url);
+  if (routes.usage.read.matches(req, url)) return routes.usage.read.handle(req, res, url);
 
 
   // 会話画面：今までの会話と、書いている途中の返事を流す
-  if (req.method === 'GET' && url.pathname === '/api/chat/stream') {
-    const project = url.searchParams.get('project'), task = url.searchParams.get('task');
-    const p = store.readProject(project);
-    if (!p || !store.taskFile(project, task)) return send(res, 404, { error: lt('作業が見つかりません') });
-    setUnread(project, task, false); // 開いたので読んだことにする
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-    const emit = ev => {
-      if(p.kind!=='freetalk') {
-        const generation=taskHistory.state(project,task).generation;
-        if(ev.type==='rows')ev={...ev,rows:ideaRows(ev.rows,generation)};
-        else if(ev.type==='row' && ['user','assistant'].includes(ev.row.role)) {
-          const rows=ideaRows(chat.read(p.dir,task),generation),found=rows.findLast(r=>r.role===ev.row.role&&r.text===ev.row.text&&r.at===ev.row.at);
-          ev={...ev,row:found||ev.row};
-        }
-      }
-      res.write(`data: ${JSON.stringify(ev)}\n\n`);
-    };
-    const run = chats.busy(project, task);
-    const wc = webchat.busy().find(j=>j.project===project&&j.task===task);
-    emit({ type: 'rows', generation:p.kind==='freetalk'?freetalkHistory.state(task).generation:taskHistory.state(project,task).generation, rows: chat.read(p.dir, task), busy: run ? { ai: run.ai, model: run.model, text: run.texts.join(['agy', 'grok'].includes(run.ai) ? '' : '\n\n'), started: run.started, last: run.last } : wc ? {ai:'chatgpt',model:wc.model,started:Date.parse(wc.at),text:'',webchat:true} : null, queue: chats.queue(project, task) });
-    const off = chats.watch(project, task, emit);
-    const ping = setInterval(() => res.write(': ping\n\n'), 20000);
-    req.on('close', () => { off(); clearInterval(ping); });
-    return undefined;
-  }
-  if (req.method === 'GET' && url.pathname === '/api/cli-models') {
-    const m = rolesData().models;
-    const rows = ai => (m[launch.AI_KEY[ai]] || []).map(name => ({ name, flag: launch.flagFor(ai, name), set: Object.prototype.hasOwnProperty.call(launch.getOverrides()[ai] || {}, name) }));
-    return send(res, 200, { claude: rows('claude'), codex: rows('codex'), agy: rows('agy'), grok: rows('grok'), hints: cliModelHints(), acceleration: acceleration.settings() });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/acceleration') return send(res, 200, acceleration.settings());
+  if (routes.chatread.stream.matches(req, url)) return routes.chatread.stream.handle(req, res, url);
+  if (routes.modelinfo.models.matches(req, url)) return routes.modelinfo.models.handle(req, res, url);
   if (/^\/api\/chatgpt\/plan(?:\/|$)/.test(url.pathname)) {
     if (req.headers['x-hub'] !== '1') return send(res, 403, { error: 'forbidden' });
     return send(res, 410, { error: chat.CHATGPT_RETIRED });
   }
   // ChatGPT の道具（mcp.js から）。X-Hub の印がある物だけ
-  if (url.pathname.startsWith('/api/mcp/')) {
-    if (req.headers['x-hub'] !== '1') return send(res, 403, { error: 'forbidden' });
-    if (['/api/mcp/http','/api/mcp/rpc'].includes(url.pathname)) return send(res,410,{error:'Dot event adapter retired'});
-    if (req.method === 'GET' && url.pathname === '/api/mcp/tools') return send(res, 200, { tools: gpt.tools(), work: gpt.settings().work });
-    if (req.method === 'POST' && url.pathname === '/api/mcp/call') {
-      const b = await readBody(req);
-      try { if(b.arguments?.project==='freetalk' && b.arguments.task && !['hub_get_task','hub_get_chat','hub_read_file','hub_list_tasks'].includes(b.name) && freetalkHistory.state(b.arguments.task).migrated)return send(res,409,{error:lt('移行済みの話題は読み取り専用です')}); const r = await gpt.call(String(b.name || ''), b.arguments && typeof b.arguments === 'object' ? b.arguments : {}); return send(res, 200, { text: typeof r === 'string' ? r : JSON.stringify(r, null, 2) }); }
-      catch (e) { return send(res, e.status || 500, { error: String(e.message || e), unknown: e.status === 404 && e.unknown === true }); }
-    }
-    return send(res, 404, { error: 'not found' });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/github') return send(res, 200, { ...await github.status({ fresh: url.searchParams.get('fresh') === '1' }), settings: github.settings() });
-  if (req.method === 'GET' && url.pathname === '/api/webchat') return send(res, 200, webchat.view());
-  if (req.method === 'GET' && url.pathname === '/api/chatgpt') return send(res, 200, { ...gpt.settings(), ...codexMcpStatus() });
+  if (routes.mcpsettings.tools.matches(req, url)) return routes.mcpsettings.tools.handle(req, res, url);
+  if (routes.github.read.matches(req, url)) return routes.github.read.handle(req, res, url);
+  if (req.method === 'GET' && url.pathname === '/api/webchat') return extensions.route('webchat',req,res,url,null,send);
+  if (routes.mcpsettings.read.matches(req, url)) return routes.mcpsettings.read.handle(req, res, url);
   // 外から使う（iPhone）の設定
-  if (req.method === 'GET' && url.pathname === '/api/remote') { const st = remote.status(); return (st.url ? Promise.resolve(st.url) : tailscaleUrl()).then(u => send(res, 200, { ...st, url: u })); }
-  if (req.method === 'GET' && url.pathname === '/api/version') return send(res, 200, { version: VERSION, latest: readVersion() });
-  if (req.method === 'GET' && url.pathname === '/api/changelog') return send(res, 200, changelog(12));
-  if (req.method === 'GET' && url.pathname === '/api/sessions') return send(res, 200, sessions.list());
-  if (req.method === 'GET' && url.pathname === '/api/log') return send(res, 200, readLog(Math.min(200, Number(url.searchParams.get('n')) || 50)));
+  if (routes.remote.read.matches(req, url)) return routes.remote.read.handle(req, res, url);
+  if (routes.information.read.matches(req, url)) return routes.information.read.handle(req, res, url);
   // 取り込む前の見通し（変更の量・ぶつかりそうか）
-  if (req.method === 'GET' && url.pathname === '/api/task/preview') {
-    const p = store.readProject(url.searchParams.get('project'));
-    const file = p && store.taskFile(p.id, url.searchParams.get('task'));
-    if (!file) return send(res, 400, { error: lt('作業が見つかりません') });
-    const t = store.readTask(file);
-    if (!inWork(p, t)) return send(res, 200, null);
-    let r = null;
-    try { r = gitw.preview({ dir: expandHome(t.workdir), workRoot: workRoot(p), targetGuard:d=>require('./lib/integration-writes').inspect(gitw,d) }); } catch (e) { r = null; }
-    if(r)r.mainDisplay=taskIntegrate.mainDisplay(p.id,t.id);
-    return send(res, 200, r);
-  }
-  if(req.method==='GET'&&url.pathname==='/api/task/body/preview'){
-    if(req.headers['x-hub']!=='1')return send(res,403,{error:'forbidden'});
-    try{return send(res,200,textBudget.preview(url.searchParams.get('project'),url.searchParams.get('task'),url.searchParams.get('request')));}catch(e){return send(res,409,{error:e.message});}
-  }
+  if (routes.taskread.preview.matches(req, url)) return routes.taskread.preview.handle(req, res, url);
+  if (routes.taskbody.preview.matches(req, url)) return routes.taskbody.preview.handle(req, res, url);
   // 保管した本文の原文は読むだけ。保管先の一覧にある場所だけを返す。
-  if(req.method==='GET'&&(url.pathname==='/api/task/body/archives'||url.pathname==='/api/task/body/archive')){
-    if(req.headers['x-hub']!=='1')return send(res,403,{error:'forbidden'});
-    try{const project=url.searchParams.get('project'),task=url.searchParams.get('task'),archives=textBudget.archives(project,task);
-      if(url.pathname.endsWith('/archives'))return send(res,200,{archives});
-      const want=url.searchParams.get('path'),hit=archives.find(a=>a.path===want);if(!hit)return send(res,404,{error:lt('この場所は見つかりません')});
-      const file=path.join(store.readProject(project).dir,hit.path);require('./lib/remove').noLinks(file);return send(res,200,{path:hit.path,text:fs.readFileSync(file,'utf8')});
-    }catch(e){return send(res,409,{error:e.message});}
-  }
-  if(req.method==='GET'&&url.pathname==='/api/project/notes'){
-    try{const value=projectNotes.read(url.searchParams.get('project')),tag='"'+value.hash+'"';if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});return res.end();}res.setHeader('ETag',tag);return send(res,200,value);}catch(e){return send(res,404,{error:e.message});}
-  }
+  if (routes.taskbody.archives.matches(req, url)) return routes.taskbody.archives.handle(req, res, url);
+  if (routes.project.notes.matches(req, url)) return routes.project.notes.handle(req, res, url);
 
   // 作業画面の出力を流す（Server-Sent Events）
-  if (req.method === 'GET' && url.pathname === '/api/term/stream') {
-    const project = url.searchParams.get('project'), task = url.searchParams.get('task'), ai = url.searchParams.get('ai');
-    const s = sessions.get(project, task, ai);
-    if (!s) return send(res, 404, { error: lt('作業画面がありません') });
-    setUnread(project, task, false); // 開いたので読んだことにする
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-    const emit = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
-    emit({ type: 'data', data: s.buf, replay: true });
-    if (s.exited) emit({ type: 'exit', code: s.code });
-    const off = sessions.watch(project, task, ai, emit);
-    const ping = setInterval(() => res.write(': ping\n\n'), 20000);
-    req.on('close', () => { off(); clearInterval(ping); });
-    return undefined;
-  }
+  if (routes.terminalio.stream.matches(req, url)) return routes.terminalio.stream.handle(req, res, url);
 
   // GitHub の場所（その場で読み直す）。作業に作業用コピーがあればそのブランチ
-  if (req.method === 'GET' && url.pathname === '/api/project/github') {
-    const p = store.readProject(url.searchParams.get('project'));
-    const task = url.searchParams.get('task');
-    const file = p && task ? store.taskFile(p.id, task) : null;
-    const wd = file ? expandHome(store.readTask(file).workdir) : '';
-    // コピーのブランチはコピーから、本体の接続先は選択済み製品Gitから読む。
-    let info = null;
-    if (p) {
-      const main = github.projectRemote(githubProject(p), { fresh: true }).value;
-      if (wd && fs.existsSync(wd) && (!main?.target || main.target === '.')) info = gitw.remoteInfo(wd, { fresh: true });
-      else if (wd && main?.target) {
-        const candidate = path.join(wd, main.target);
-        info = fs.existsSync(path.join(candidate, '.git')) ? gitw.remoteInfo(candidate, { fresh: true }) : null;
-      } else info = main;
-    }
-    return info ? send(res, 200, info) : send(res, 404, { error: lt('GitHub の場所が見つかりません') });
-  }
+  if (routes.project.github.matches(req, url)) return routes.project.github.handle(req, res, url);
 
   // 子プロジェクトの一覧（親で作業を続ける前に、終わっていない子を知らせるため）
-  if (req.method === 'GET' && url.pathname === '/api/project/children') {
-    const r = handoff.childrenSummary(store, url.searchParams.get('project'));
-    return r ? send(res, 200, r) : send(res, 404, { error: lt('プロジェクトが見つかりません') });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/start/image') {
-    const p = store.readProject(url.searchParams.get('project'));
-    try {
-      if (!p) throw Error(lt('プロジェクトがありません'));
-      const f = start.imageFile(p, url.searchParams.get('id'), true);
-      return send(res, 200, fs.readFileSync(f), /\.jpe?g$/i.test(f) ? 'image/jpeg' : 'image/png');
-    } catch { return send(res, 404, { error: lt('画像が見つかりません') }); }
-  }
+  if (routes.project.children.matches(req, url)) return routes.project.children.handle(req, res, url);
+  if (routes.start.image.matches(req, url)) return routes.start.image.handle(req, res, url);
 
-  if (req.method === 'GET' && url.pathname === '/api/file/view') {
-    const b = Object.fromEntries(url.searchParams);
-    const { target } = resolvePlace(b), info = viewInfo(target);
-    const unavailable = { error: lt('このファイルを表示できません。Macで開いてください。') };
-    if (info.status !== 200) return send(res, info.status, unavailable);
-    // 実体確認後は同じファイルを配信する。最終要素のリンクへの置換も断る。
-    let fd, stat;
-    try {
-      fd = fs.openSync(info.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-      stat = fs.fstatSync(fd);
-      if (!stat.isFile() || stat.size > info.limit || stat.dev !== info.stat.dev || stat.ino !== info.stat.ino) {
-        fs.closeSync(fd);
-        return send(res, 415, unavailable);
-      }
-    } catch (e) {
-      if (fd !== undefined) fs.closeSync(fd);
-      return send(res, ['EPERM', 'EACCES'].includes(e.code) ? 403 : 404, unavailable);
-    }
-    const headers = { 'Content-Type': info.type, 'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline' };
-    if (info.kind === 'doc') {
-      let html;
-      try { html = await documentHtml(fd, info, stat.size); }
-      catch (e) { return send(res, e.killed || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 500 : 415, unavailable); }
-      finally { fs.closeSync(fd); }
-      headers['Content-Security-Policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:";
-      headers['Content-Length'] = Buffer.byteLength(html);
-      if (fromRemote()) record('fileview', b, { path: target, kind: info.kind });
-      res.writeHead(200, headers);
-      return res.end(html);
-    }
-    // iOSのPDF表示が要求する単一byte rangeも同じfdから返す。
-    let begin = 0, end = stat.size - 1, status = 200;
-    if (info.kind === 'pdf') {
-      headers['Accept-Ranges'] = 'bytes';
-      if (req.headers.range) {
-        const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
-        if (match && (match[1] || match[2])) {
-          begin = match[1] ? Number(match[1]) : Math.max(0, stat.size - Number(match[2]));
-          end = match[1] && match[2] ? Math.min(Number(match[2]), end) : end;
-        } else begin = -1;
-        if (!Number.isSafeInteger(begin) || !Number.isSafeInteger(end) || begin < 0 || begin > end || begin >= stat.size) {
-          fs.closeSync(fd); res.writeHead(416, { ...headers, 'Content-Range': `bytes */${stat.size}` }); return res.end();
-        }
-        status = 206; headers['Content-Range'] = `bytes ${begin}-${end}/${stat.size}`;
-      }
-    }
-    if (fromRemote()) record('fileview', b, { path: target, kind: info.kind });
-    res.writeHead(status, { ...headers, 'Content-Length': Math.max(0, end - begin + 1) });
-    if (!stat.size) { fs.closeSync(fd); return res.end(); }
-    const stream = fs.createReadStream(info.path, { fd, autoClose: true, start: begin, end });
-    stream.on('error', () => res.destroy());
-    res.on('close', () => stream.destroy());
-    return stream.pipe(res);
-  }
+  if (routes.localfiles.view.matches(req, url)) return routes.localfiles.view.handle(req, res, url);
 
-  if (req.method === 'GET' && url.pathname === '/api/freetalk/status') {
-    try {
-      if (url.searchParams.get('project') !== 'freetalk') throw Error(lt('freetalk の話題を指定してください'));
-      return send(res,200,freetalkHistory.status(url.searchParams.get('task')));
-    } catch(e) { return send(res,409,{error:e.message}); }
-  }
-  if (req.method === 'GET' && url.pathname === '/api/freetalk/attachment') {
-    try {
-      if(url.searchParams.get('project')!=='freetalk')throw Error('project');
-      const preview=freetalkAttachments.preview(url.searchParams.get('task'),url.searchParams.get('id'));
-      return send(res,200,preview.data,preview.type);
-    } catch { return send(res,404,{error:lt('画像が見つかりません')}); }
-  }
+  if (routes.freetalk.status.matches(req, url)) return routes.freetalk.status.handle(req, res, url);
+  if (routes.freetalk.attachment.matches(req, url)) return routes.freetalk.attachment.handle(req, res, url);
   if (req.method !== 'POST') return send(res, 405, { error: 'method' });
 
-  if (url.pathname === '/api/ideas/image') {
-    try {
-      const { humanRequest } = require('./lib/idea-api'), images = require('./lib/idea-images');
-      if (req.headers['x-hub'] !== '1' || !humanRequest(req)) { req.resume(); return send(res,403,{error:'この操作はアイデア台帳の画面から行ってください',saved:false}); }
-      const project = url.searchParams.get('project'); ideas.project(project);
-      const body = { opId: url.searchParams.get('opId'), name: url.searchParams.get('name') }; require('./lib/idea-utils').opId(body.opId);
-      // Drain an oversized body and return a typed rejection without destroying the response socket.
-      const chunks = []; let size = 0;
-      for await (const chunk of req) { size += chunk.length; if (size <= images.MAX) chunks.push(chunk); }
-      if (size > images.MAX) return send(res,413,{error:'画像は1枚20MBまでです',saved:false});
-      return send(res,201,ideas.uploadImage(project,body,Buffer.concat(chunks)));
-    } catch (e) { req.resume(); return send(res,e.status||503,{error:e.message,message:e.message,code:e.code||'storage',saved:e.saved??false,retry:e.saved==='unknown'?'receipt':'after-change'}); }
-  }
+  if (routes.ideaimage.upload.matches(req, url)) return routes.ideaimage.upload.handle(req, res, url);
 
   // ファイル・スクショを受け取る（本文はファイルそのもの）。Inbox に置き、作業ファイルに記録し、動いている AI の入力欄に場所を入れる
-  if (url.pathname === '/api/task/upload') {
-    const q = k => url.searchParams.get(k) || '';
-    const p = store.readProject(q('project'));
-    const file = p && store.taskFile(p.id, q('task'));
-    if(file&&p.kind!=='freetalk'){const generation=taskHistory.state(p.id,q('task')).generation;if((q('generation')||req.headers.origin&&generation>1)&&Number(q('generation'))!==generation){req.resume();return send(res,409,{error:lt('会話が切り替わりました。新しい会話を開いてください')});}}
-    if (!file) { req.resume(); return send(res, 400, { error: lt('作業が見つかりません') }); }
-    if (p.kind === 'freetalk') {
-      let release;
-      try {
-        const generation=Number(q('generation'));
-        release=freetalk.holdUpload(q('task'),generation);
-        let data;
-        try { data=await readRaw(req,MAX_UPLOAD); } catch { return send(res,413,{error:lt('ファイルが大きすぎます（50MB まで）')}); }
-        const attachment=await freetalkAttachments.upload(q('task'),q('name'),data,generation);
-        store.updateTask(p.id,q('task'),{memo:lt`ファイルを渡した: ${attachment.referencePaths.join(' , ')}`});
-        record('upload',{project:p.id,task:q('task')},{file:attachment.path,bytes:data.length});
-        return send(res,200,{ok:true,...attachment,typed:false});
-      } catch(e) { req.resume();return send(res,409,{error:e.message}); }
-      finally { release?.(); }
-    }
-    let data;
-    try { data = await readRaw(req, MAX_UPLOAD); } catch (e) { return send(res, 413, { error: lt('ファイルが大きすぎます（50MB まで）') }); }
-    let saved;
-    try { saved = saveUpload(q('name'), data); }
-    catch (e) { return send(res, 409, { error: e.message }); }
-    store.updateTask(p.id, q('task'), { memo: lt`ファイルを渡した: ${saved}` });
-    const ai = launch.AIS.includes(q('ai')) ? q('ai') : '';
-    const typed = ai ? sessions.write(p.id, q('task'), ai, (/\s/.test(saved) ? `"${saved}"` : saved) + ' ') : false;
-    record('upload', { project: p.id, task: q('task'), ai }, { file: saved, bytes: data.length });
-    return send(res, 200, { ok: true, path: saved, typed });
-  }
+  if (routes.taskattachments.upload.matches(req, url)) return routes.taskattachments.upload.handle(req, res, url);
 
-  if (url.pathname === '/api/start/image') {
-    const p = store.readProject(url.searchParams.get('project'));
-    if (!p) { req.resume(); return send(res, 400, { error: lt('プロジェクトがありません') }); }
-    if(p.kind==='freetalk'){req.resume();return send(res,409,{error:lt('freetalkの添付は話題を指定して追加してください')});}
-    try { return send(res, 200, start.saveImage(p, url.searchParams.get('name') || 'image.png', await readRaw(req, start.MAX))); }
-    catch (e) { return send(res, 400, { error: e.message }); }
-  }
-
+  if (routes.start.upload.matches(req, url)) return routes.start.upload.handle(req, res, url);
   const b = await readBody(req);
+  if(b?.origin==='hub-internal')return send(res,403,{error:lt('内部依頼の指定はHubからだけ受け付けます'),delivery:'not-sent'});
   req.historyWrite?.target(b?.project,b?.task);
   if(b?.project&&b.task&&b.project!=='freetalk'&&taskHistory.organizing(b.project,b.task)&&/^\/api\/(chat(?:gpt)?\/|term\/|delegate$|task$|task\/(?:history\/(summary|rotate)$|(?:merge|integrate|absorb|handoff|receive|update|delete|decide|step|completion|copyclear|handup|results)(?:\/|$)))/.test(url.pathname))return send(res,409,{error:lt('会話を整理中です。終わると新しい会話で送れます（入力は残っています）')});
-  if(url.pathname==='/api/task/history/auto'){
-    // 同じrequestIdの再送・他タブ・切替後の確認は、新しい仕事を作らず同じ仕事を返す。
-    try{const job=taskHistory.autoStart(b.project,b.task,b);setImmediate(()=>autoTick(b.project,b.task));return send(res,200,autoView(b.project,b.task,job));}catch(e){return send(res,409,{error:e.message});}
-  }
-  if(url.pathname==='/api/task/history/auto/cancel'){
-    try{taskHistory.autoCancel(b.project,b.task);return send(res,200,autoView(b.project,b.task));}catch(e){return send(res,409,{error:e.message});}
-  }
+  if (routes.taskhistorywrite.auto.matches(req, url)) return routes.taskhistorywrite.auto.handle(req, res, url, b);
+  if (routes.taskhistorywrite.cancel.matches(req, url)) return routes.taskhistorywrite.cancel.handle(req, res, url, b);
   if(url.pathname.startsWith('/api/ideas/')) return ideaAPI.handle(req,res,url,b,send);
   if(b?.project&&b.task&&!['/api/task/history/rotate','/api/task/continue','/api/task/continue/recover','/api/restart','/api/restart/cancel'].includes(url.pathname)&&b.project!=='freetalk'){
     const generation=taskHistory.state(b.project,b.task).generation;
     const browserConversation=req.headers.origin&&generation>1&&/^\/api\/(chat(?:gpt)?\/|term\/|delegate$|task\/history\/summary$)/.test(url.pathname);
     if((b.generation!==undefined||browserConversation)&&b.generation!==generation)return send(res,409,{error:lt('会話が切り替わりました。新しい会話を開いてください')});
   }
-  if(url.pathname==='/api/task/history/rotate'){
-    try{return send(res,200,taskHistory.rotate(b.project,b.task,b));}catch(e){return send(res,409,{error:e.message});}
-  }
-  if(url.pathname==='/api/task/continue/recover'){
-    try{const out=require('./lib/task-continue').recoverContinue({history:taskHistory,budget:textBudget},b);if(out.pending)setImmediate(()=>autoTick(b.project,b.task));return send(res,200,out);}catch(e){return send(res,409,{error:e.message});}
-  }
-  if(url.pathname==='/api/task/continue'){
-    try{const out=require('./lib/task-continue').continueTask({history:taskHistory,budget:textBudget},b);record('task-continue',b,{body:out.body,rotate:out.rotate,generation:out.generation});if(out.pending)setImmediate(()=>autoTick(b.project,b.task));return send(res,200,out);}catch(e){
-      let stage;try{const r=taskHistory.continueRecord(b.project,b.task);if(!r||r.requestId!==b.requestId)stage='not-started';}catch{}
-      return send(res,409,{error:e.message,code:e.code,...(stage?{stage}:{})});
-    }
-  }
-  if(url.pathname==='/api/task/history/summary'){
-    try{
-      const role=rolesData().roles.find(r=>r.name==='文章');if(!role?.main.model)throw Error(lt('文章担当の設定を確認してください'));
-      const request=taskHistory.prepareSummary(b.project,b.task);
-      const release=taskHistory.hold(b.project,b.task);res.once('finish',release);res.once('close',release);
-      return await delegateRequest({...b,text:request.text,title:lt('会話整理の要約'),ai:role.main.ai==='claude-code'?'claude':role.main.ai,model:role.main.model,effort:role.main.effort,role:role.name},res,{beforeStart:()=>{release();taskHistory.idle(b.project,b.task);if(request.revision!==taskHistory.revision(b.project,b.task))throw Error(lt('要約依頼の準備中に会話が変わりました'));}});
-    }catch(e){return send(res,409,{error:e.message});}
-  }
+  if (routes.taskhistorywrite.rotate.matches(req, url)) return routes.taskhistorywrite.rotate.handle(req, res, url, b);
+  if (routes.taskcontinuation.recover.matches(req, url)) return routes.taskcontinuation.recover.handle(req, res, url, b);
+  if (routes.taskcontinuation.continue.matches(req, url)) return routes.taskcontinuation.continue.handle(req, res, url, b);
+  if (routes.taskhistorywrite.summary.matches(req, url)) return routes.taskhistorywrite.summary.handle(req, res, url, b);
   if (url.pathname === '/api/app/rebuild') {
     if (fromRemote()) return send(res, 403, { error: 'forbidden' });
     if (appUpdate.running || appUpdate.applying() || updateBusy()) return send(res, 409, { error: appUpdate.idleMessage() });
     try { return send(res, 200, await appShell.rebuild()); }
     catch (error) { return send(res, error.status || 500, { error: error.message }); }
   }
-  if (url.pathname === '/api/freetalk/ensure') return send(res, 200, freetalk.ensure());
-  if (url.pathname === '/api/freetalk/topic') {
-    try { return send(res, 200, freetalk.createTopic(specialMode.pick(modelView.special(), rolesData(), '司令塔') || modelView.initial())); }
-    catch (e) { return send(res, 409, { error: e.message }); }
-  }
+  if (routes.freetalk.ensure.matches(req, url)) return routes.freetalk.ensure.handle(req, res, url);
+  if (routes.freetalk.topic.matches(req, url)) return routes.freetalk.topic.handle(req, res, url);
   if (['/api/chatgpt/prompt','/api/chatgpt/result'].includes(url.pathname)) return send(res, 410, { error: lt('アプリへのコピー経路は廃止しました。ChatGPT（Chat／Pro）を選び直してください') });
   if(b?.project==='freetalk' && b.task && !['/api/task/read','/api/chat/stop','/api/chat/unqueue','/api/freetalk/project-start','/api/freetalk/promote','/api/freetalk/delete'].includes(url.pathname)) {
     try {
@@ -2015,126 +1336,18 @@ async function apiRequest(req, res, url) {
   }
   const freetalkBlock = freetalkLib.guard(url.pathname, b);
   if (freetalkBlock) return send(res, 409, { error: freetalkBlock });
-  if(['/api/freetalk/project-preview','/api/freetalk/promote','/api/freetalk/clean','/api/freetalk/delete'].includes(url.pathname)) {
-    try {
-      if(b.project!=='freetalk')throw Error(lt('freetalkを指定してください'));
-      if(url.pathname==='/api/freetalk/project-preview')return send(res,200,freetalkLifecycle.preview(b.task));
-      if(url.pathname==='/api/freetalk/promote') {
-        const r=freetalkLifecycle.promote(b.task,b); chats.emit('freetalk',b.task,{type:'reset'});return send(res,200,r);
-      }
-      if(url.pathname==='/api/freetalk/delete') {
-        const r=freetalkLifecycle.remove(b.task,{confirm:b.confirm});
-        chats.base.delete(chats.key('freetalk',b.task));chats.queues.delete(chats.key('freetalk',b.task));
-        chats.emit('freetalk',b.task,{type:'reset'});setUnread('freetalk',b.task,false);return send(res,200,r);
-      }
-      const r=freetalkLifecycle.clean({confirm:b.confirm});cleanFreetalkMemory();return send(res,200,r);
-    }catch(e){return send(res,409,{error:e.message});}
-  }
-  if(url.pathname==='/api/freetalk/project-start') {
-    try {
-      if(b.project!=='freetalk')throw Error(lt('freetalk の話題を指定してください'));
-      return send(res,200,await startAutomaticFreetalk(b.task));
-    }catch(e){return send(res,e.status || 409,{error:e.message});}
-  }
-  if (['/api/freetalk/summary','/api/freetalk/rotate','/api/freetalk/promotion-intent'].includes(url.pathname)) {
-    try {
-      if (b.project !== 'freetalk') throw Error(lt('freetalk の話題を指定してください'));
-      if(url.pathname==='/api/freetalk/promotion-intent')return send(res,200,freetalkHistory.promotionIntent(b.task,b.requested));
-      if (url.pathname === '/api/freetalk/rotate') {
-        const result = freetalkHistory.rotate(b.task,b);
-        chats.base.delete(chats.key('freetalk',b.task)); chats.queues.delete(chats.key('freetalk',b.task));
-        chats.emit('freetalk',b.task,{type:'reset'}); setUnread('freetalk',b.task,false);
-        return send(res,200,result);
-      }
-      const request = freetalkHistory.prepareSummary(b.task,{intent:b.intent});
+  if (routes.freetalk.lifecycle.matches(req, url)) return routes.freetalk.lifecycle.handle(req, res, url, b);
+  if (routes.freetalk.projectStart.matches(req, url)) return routes.freetalk.projectStart.handle(req, res, url, b);
+  if (routes.freetalk.history.matches(req, url)) return routes.freetalk.history.handle(req, res, url, b);
 
-      return await delegateRequest({...request, project:'freetalk',task:b.task,title:lt('話題の整理用の要約')},res,{requestKey:freetalkHistory.state(b.task).summary.id,beforeStart:()=>freetalkHistory.idle(b.task)});
-    } catch(e) { return send(res,e.status || 409,{error:e.message}); }
-  }
-
-  if (url.pathname === '/api/onboarding') return send(res, 200, { onboarding: onboarding.save(b) });
-  if (url.pathname === '/api/onboarding/check') {
-    if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some(k => k !== 'ais')) return send(res, 400, { error: lt('確認の指定が正しくありません') });
-    return send(res, 200, await onboarding.check(b.ais));
-  }
-  if (req.method === 'POST' && url.pathname === '/api/limits/clear') {
-    const models = limitModels();
-    for(const [ai,ids] of Object.entries(discussion.limitModels()))models[ai]=[...new Set([...(models[ai]||[]),...ids])];
-    if (!models[b.ai]?.includes(b.model)) return send(res, 400, { error: lt('上限の指定が正しくありません') });
-    try { const selection = usageSelection(url, b); const account = b.account || selection[b.ai] || 'default'; accounts.get(b.ai, account); limitEvidence.clear(account, b.model,models); }
-    catch { return send(res, 500, { error: lt('解除を保存できませんでした') }); }
-    record('limit-clear', { ai: b.ai });
-    return send(res, 200, usageWithLimit(usage.snapshot(usageSelection(url, b))));
-  }
-  if(req.method==='POST'&&['/api/limits/credit-exception','/api/limits/credit-exception/end'].includes(url.pathname)){
-    try{
-      if(b.ai!=='codex'||b.account!=='default')throw Error(lt('Codexの既定アカウントだけを指定してください'));
-      accounts.get('codex','default');
-      const selection=usageSelection(url,b);
-      const snapshot=url.pathname.endsWith('/end')?usage.snapshot({...selection,codex:'default'}):await usage.status(false,{...selection,codex:'default'});
-      if(url.pathname.endsWith('/end'))limitEvidence.endCreditException(b,snapshot);else limitEvidence.startCreditException(b,snapshot);
-      record('credit-exception',{ai:'codex'},{ended:url.pathname.endsWith('/end')});
-      return send(res,200,usageWithLimit(snapshot));
-    }catch(e){return send(res,409,{error:e.message});}
-  }
-  if (req.method === 'POST' && url.pathname === '/api/limits/fable/clear') {
-    try { const selection = usageSelection(url, b); limitEvidence.clear(selection.claude || 'default'); }
-    catch { return send(res, 500, { error: lt('解除を保存できませんでした') }); }
-    record('limit-clear', {});
-    // 解除に利用枠の取得を待たせない。遅れて届く応答もフラグを作らない。
-    return send(res, 200, usageWithLimit(usage.snapshot(usageSelection(url, b))));
-  }
-  if (req.method === 'POST' && url.pathname === '/api/usage/refresh') return send(res, 200, usageWithLimit(await usage.status(true, usageSelection(url, b))));
-  if (req.method === 'POST' && url.pathname === '/api/usage/reset') {
-    if (!b || b.ai !== 'codex' || typeof b.account !== 'string' || b.confirmed !== true || typeof b.token !== 'string' || b.retry !== undefined && typeof b.retry !== 'boolean') return send(res, 400, { error:lt('チケット使用の指定が正しくありません') });
-    try {
-      accounts.get('codex', b.account);
-      const result = await usage.useReset(b.account, b.token, { confirmed:true, retry:b.retry, selection:usageSelection(url, b) });
-      return send(res, 200, { ...result, usage:usageWithLimit(result.usage) });
-    } catch (e) { return send(res, e.status || 409, { error:e.publicMessage || lt('チケットを使用できませんでした。利用状況を再確認してください') }); }
-  }
-
-  if (url.pathname === '/api/acceleration/task') {
-    const p = store.readProject(b.project), file = p && store.taskFile(p.id, b.task);
-    if (!file || !fs.existsSync(file)) return send(res, 404, { error: lt('作業が見つかりません') });
-    if (typeof b.on !== 'boolean') return send(res, 400, { error: lt('加速はオン・オフで指定してください') });
-    if (b.on && !acceleration.settings().codexAllowed) return send(res, 409, { error: lt('設定で加速を使えるようにしてください') });
-    const meta = chat.readMeta(p.dir, b.task); meta.codexFast = b.on;
-    chat.writeMeta(p.dir, b.task, meta);
-    record('task-acceleration', { project: p.id, task: b.task }, { codexFast: b.on });
-    return send(res, 200, { codexFast: b.on });
-  }
-  if (url.pathname === '/api/acceleration') {
-    const saved = acceleration.save(b);
-    record('acceleration', {}, saved);
-    return send(res, 200, saved);
-  }
-  if (url.pathname === '/api/github') return send(res, 200, await github.save(b));
-  if (url.pathname === '/api/github/owners') return send(res, 200, { owners: await github.owners(b.account) });
-  if (url.pathname === '/api/github/repositories') return send(res, 200, await github.repositories(b));
-  if (url.pathname === '/api/github/connect-preview' || url.pathname === '/api/github/connect') {
-    const p = store.readProject(b.project);
-    if (!p) return send(res, 404, { error: lt('プロジェクトが見つかりません') });
-    if (url.pathname.endsWith('/connect-preview')) return send(res, 200, await github.connectPreview(githubProject(p), b));
-    const r = await github.connect(githubProject(p), b);
-    record('githubconnect', { project: p.id }, { ok: r.ok, connected: r.connected, private: true, pushed: false, partial: Boolean(r.partial) });
-    return send(res, 200, r);
-  }
-  if (url.pathname === '/api/github/preview' || url.pathname === '/api/github/create') {
-    const p = store.readProject(b.project);
-    if (!p) return send(res, 404, { error: lt('プロジェクトが見つかりません') });
-    if (url.pathname.endsWith('/preview')) return send(res, 200, await github.preview(githubProject(p)));
-    if (b.confirm !== true) return send(res, 400, { error: lt('確認画面で［作る］を押してください') });
-    const r = await github.create(githubProject(p), b);
-    record('githubcreate', { project: p.id }, { ok: r.ok, pushed: r.pushed, private: true, partial: Boolean(r.partial) });
-    return send(res, 200, r);
-  }
-  if (url.pathname === '/api/remote') {
-    const r = remote.update({ enabled: b.enabled, passcode: b.passcode });
-    if (r.error) return send(res, 400, { error: r.error });
-    record('remote', {}, { enabled: remote.enabled(), passcode: b.passcode !== undefined });
-    return send(res, 200, remote.status());
-  }
+  if (routes.onboarding.write.matches(req, url)) return routes.onboarding.write.handle(req, res, url, b);
+  if (routes.limits.clear.matches(req, url)) return routes.limits.clear.handle(req, res, url, b);
+  if (routes.limits.write.matches(req, url)) return routes.limits.write.handle(req, res, url, b);
+  if (routes.usage.write.matches(req, url)) return routes.usage.write.handle(req, res, url, b);
+  if (routes.taskmanagement.acceleration.matches(req, url)) return routes.taskmanagement.acceleration.handle(req, res, url, b);
+  if (routes.acceleration.write.matches(req, url)) return routes.acceleration.write.handle(req, res, url, b);
+  if (routes.github.write.matches(req, url)) return routes.github.write.handle(req, res, url, b);
+  if (routes.remote.write.matches(req, url)) return routes.remote.write.handle(req, res, url, b);
   if (url.pathname === '/api/license/intro-checkout') {
     try {
       const checkout = await license.introCheckout();
@@ -2147,854 +1360,90 @@ async function apiRequest(req, res, url) {
     catch (e) { return send(res, e.status || 400, { error: e.message, code: e.code || 'license_activation' }); }
   }
   // 自動ChatとMCPで共有する実作業の許可
-  if (url.pathname === '/api/accounts' || url.pathname.startsWith('/api/accounts/')) {
-    try {
-      let result = { ok: true };
-      const ai = b.ai, id = b.id || 'default';
-      if (['/api/accounts/login','/api/accounts/logout','/api/accounts/delete'].includes(url.pathname) && aiTools.isOperating(ai)) return send(res,409,{error:lt('AI の更新・モデル再取得が進行中です')});
-      if (url.pathname === '/api/accounts') { result.account = accounts.add(ai, b.name); usage.invalidate(ai, result.account.id); }
-      else if (url.pathname === '/api/accounts/terminal') {
-        if (!['login', 'logout'].includes(b.action)) return send(res, 400, { error: 'invalid action' });
-        const pid = accounts.authTerminalPid(ai, id);
-        if (!pid) return send(res, 409, { error: lt('認証用Terminalが見つかりません。［状態を確認］を押してください') });
-        result = await launch.focusAuthTerminal(pid, DRY);
-        result.warning = ai === 'agy' ? (b.action === 'logout' ? lt('開いている認証用Terminalで /logout と入力し、終わったら［状態を確認］を押してください。') : lt('開いている認証用Terminalで /login と入力し、終わったら［状態を確認］を押してください。')) : lt('開いている認証用Terminalで操作を続け、終わったら［状態を確認］を押してください。');
-      }
-      else if (url.pathname === '/api/accounts/rename') accounts.rename(ai, id, b.name);
-      else if (url.pathname === '/api/accounts/select') {
-        const p = store.readProject(b.project);
-        if (!p || !store.taskFile(p.id, b.task)) throw Error(lt('作業が見つかりません'));
-        accounts.available(ai, id);
-        const live = sessions.get(p.id, b.task, ai);
-        if (live && !live.exited && (live.account || 'default') !== id) return send(res, 409, { error: lt('このAIのターミナルが作業中です。終了してから切り替えてください') });
-        const meta = chat.readMeta(p.dir, b.task); meta.accounts = { ...meta.accounts, [ai]: id }; chat.writeMeta(p.dir, b.task, meta);
-        result.accounts = meta.accounts;
-      } else if (url.pathname === '/api/accounts/login' || ai === 'agy' && url.pathname === '/api/accounts/logout') {
-        if (url.pathname.endsWith('/logout') && (b.confirm !== true || b.confirmDefault !== true)) return send(res, 400, { error: lt('既定のログアウトをもう一度確認してください') });
-        accounts.assertIdle(ai, id);
-        const c = accounts.command(ai, id, 'login');
-        const command = (ai === 'agy' ? launch.agyAccountShell() : launch.accountShell(ai, id)) + [c.command, ...c.args].map(launch.sq).join(' ');
-        const terminal = accounts.terminalCommand(ai, id, command, launch.sq, 'auth', url.pathname.endsWith('/logout') ? 'logout' : 'login');
-        try { result = await launch.openTerminal(terminal.command, DRY); } catch (e) { terminal.cancel(); throw e; }
-        usage.invalidate(ai, id);
-        if (DRY) result = { dry: true, command };
-        if (ai === 'agy') result.warning = url.pathname.endsWith('/logout') ? lt('Macで開いたTerminalで /logout と入力し、終わったら［状態を確認］を押してください。') : lt('Macで開いたTerminalで /login と入力し、終わったら［状態を確認］を押してください。');
-      } else if (url.pathname === '/api/accounts/logout' || url.pathname === '/api/accounts/delete') {
-        if (b.confirm !== true) return send(res, 400, { error: lt('確認してから操作してください') });
-        if (url.pathname.endsWith('/logout')) result = await accounts.logout(ai, id, b.confirmDefault);
-        else { result = accounts.remove(ai, id); if (ai === 'claude') { try { limitEvidence.clear(id); } catch { result.warning = lt('削除は完了しましたが、上限記録の片付けを保存できませんでした'); } } }
-        usage.invalidate(ai, id);
-      } else return send(res, 404, { error: lt('操作が見つかりません') });
-      record('account' + url.pathname.split('/').pop(), { ai }, { account: id });
-      return send(res, 200, result);
-    } catch (e) { return send(res, e.status || 400, { error: e.message }); }
-  }
+  if (routes.accounts.write.matches(req, url)) return routes.accounts.write.handle(req, res, url, b);
   if (url.pathname.startsWith('/api/dot/')) return send(res,410,{error:'Dot連携は廃止しました'});
   if (url.pathname.startsWith('/api/webchat')) {
     if (fromRemote()) return send(res, 403, { error: 'forbidden' });
-    try {
-      if (url.pathname === '/api/webchat') return send(res, 200, webchat.save(b));
-      if (url.pathname === '/api/webchat/status') return send(res, 200, await webchat.controlCall());
-      if (url.pathname === '/api/webchat/models') return send(res, 200, await webchat.controlCall(false, true));
-      if (url.pathname === '/api/webchat/login') return send(res, 200, await webchat.controlCall(true, false, false, b));
-      if (url.pathname === '/api/webchat/logout') {
-        if (b.confirm !== true) return send(res, 400, { error: 'webchat_logout_confirm' });
-        return send(res, 200, await webchat.controlCall(false, false, true));
-      }
-      if (url.pathname === '/api/webchat/retry') return send(res, 200, webchat.retry(b.project, b.task, b.request, b.confirm));
-      if (url.pathname === '/api/webchat/stop') return send(res, 200, { ok: webchat.stop(b.project, b.task) });
-      return send(res, 404, { error: 'not_found' });
-    } catch(e) { return send(res, e.status || 409, { error: e.message }); }
+    return extensions.route('webchat',req,res,url,b,send);
   }
   // 通常MCPの互換登録：~/.codex/config.toml に [mcp_servers.project-hub] を書き足す
-  if (url.pathname === '/api/chatgpt/register') {
-    const r = codexMcpRegister();
-    if (r.error) return send(res, 400, { error: r.error });
-    record('chatgptregister', {}, { file: r.file, added: r.added });
-    return send(res, 200, { ...gpt.settings(), ...codexMcpStatus(), ...r });
-  }
-  if (url.pathname === '/api/chatgpt') {
-    if (typeof b.work !== 'boolean') return send(res, 400, { error: lt('形式が違います') });
-    const s = gpt.save({ work: b.work }); record('chatgptwork', {}, { work: s.work });
-    return send(res, 200, s);
-  }
-  if (url.pathname === '/api/remote/logout-all') {
-    const n = remote.logoutAll();
-    record('remotelogoutall', {}, { sessions: n });
-    return send(res, 200, remote.status());
-  }
-  if (url.pathname === '/api/start/image-path') {
-    const p = store.readProject(b.project);
-    try { if (!p) throw Error(lt('プロジェクトがありません')); return send(res, 200, start.imageFromPath(p, b.path)); }
-    catch (e) { return send(res, 400, { error: e.message }); }
-  }
-  if (url.pathname === '/api/start') {
-    const r = await quickStart(b);
-    return send(res, r.status, r.body);
-  }
-
-  if (url.pathname === '/api/ai-tools/update-all') {
-    if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).length) return send(res, 400, { error: lt('一括更新の指定が正しくありません') });
-    try { const result = await aiUpdates.updateAll(); record('aiupdate-all', {}, { results: result.results }); return send(res, 200, result); }
-    catch (e) { return send(res, e.status || 502, { error: e.reason || lt('CLI の操作に失敗しました。状態を確認してください。'), stage: e.stage }); }
-  }
-  if (url.pathname === '/api/ai-tools/check') {
-    try { return send(res, 200, await aiUpdates.single(b.ai, 'check')); }
-    catch (e) { return send(res, e.status || 502, { error: e.reason || lt('更新情報の確認に失敗しました'), stage: e.stage }); }
-  }
-  if (url.pathname === '/api/ai-tools/update' || url.pathname === '/api/ai-tools/models/refresh') {
-    try {
-      const result = await aiUpdates.single(b.ai, url.pathname.endsWith('/update') ? 'update' : 'models');
-      applyModelCatalog();
-      record(url.pathname.endsWith('/update') ? 'aiupdate' : 'aimodels', { ai: b.ai }, { added: result.models?.added ?? result.added ?? 0 });
-      return send(res, 200, result);
-    } catch (e) {
-      return send(res, e.status || 502, { error: e.reason || e.message || lt('CLI の操作に失敗しました'), stage: e.stage || 'operation', reason: e.reason || e.message || '' });
-    }
-  }
+  if (routes.mcpsettings.register.matches(req, url)) return routes.mcpsettings.register.handle(req, res, url, b);
+  if (routes.mcpsettings.write.matches(req, url)) return routes.mcpsettings.write.handle(req, res, url, b);
+  if (routes.remote.logout.matches(req, url)) return routes.remote.logout.handle(req, res, url, b);
+  if (routes.start.write.matches(req, url)) return routes.start.write.handle(req, res, url, b);
+  if (routes.aiupdate.write.matches(req, url)) return routes.aiupdate.write.handle(req, res, url, b);
   if (aiTools.isOperating(b.ai) && ['/api/term/start', '/api/term/handoff', '/api/continue', '/api/chat/send'].includes(url.pathname)) {
     return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です。終わってから始めてください') });
   }
 
   // 作業画面を開く（画面の中）
-  if (url.pathname === '/api/term/start') {
-    try { void license.prepare(); licenseGuard(b, 'accept'); }
-    catch (e) { return send(res, e.status || 403, { error: e.message, code: e.code }); }
-    const p = store.readProject(b.project);
-    const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: lt('作業が見つかりません') });
-    const t = store.readTask(file);
-    let ai = b.ai, spec = pickSpec(t, ai), account = requestAccount(p, t.id, ai, b.account);
-    if (ai === 'agy' && typeof b.model === 'string') spec.model = launch.modelLabel(ai, b.model);
-    let o = { project: p.id, task: t.id, ai, ...spec, role: t.role, account };
-    o = { ...o, ...limitIdentity(rolesData(), o) };
-    await refreshLimitEvidence(o);
-    const held = limitEvidence.forRequest(o), backup = held && limitBackup(o);
-    if (held && modelView.special().enabled) return send(res, 409, { error: lt('特殊モードのAIが上限中です。解除後に再開してください') });
-    let switchNote = '';
-    if (backup) {
-      await refreshLimitEvidence({...o,...backup});
-      if (limitEvidence.forRequest(backup)) return send(res, 409, { error: lt('両方の担当が上限中です。解除後に再開してください') });
-      switchNote = lt`上限保持中のため ${launch.AI_LABEL[backup.ai]}・${backup.model} で開始`;
-      o = { ...o, ...backup }; ai = o.ai; spec = o; account = o.account;
-    }
-    if (aiTools.isOperating(ai) || restartControl?.committed) return send(res,409,{error:lt('AI の更新・モデル再取得が進行中です')});
-    const invalidModel = modelError(ai, spec.model);
-    if (invalidModel) return send(res, 409, { error: invalidModel });
-    if (sessions.list().some(r => r.project === p.id && r.task === t.id && sessions.get(r.project, r.task, r.ai)?.limitTransition && !sessions.get(r.project, r.task, r.ai)?.limitTransitionDone)) return send(res, 409, { error: lt('上限による交代の準備中です') });
-    const cur = sessions.get(p.id, t.id, ai);
-    if (backup && terminalBusy(p, t, ai)) return send(res, 409, { error: lt('元AIまたは別のAIが作業中です。終了を待ってください') });
-    const pending = terminalPending(p, t);
-    const { dir, note } = cur && !cur.exited ? { dir: cur.dir } : startDir(p, t);
-    if (pending && !transcript.same(pending.dir, dir)) return send(res, 409, { error: lt('引き継ぎ資料の作業場所が変わっています') });
-    const limitMarker = crypto.randomUUID();
-    const prompt = (pending ? lt`上限で中断した続きです。引き継ぎ資料 ${pending.packet} を読み、済んだ部分を繰り返さず残りを続けてください。\n` : '') + taskPrompt(p, t, file, dir, 'terminal', { ai, model: spec.model }) + `\n[Hub terminal: ${limitMarker}]`;
-    const argv = launch.buildArgv({ ai, prompt, cmd: permCmd(ai), model: spec.model, effort: spec.effort, account, fast: codexFastFor(p.id, t.id) });
-    if (DRY) return send(res, 200, { ok: true, dry: true, ai, dir, model: spec.model, effort: spec.effort, account, ...argv, accountEnv: account === 'default' ? {} : { [ai === 'grok' ? 'GROK_HOME' : ai === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME']: accounts.get(ai, account).dir } });
-    try {
-      const started = !(cur && !cur.exited);
-      const session = sessions.start({ project: p.id, task: t.id, ai, ...gitSnapshot(dir), dir, account, model: spec.model, effort: spec.effort, role: t.role, limitSlot: o.limitSlot, prompt, limitMarker, command: argv.command, args: argv.args, cols: b.cols, rows: b.rows });
-      if (pending && started) { session.original = pending.original; saveTerminalPending(p, t, { ...pending, pending: false }); }
-      record('start', { ...b, ai }, { model: spec.model, effort: spec.effort, dir });
-      return send(res, 200, { ok: true, ai, dir, note: [switchNote, note].filter(Boolean).join('。'), model: session.model, effort: session.effort, running: !session.exited });
-    } catch (e) {
-      return send(res, e.status || 500, { error: String(e.message || e) });
-    }
-  }
+  if (routes.terminalstart.start.matches(req, url)) return routes.terminalstart.start.handle(req, res, url, b);
 
   // 交代する：前の AI の会話を「引き継ぎ資料」にまとめ、相手の AI に読ませて続けさせる
   // 相手が動いていなければ、役割どおりのモデル・思考で始める。相手が作業中なら断る（勝手に割り込まない）
-  if (url.pathname === '/api/term/handoff') {
-    const p = store.readProject(b.project);
-    const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !launch.AIS.includes(b.to)) return send(res, 400, { error: lt('作業が見つかりません') });
-    const t = store.readTask(file);
-    const from = b.from || (b.to === 'claude' ? 'codex' : b.to === 'codex' ? 'claude' : '');
-    if (!launch.AIS.includes(from) || from === b.to) return send(res, 400, { error: lt('交代元を指定してください') });
-    const LABEL = launch.AI_LABEL;
-    let spec = pickSpec(t, b.to), account = requestAccount(p, t.id, b.to, b.account);
-    if (b.to === 'agy' && typeof b.model === 'string') spec.model = launch.modelLabel(b.to, b.model);
-    let target = { project: p.id, task: t.id, ai: b.to, ...spec, role: t.role, account };
-    target = { ...target, ...limitIdentity(rolesData(), target) };
-    await refreshLimitEvidence(target);
-    const alternate = limitEvidence.forRequest(target) && limitBackup(target);
-    if (limitEvidence.forRequest(target) && modelView.special().enabled) return send(res, 409, { error: lt('特殊モードのAIが上限中です。解除後に再開してください') });
-    if (alternate) {
-      await refreshLimitEvidence(alternate);
-      if (limitEvidence.forRequest(alternate)) return send(res, 409, { error: lt('両方の担当が上限中です。解除後に再開してください') });
-      // 元AIに戻すことで稼働中の同じ作業へ割り込まない。
-      if (alternate.ai === from) return send(res, 409, { error: lt('交代先が上限中です。元AIからの交代は行いません') });
-      b.to = alternate.ai; target = { ...target, ...alternate }; spec = target; account = target.account;
-    }
-    const tgt = sessions.get(b.project, b.task, b.to);
-    const tgtLive = tgt && !tgt.exited;
-    if (tgtLive && (tgt.account || 'default') !== account) return send(res, 409, { error: lt('交代先は別のアカウントで作業中です') });
-    if (!tgtLive) {
-      const invalidModel = modelError(b.to, spec.model);
-      if (invalidModel) return send(res, 409, { error: invalidModel });
-    }
-    if (tgtLive && Date.now() - tgt.lastOut < 20000) return send(res, 409, { error: lt`${LABEL[b.to]} が作業中です。止まってから（入力待ちになってから）交代してください` });
-    const src = sessions.get(b.project, b.task, from);
-    const { dir } = tgtLive ? { dir: tgt.dir } : startDir(p, t);
-    const convo = transcript.collect({ ai: from, dir: (src && src.dir) || dir, since: src ? src.started : Date.now() - 3 * 86400000, buf: src && src.buf, accountDir: accounts.location(from, src?.account || accountFor(p.id, t.id, from)) });
-    const board = path.join(p.dir, '.ai', 'board.md');
-    const note = b.note ? String(b.note).replace(/[\r\n]+/g, ' ').slice(0, 300) : '';
-    const hdir = path.join(p.dir, '.ai', 'handoff');
-    fs.mkdirSync(hdir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
-    const packetFile = path.join(hdir, `${t.id}-${stamp}-${from}.md`);
-    fs.writeFileSync(packetFile, transcript.packet({ fromLabel: LABEL[from], toLabel: LABEL[b.to], taskFile: file, board, convo, extra: note }));
-    const msg = lt`${LABEL[from]} から交代です。引き継ぎ資料 ${packetFile} を読み、${file} と ${board} も確かめてから、あなたの役割で続けてください。`;
-    let started = false;
-    if (tgtLive) {
-      sessions.type(b.project, b.task, b.to, msg);
-    } else {
-      const limitMarker = crypto.randomUUID(), prompt = msg + ' ' + taskPrompt(p, t, file, dir, 'terminal', { ai: b.to, model: spec.model }) + `\n[Hub terminal: ${limitMarker}]`;
-      const argv = launch.buildArgv({ ai: b.to, prompt, cmd: permCmd(b.to), model: spec.model, effort: spec.effort, account, fast: codexFastFor(p.id, t.id) });
-      if (DRY) return send(res, 200, { ok: true, dry: true, ai: b.to, packet: packetFile, kind: convo.kind, ...argv });
-      try { sessions.start({ project: b.project, task: b.task, ai: b.to, dir, account, model: spec.model, effort: spec.effort, role: t.role, limitSlot: target.limitSlot, prompt, limitMarker, ...gitSnapshot(dir), command: argv.command, args: argv.args, cols: b.cols, rows: b.rows }); started = true; }
-      catch (e) { return send(res, 500, { error: String(e.message || e), packet: packetFile }); }
-    }
-    store.updateTask(p.id, t.id, { owner: launch.AI_KEY[b.to], memo: lt`${LABEL[from]} から ${LABEL[b.to]} へ交代（引き継ぎ資料: ${packetFile}）` });
-    record('handoff', b, { packet: packetFile, kind: convo.kind, started });
-    return send(res, 200, { ok: true, ai: b.to, packet: packetFile, kind: convo.kind, started, ...(tgtLive ? {} : { model: spec.model, effort: spec.effort }) });
-  }
+  if (routes.terminalstart.handoff.matches(req, url)) return routes.terminalstart.handoff.handle(req, res, url, b);
   // 動いている AI のモデル・思考を変える：作業ファイルに残し、その AI に /model・/effort を打つ
-  if (url.pathname === '/api/term/switch') {
-    if (b.ai === 'agy' && (b.field === 'effort' || sessions.get(b.project, b.task, b.ai) && !sessions.get(b.project, b.task, b.ai).exited)) return send(res, 409, { error: lt('Agy のモデル変更は次の起動から使います。動いているAgyの終了後に選んでください') });
-    if (!launch.AIS.includes(b.ai) || !['model', 'effort'].includes(b.field)) return send(res, 400, { error: lt('指定が正しくありません') });
-    if (b.ai === 'grok' && b.field === 'effort' && b.value && !launch.EFFORT_FLAG.grok[b.value]) return send(res, 400, { error: lt('Grok の思考は 中・高・極高・MAX です') });
-    if (b.field === 'model') {
-      const invalidModel = modelError(b.ai, String(b.value || ''));
-      if (invalidModel) return send(res, 409, { error: invalidModel });
-    }
-    const t = store.updateTask(b.project, b.task, { [b.field]: typeof b.value === 'string' ? b.value : '' });
-    if (!t) return send(res, 400, { error: lt('作業が見つかりません') });
-    const spec = pickSpec(t, b.ai);
-    const cmd = launch.switchCommand(b.ai, b.field, spec[b.field]);
-    const sent = Boolean(cmd) && sessions.type(b.project, b.task, b.ai, cmd);
-    const session = sessions.get(b.project, b.task, b.ai); if (sent && session) { session[b.field] = spec[b.field]; if (b.field === 'model') session.limitSlot = limitIdentity(rolesData(), { ai: b.ai, model: session.model, role: session.role })?.limitSlot; }
-    record('switch', b, { [b.field]: spec[b.field], sent });
-    return send(res, 200, { ok: true, sent, command: cmd, ...spec });
-  }
-  if (url.pathname === '/api/term/input') {
-    return send(res, sessions.write(b.project, b.task, b.ai, String(b.data || '')) ? 200 : 404, { ok: true });
-  }
-  if (url.pathname === '/api/term/resize') {
-    return send(res, sessions.resize(b.project, b.task, b.ai, b.cols, b.rows) ? 200 : 404, { ok: true });
-  }
+  if (routes.terminalio.switch.matches(req, url)) return routes.terminalio.switch.handle(req, res, url, b);
+  if (routes.terminalio.input.matches(req, url)) return routes.terminalio.input.handle(req, res, url, b);
+  if (routes.terminalio.resize.matches(req, url)) return routes.terminalio.resize.handle(req, res, url, b);
 
 
   // 別の窓で開く（作業画面の部品が無い時の代わり）
-  if (url.pathname === '/api/continue') {
-    licenseGuard(b,'start');
-    const p = store.readProject(b.project);
-    const file = store.taskFile(b.project, b.task);
-    if (!p || !file || !launch.AIS.includes(b.ai)) return send(res, 400, { error: lt('作業が見つかりません') });
-    const t = store.readTask(file);
-    const spec = pickSpec(t, b.ai);
-    if (b.ai === 'agy' && typeof b.model === 'string') spec.model = launch.modelLabel(b.ai, b.model);
-    const account = requestAccount(p, t.id, b.ai, b.account);
-    const invalidModel = modelError(b.ai, spec.model);
-    if (invalidModel) return send(res, 409, { error: invalidModel });
-    const { dir } = startDir(p, t);
-    const command = launch.buildCommand({ ai: b.ai, dir, prompt: taskPrompt(p, t, file, dir, 'terminal', { ai: b.ai, model: spec.model }), cmd: permCmd(b.ai), ...spec, account, fast: codexFastFor(p.id, t.id) });
-    const terminal = accounts.terminalCommand(b.ai, account, command, launch.sq);
-    let r; try { r = await launch.openTerminal(terminal.command, DRY); } catch (e) { terminal.cancel(); throw e; }
-    return send(res, 200, { ok: true, dir, ...(DRY ? { command, r } : {}) });
-  }
+  if (routes.terminalstart.continue.matches(req, url)) return routes.terminalstart.continue.handle(req, res, url, b);
 
   // フォルダを Finder で開く（台帳に書かれた場所だけ）
-  if (url.pathname === '/api/open') {
-    const p = store.readProject(b.project);
-    if (!p) return send(res, 400, { error: lt('プロジェクトが見つかりません') });
-    let target = null;
-    if (b.kind === 'project') target = p.dir;
-    else if (b.kind === 'folder') target = (p.folders.find(f => f.label === b.label) || {}).path;
-    else if (b.kind === 'workdir') { const f = store.taskFile(b.project, b.task); target = f && store.readTask(f).workdir; }
-    target = expandHome(target || '');
-    if (!target || !fs.existsSync(target)) return send(res, 404, { error: lt('その場所が見つかりません'), path: target });
-    if (denied(target)) return send(res, 403, { error: denied(target), path: target });
-    const r = await launch.openFolder(target, DRY);
-    return send(res, 200, { ok: true, path: target, ...(DRY ? { r } : {}) });
-  }
+  if (routes.localfiles.open.matches(req, url)) return routes.localfiles.open.handle(req, res, url, b);
 
   // 文の中のファイル・フォルダを Finder で開く（作業の場所からの相対でもよい。ホームの中だけ）
-  if (url.pathname === '/api/reveal') {
-    const { target, home } = resolvePlace(b);
-    const isDir = fs.statSync(target).isDirectory();
-    // info＝開かず種類と場所を返す／list＝フォルダの中身／open＝元ファイルを既定アプリで開く／finder＝Finderで表示
-    const how = ['info', 'list', 'open'].includes(b.how) ? b.how : 'finder';
-    if (how === 'info') {
-      const info = viewInfo(target), view = info.status === 200;
-      return send(res, 200, { ok: true, path: target, dir: isDir, how, view, viewKind: view ? info.kind : '', remote: fromRemote() });
-    }
-    if (how === 'list' && isDir) {
-      let entries = [];
-      try {
-        entries = fs.readdirSync(target, { withFileTypes: true }).filter(d => !d.name.startsWith('.')).slice(0, 500)
-          .map(d => { const full = path.join(target, d.name); let st = null; try { st = fs.statSync(full); } catch (e) { /* 読めない物 */ } return { name: d.name, path: full, dir: st ? st.isDirectory() : d.isDirectory(), size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0 }; })
-          .sort((x, y) => (x.dir === y.dir ? x.name.localeCompare(y.name, 'ja') : x.dir ? -1 : 1));
-      } catch (e) { return send(res, 403, { error: denied(target) || String(e.message) }); }
-      const up = path.dirname(target);
-      return send(res, 200, { ok: true, path: target, dir: true, entries, parent: home.some(h => up === h || up.startsWith(h + path.sep)) ? up : '' });
-    }
-    record('reveal', { project: b.project, task: b.task }, { path: target, dir: isDir, how, app: Boolean(b.app) });
-    const act = how === 'list' ? 'open' : how; // ファイルに list が来たら開く
-    // アプリの中では、アプリ自身が開く（許可がアプリに付いているため）。ブラウザの時は本体が open で開く
-    if (b.app) return send(res, 200, { ok: true, path: target, dir: isDir, byApp: true, how: act });
-    const r = act === 'open' || isDir ? await launch.openFolder(target, DRY) : await launch.revealFile(target, DRY);
-    return send(res, 200, { ok: true, path: target, dir: isDir, how: act, ...(DRY ? { r } : {}) });
-  }
+  if (routes.localfiles.reveal.matches(req, url)) return routes.localfiles.reveal.handle(req, res, url, b);
   // URL を既定のブラウザで開く（http・https だけ）
-  if (url.pathname === '/api/open-url') {
-    const u = String(b.url || '');
-    if (!/^https?:\/\/[^\s]+$/.test(u)) return send(res, 400, { error: lt('開けない URL です') });
-    const r = await launch.openUrl(u, DRY);
-    return send(res, 200, { ok: true, ...(DRY ? { r } : {}) });
-  }
+  if (routes.localfiles.url.matches(req, url)) return routes.localfiles.url.handle(req, res, url, b);
 
   // 作業の状態・質問・メモ・モデル・思考
   // 作業用コピーの古い記録を片付ける（場所が無い時だけ。取り込み済みの後に AI が書き戻した時など）
-  if (url.pathname === '/api/task/copyclear') {
-    const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task), t = file && store.readTask(file);
-    if (!t) return send(res, 400, { error: lt('作業が見つかりません') });
-    if (!copyMissing(p, t)) return send(res, 409, { error: lt('作業用コピーはまだあります（片付けるのは、場所が無い時だけ）') });
-    const m = lastMerge(p.id, t.id);
-    const done = store.updateTask(p.id, t.id, { workdir: '', memo: m ? lt('本体に取り込み済み。作業用コピーの古い記録を片付けた') : lt('作業用コピーの古い記録を片付けた') });
-    record('copyclear', b, { merged: Boolean(m) });
-    return send(res, 200, { ok: true, merged: Boolean(m), task: done });
-  }
-  if (url.pathname === '/api/task') {
-    if (fromRemote()) record('task', b, { state: b.state, question: b.question !== undefined, memo: b.memo !== undefined });
-    if (b.state === '完了') return send(res, 409, { error: lt('［完了に移す］で内容を確認してから完了にしてください') });
-    const str = k => (typeof b[k] === 'string' ? b[k] : undefined);
-    let context = {};
-    if (['kind','derivedFrom','parent','workspaceMode'].some(k => b[k] !== undefined)) {
-      try {
-        const p=store.readProject(b.project), file=store.taskFile(b.project,b.task), t=file && store.readTask(file);
-        if (!p || !t) throw Error(lt('作業がありません'));
-        context=require('./lib/work-context').validateTask(p,t,b,store.listProjects());
-        if (b.workspaceMode !== undefined && b.workspaceMode !== t.workspaceMode && (t.workspaceStarted || t.state !== '未着手' || t.workdir || chats.busy(p.id,t.id) || sessions.list().some(s=>s.project===p.id && s.task===t.id && s.running))) throw Error(lt('場所は作業開始前に選んでください。既存コピーは自動で移しません'));
-      } catch(e) { return send(res,409,{error:e.message}); }
-    }
-    const t = store.updateTask(b.project, b.task, {
-      state: str('state'), question: str('question'), owner: str('owner'), role: str('role'),
-      ...context, model: str('model'), effort: str('effort'), parent: str('parent'), phase: str('phase'), via: str('via'), memo: b.memo,
-    });
-    return t ? send(res, 200, t) : send(res, 400, { error: lt('作業が見つかりません') });
-  }
-  if (url.pathname === '/api/task/completion') {
-    if (b.confirm !== true) return send(res, 400, { error: lt('完了に移すか確認してください') });
-    if (b.action === 'approve' && (discussion.active(b.project,b.task) || webchatActive(b.project,b.task) || chats.running.has(`${b.project}\u0000${b.task}`) || launch.AIS.some(a => { const s = sessions.get(b.project, b.task, a); return s && !s.exited; }))) return send(res, 409, { error: lt('AIが作業中です。終わってから完了を確認してください') });
-    if(b.action==='approve') {
-      const {all,p,t}=resultsGate.current(b.project,b.task);
-      if(t && t.completionHash!==b.expectedHash)return send(res,409,{error:lt('確認中に作業が更新されました')});
-      if(t) { const issue=resultsGate.approvalIssue(p,t,all); if(!issue.ok)return send(res,409,{error:lt('成果の記録が整っていません：')+issue.reason}); }
-    }
-    const t = store.decideTask(b.project, b.task, b.action, b.expectedHash);
-    if (t?.error) return send(res, t.status, { error: t.error });
-    if (t) record(b.action === 'approve' ? 'taskdone' : 'taskreopen', b);
-    if (t && b.action === 'approve') { const p = store.readProject(b.project); if (p) reportChild(p, lt('作業の完了'), [t.title, handoff.lastEntry(t.done)].filter(Boolean).join('\n')); }
-    return t ? send(res, 200, t) : send(res, 400, { error: lt('作業が見つかりません') });
-  }
+  if (routes.taskcopy.clear.matches(req, url)) return routes.taskcopy.clear.handle(req, res, url, b);
+  if (routes.tasksettings.update.matches(req, url)) return routes.tasksettings.update.handle(req, res, url, b);
+  if (routes.taskprogress.completion.matches(req, url)) return routes.taskprogress.completion.handle(req, res, url, b);
   // 手順に印を付ける・外す
-  if (url.pathname === '/api/task/step') {
-    const t = typeof b.add === 'string' ? store.addStep(b.project, b.task, b.add) : store.setStep(b.project, b.task, Number(b.index), Boolean(b.done));
-    if(t) {
-      try { await resultsGate.trigger(b.project,b.task); } catch(e) {record('results-organize-error',b,{error:e.message});}
-      const {all,p,t:current}=resultsGate.current(b.project,b.task);
-      return send(res,200,resultsGate.decorate(p,current,all));
-    }
-    return send(res,400,{error:lt('その手順が見つかりません')});
-  }
-  if (url.pathname === '/api/phase/continue') {
-    const current = store.readProject(b.project);
-    if (!current || current.completionHash !== b.expectedHash) return send(res, 409, { error: lt('確認中にフェーズが更新されました') });
-    const p = store.continuePhase(b.project); return send(res, 200, p);
-  }
+  if (routes.taskprogress.step.matches(req, url)) return routes.taskprogress.step.handle(req, res, url, b);
+  if (routes.phase.continue.matches(req, url)) return routes.phase.continue.handle(req, res, url, b);
   // プロジェクトを完了にする・戻す（人がはっきり押した時だけ）
-  if (url.pathname === '/api/project/status') {
-    if (b.status === '完了' && b.confirm !== true) return send(res, 400, { error: lt('完了に移すか確認してください') });
-    const current = store.readProject(b.project);
-    if ((b.status === '完了' || b.expectedHash) && current?.completionHash !== b.expectedHash) return send(res, 409, { error: lt('確認中にプロジェクトが更新されました') });
-    if (!['完了', '進行中'].includes(b.status)) return send(res, 400, { error: lt('形式が違います') });
-    if (b.status === '完了') {
-    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: lt('このプロジェクトでAIが作業中です。終わってから完了を確認してください') });
-    }
-    const p = store.setProjectStatus(b.project, b.status);
-    if (p) record(b.status === '完了' ? 'projectdone' : 'projectreopen', { project: b.project });
-    if (p && b.status === '完了' && p.status === '完了') reportChild(p, '完了', handoff.completionText(p));
-    return p ? send(res, 200, { ok: true, status: p.status }) : send(res, 400, { error: lt('プロジェクトが見つかりません') });
-  }
+  if (routes.project.status.matches(req, url)) return routes.project.status.handle(req, res, url, b);
   // 親に結果を渡す（人がはっきり押した時）。文が無ければ一番新しい作業の「やったこと」の最後
-  if (url.pathname === '/api/project/handoff') {
-    const p = store.readProject(b.project);
-    if (!p) return send(res, 400, { error: lt('プロジェクトが見つかりません') });
-    const t = handoff.newestTask(p);
-    const text = (typeof b.text === 'string' && b.text.trim()) || (t ? handoff.lastEntry(t.done) : '');
-    if (!text) return send(res, 400, { error: lt('渡す内容がありません。文を書くか、作業の「やったこと」を書いてください') });
-    if (text.length > 4000) return send(res, 400, { error: lt('渡す文は4000文字までです') });
-    const r = reportChild(p, lt('報告'), text);
-    if (!r) return send(res, 400, { error: lt('親プロジェクトが見つかりません') });
-    return send(res, 200, { ok: true, parent: r.parent, task: r.task, duplicate: r.duplicate });
-  }
+  if (routes.project.handoff.matches(req, url)) return routes.project.handoff.handle(req, res, url, b);
   // 次のフェーズへ進む（今のフェーズを完了に）
-  if (url.pathname === '/api/phase/next') {
-    if (b.confirm !== true) return send(res, 400, { error: lt('今のフェーズを完了に移すか確認してください') });
-    const current = store.readProject(b.project);
-    if (!current || b.expectedHash !== current.completionHash) return send(res, 409, { error: lt('確認中にフェーズが更新されました。内容を読み直してください') });
-    if (sessions.list().some(x => x.project === b.project && x.running) || [...chats.running.keys()].some(k => k.startsWith(b.project + '\u0000'))) return send(res, 409, { error: lt('このプロジェクトでAIが作業中です。終わってから完了を確認してください') });
-    const p = store.nextPhase(b.project);
-    if (p) record('nextphase', b);
-    return p ? send(res, 200, { ok: true, phases: p.phases }) : send(res, 400, { error: lt('プロジェクトが見つかりません') });
-  }
+  if (routes.phase.next.matches(req, url)) return routes.phase.next.handle(req, res, url, b);
   // コピーと再開先は保持したまま、取り込み対象から外す・戻す
-  if (url.pathname === '/api/task/merge-exclusion') {
-    if (typeof b.excluded !== 'boolean') return send(res, 400, { error: lt('除外するかどうかを指定してください') });
-    const p = store.readProject(b.project);
-    const file = p && store.taskFile(p.id, b.task);
-    if (!file) return send(res, 400, { error: lt('作業が見つかりません') });
-    const t = store.readTask(file);
-    if (!inWork(p, t)) return send(res, 400, { error: lt('この作業には作業用コピーがありません') });
-    if (t.mergeExcluded === b.excluded) return send(res, 200, { ok: true, task: t });
-    const updated = store.updateTask(p.id, t.id, {
-      mergeExcluded: b.excluded,
-      memo: b.excluded ? lt('取り込み対象から外しました（作業用コピーと再開先は保持）') : lt('取り込み対象に戻しました'),
-    });
-    record(b.excluded ? 'mergeexclude' : 'mergeinclude', b);
-    return send(res, 200, { ok: true, task: updated });
-  }
+  if (routes.taskcopy.exclusion.matches(req, url)) return routes.taskcopy.exclusion.handle(req, res, url, b);
   // 作業用コピーを本体に取り込んで片付ける
-  if (url.pathname === '/api/task/merge/status') {
-    try {
-      const p=store.readProject(b.project),t=p?.tasks.find(t=>t.id===b.task);
-      if(!t||!inWork(p,t)||copyMissing(p,t))return send(res,200,{state:'unknown'});
-      const sourceDir=expandHome(t.workdir),targetDir=gitw.mainOf(sourceDir),scope={project:b.project,task:b.task,sourceDir,targetDir};
-      if(b.flow===true)return send(res,200,mainMergeFlow.status(scope,b.requestId));
-      return send(res,200,b.requestId!==undefined?mainMergeDelivery.status({...scope,id:b.requestId}):b.legacy===true?mainMergeDelivery.legacy({...scope,abortAt:b.abortAt,confirm:b.confirm,sourceHead:b.sourceHead,targetHead:b.targetHead}):{state:'unknown'});
-    }catch{return send(res,200,{state:'unknown'});}
-  }
-  if (url.pathname === '/api/task/merge/preview') {
-    const check=require('./lib/main-merge-check');
-    try {
-      const p=store.readProject(b.project),file=p&&store.taskFile(b.project,b.task);
-      if(!p||!file)return send(res,409,{error:lt('作業が見つかりません'),delivery:{state:'not-sent'}});
-      const t=store.readTask(file);
-      if(!inWork(p,t)||copyMissing(p,t))return send(res,409,{error:lt('作業用コピーが見つかりません'),delivery:{state:'not-sent'}});
-      const sourceDir=expandHome(t.workdir),mergeTarget=gitw.mainOf(sourceDir);
-      if(mainMergeDelivery.unresolved({project:b.project,task:b.task,sourceDir,targetDir:mergeTarget}))return send(res,409,{error:lt('取り込みの結果が未確認です。再送せず、送信番号の結果を照合してください'),delivery:{state:'unknown'}});
-      const sc=check.check(gitw,sourceDir,'source'),tc=check.check(gitw,mergeTarget,'target');
-      if(sc.blocker||tc.blocker)return send(res,409,check.refusal(sc.blocker||tc.blocker));
-      const source=sc.snapshot,main=tc.snapshot;
-      const preview=gitw.preview({targetGuard:dir=>require('./lib/integration-writes').inspect(gitw,dir),dir:sourceDir,workRoot:workRoot(p),target:mergeTarget});
-      if(!preview)return send(res,409,check.refusal({side:'target',kind:'unreadable',paths:[],reason:lt('取り込む範囲を読み取れません'),next:lt('本体と作業用コピーのGit履歴を確認してから、最新の記録を確認してください')}));
-      const token=crypto.randomUUID();
-      for(const [id,v]of mainMergeTokens)if(Date.now()-v.at>600000)mainMergeTokens.delete(id);
-      const switchPlan=mainMergeFlow.approval({sourceDir,targetDir:mergeTarget,source,target:main});
-      mainMergeTokens.set(token,{at:Date.now(),project:b.project,task:b.task,source,target:main,targetDir:mergeTarget,...switchPlan});
-      const waiting=integrationBlockers(b,{op:'main-merge'});
-      return send(res,200,{waiting,token,sourceHead:source.head,targetHead:main.head,target:mergeTarget,files:preview.files,noChanges:preview.noChanges,...switchPlan,residual:t.steps.filter(s=>!s.done).map(s=>s.text).concat(t.question||[]).join('\n'),cleanupBlocked:Boolean(t.continuation||t.question||t.steps.some(s=>!s.done)||store.listProjects().some(q=>q.tasks.some(x=>require('./public/project-order').ancestorsOf(q,x,store.listProjects()).some(a=>a.project.id===p.id&&a.task.id===t.id))))});
-    } catch {return send(res,409,check.refusal({side:'target',kind:'unreadable',paths:[],reason:lt('本体と作業用コピーの保存状態を読み取れません'),next:lt('Gitと読取権限を確認してから、最新の記録を確認してください')}));}
-  }
-  if (url.pathname === '/api/task/merge') {
-    let deliveryScope;
-    if(b.oneclick===true&&b.token===undefined)return send(res,409,{error:lt('表示した取り込み範囲を確認できません'),delivery:{state:'not-sent'}});
-    if(b.token!==undefined){
-      try{if(mainMergeDelivery.read(b.token))return send(res,409,{error:lt('この取り込みは送信済みです。結果を照合してください'),delivery:{state:'unknown'}});}catch{return send(res,409,{error:lt('取り込みの送信記録を読み取れません'),delivery:{state:'unknown'}});}
-      const v=mainMergeTokens.get(b.token);mainMergeTokens.delete(b.token);
-      const p=store.readProject(b.project),t=p?.tasks.find(t=>t.id===b.task);
-      const changed=()=>send(res,409,{error:lt('本体または保存済みHEADが変わりました。最新の記録を確認してください'),delivery:{state:'not-sent'}});
-      if(!v||Date.now()-v.at>600000||v.project!==b.project||v.task!==b.task||!t||gitw.mainOf(expandHome(t.workdir))!==v.targetDir)return changed();
-      const check=require('./lib/main-merge-check'),sc=check.check(gitw,expandHome(t.workdir),'source'),tc=check.check(gitw,v.targetDir,'target');
-      if(sc.blocker||tc.blocker)return send(res,409,check.refusal(sc.blocker||tc.blocker));
-      if(JSON.stringify(sc.snapshot)!==JSON.stringify(v.source)||JSON.stringify(tc.snapshot)!==JSON.stringify(v.target))return changed();
-      b.disposition='continue';b.confirm=true;b.sourceHead=v.source.head;b.targetHead=v.target.head;
-      deliveryScope={project:b.project,task:b.task,sourceDir:expandHome(t.workdir),targetDir:v.targetDir,source:v.source,target:v.target};
-      if(b.oneclick===true){
-        const prior=mainMergeDelivery.flows(deliveryScope).find(r=>JSON.stringify(r.source)===JSON.stringify(v.source)&&JSON.stringify(r.target)===JSON.stringify(v.target));
-        if(prior){
-          try{mainMergeDelivery.link(b.token,deliveryScope,prior.id);}catch{return send(res,409,{error:lt('取り込みの送信番号を保存できません。結果を照合してください'),delivery:{state:'unknown'}});}
-          return send(res,200,{ok:true,main:v.targetDir,retained:true,requestId:b.token,flow:mainMergeFlow.status(deliveryScope,b.token)});
-        }
-        deliveryScope.flow={keep:true,restart:v.switchHub,version:v.switchVersion,instance:HUB_INSTANCE,stage:'approved'};
-      }
-    }
-    const p = store.readProject(b.project);
-    const file = store.taskFile(b.project, b.task);
-    if (!p || !file) return send(res, 400, { error: lt('作業が見つかりません') });
-    const t = store.readTask(file);
-    if(require('./public/project-order').integrators(p,t,store.listProjects()).length) return send(res,409,{error:lt('親作業の［統合…］で取り込みます。子作業では［成果を渡す］を行ってください')});
-    if (!inWork(p, t)) return send(res, 400, { error: lt('この作業には作業用コピーがありません') });
-    if (copyMissing(p, t)) {
-      if(res.integrationMain)return send(res,409,{error:lt('本体取り込みの対象が変わりました')});
-      const m = lastMerge(p.id, t.id);
-      const when = m ? new Date(m.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-      const note = m ? lt`この作業は ${when} に本体へ取り込み済みです（作業用コピーはゴミ箱へ移してあります）。` : lt('作業用コピーの場所が見つかりません（消えたか、別の場所に移っています）。');
-      store.updateTask(p.id, t.id, { workdir: '', memo: lt`${note} 作業ファイルの古い記録を片付けました` });
-      record('mergeskip', b, { merged: Boolean(m) });
-      return send(res, 409, { error: lt`${note} 変更は本体に入っています。作業ファイルの古い記録を片付けたので、続きは本体でそのまま始められます` });
-    }
-    if (t.mergeExcluded) return send(res, 409, { error: lt('取り込み対象から外されています。先に［取り込み対象に戻す］を選んでください') });
-    const waiting=integrationBlockers(b,{op:'main-merge'});
-    if(waiting.length)return send(res,409,{error:waiting.map(x=>x.message).join('、'),waiting,delivery:{state:'not-sent'}});
-    const mergeTarget = gitw.mainOf(expandHome(t.workdir));
-    if(mainMergeDelivery.unresolved({project:b.project,task:b.task,sourceDir:expandHome(t.workdir),targetDir:mergeTarget}))return send(res,409,{error:lt('取り込みの結果が未確認です。再送せず、送信番号の結果を照合してください'),delivery:{state:'unknown'}});
-    let r;
-    try {
-      const disposition=b.disposition===undefined?'cleanup':b.disposition;
-      if(!['continue','cleanup'].includes(disposition))throw Error(lt('取り込み後の扱いを確認してください'));
-      if(disposition==='cleanup'&&(t.continuation||t.question||t.steps.some(s=>!s.done)||store.listProjects().some(q=>q.tasks.some(x=>require('./public/project-order').ancestorsOf(q,x,store.listProjects()).some(a=>a.project.id===p.id&&a.task.id===t.id)))))throw Error(lt('残件または継続中の作業です。取り込んで続けてください'));
-      if(b.disposition!==undefined){
-        const check=require('./lib/main-merge-check'),sc=check.check(gitw,expandHome(t.workdir),'source'),tc=check.check(gitw,mergeTarget,'target');
-        if(sc.blocker||tc.blocker)return send(res,409,check.refusal(sc.blocker||tc.blocker));
-      }
-      if(b.disposition!==undefined&&(b.confirm!==true||b.targetHead!==(gitw.inspect(mergeTarget)?.head||null)))throw Error(lt('本体が変わりました。取り込む範囲を確認し直してください'));
-      if(b.disposition!==undefined){const source=gitw.inspect(expandHome(t.workdir));if(!source||source.status||gitw.merging(expandHome(t.workdir))||b.sourceHead!==source.head||b.confirm!==true)throw Error(lt('保存済みHEADと取り込む範囲を確認してください'));}
-      const preview=gitw.preview({targetGuard:dir=>require('./lib/integration-writes').inspect(gitw,dir),dir:expandHome(t.workdir),workRoot:workRoot(p),target:mergeTarget});
-      const lock=preview?.noChanges?[]:gitw.mergeLocks(mergeTarget);if(lock.length)return send(res,409,{error:'Gitの保存処理が進行中です：'+lock.join('、'),delivery:{state:'not-sent'},paths:lock});
-      if(deliveryScope)try{mainMergeDelivery.start(b.token,deliveryScope);}catch{return send(res,409,{error:lt('取り込みの送信記録を保存できません'),delivery:{state:'not-sent'}});}
-      if(!preview?.noChanges)res.integrationMain?.begin();
-      r = preview?.noChanges?{ok:true,noChanges:true,main:mergeTarget,commit:gitw.savedHead(mergeTarget),files:[]}:gitw.merge({ targetGuard:dir=>require('./lib/integration-safety').assertTarget(taskIntegrate,{target:dir,p}),dir: expandHome(t.workdir), workRoot: workRoot(p), title: `${t.id} ${t.title}`, cleanup:disposition==='cleanup' });
-    }
-    catch (e) { r = { ok: false, error: String(e.message || e).split('\n')[0] }; }
-    if(deliveryScope)try{mainMergeDelivery.finish(b.token,{state:r.ok?'applied':['aborted','not-sent'].includes(r.delivery?.state)?r.delivery.state:'unknown',...(r.ok?{commit:r.commit}:{})});}catch{r.delivery={state:'unknown'};}
-    // A no-op receipt preserves the task and operation log exactly.
-    if(r.ok&&r.noChanges)return send(res,200,{ok:true,noChanges:true,main:r.main,retained:true,task:t,...(deliveryScope?.flow?{requestId:b.token,flow:mainMergeFlow.status(deliveryScope,b.token)}:{})});
-    record('merge', b, { ok: Boolean(r.ok), conflict: Boolean(r.conflict), ...(b.token?{requestId:b.token,sourceHead:b.sourceHead,targetHead:b.targetHead}:{}), ...(r.delivery?{delivery:r.delivery}:{}), ...(r.ok ? {main:r.main,commit:r.commit,files:r.files} : {}) });
-    if (r.conflict) {
-      store.updateTask(p.id, t.id, { state: '返事待ち', question: lt('本体に取り込む時にぶつかりました。AI を始めて「本体の最新を取り込み、ぶつかった所を直して」と頼んでから、もう一度［本体に取り込む］を押してください') });
-      return send(res, 409, { error: r.error, conflict: true,...(r.delivery?{delivery:r.delivery}:{}) });
-    }
-    if (!r.ok) return send(res, r.delivery ? 409 : 400, { error: r.error,...(r.delivery?{delivery:r.delivery}:{}) });
-    if(b.disposition==='continue'||r.noChanges){
-      const kept=store.updateTask(p.id,t.id,{continuation:true,memo:lt`本体に取り込み、同じ作業とコピーを保持しました（${r.main}）`});
-      return send(res,200,{ok:true,main:r.main,retained:true,task:kept,...(r.noChanges?{noChanges:true}:{}),...(deliveryScope?.flow?{requestId:b.token,flow:mainMergeFlow.status(deliveryScope,b.token)}:{})});
-    }
-    for (const a of launch.AIS) sessions.stop(b.project, b.task, a);
-    const done = store.updateTask(p.id, t.id, { workdir: '', state: '完了', question: '', memo: lt`本体に取り込み、作業用コピーをゴミ箱へ移しました（${r.main}）` });
-    try { store.appendSection(p.id, t.id, 'やったこと', lt`- ${new Date().toISOString().slice(0, 16).replace('T', ' ')} 本体に取り込み済み（${r.main}）。作業用コピーはゴミ箱へ。workdir は空のままにすること`); } catch (e) { /* 無くてもよい */ }
-    return send(res, 200, { ok: true, main: r.main, trashed: r.trashed, task: done });
-  }
+  if (routes.taskintegration.mergeStatus.matches(req, url)) return routes.taskintegration.mergeStatus.handle(req, res, url, b);
+  if (routes.taskintegration.mergePreview.matches(req, url)) return routes.taskintegration.mergePreview.handle(req, res, url, b);
+  if (routes.taskintegration.merge.matches(req, url)) return routes.taskintegration.merge.handle(req, res, url, b);
   // 成果ファイルを選び、保存と受領通知の後に子作業・派生を片付ける。
-  if (url.pathname === '/api/task/handup/preview') {
-    try { return send(res, 200, taskTransfer.offerPreview(b.project, b.task, b.paths || [], b.expectTitle)); }
-    catch (e) { return send(res, 409, {error:e.message}); }
-  }
-  if (url.pathname === '/api/task/handup' || url.pathname === '/api/task/absorb' && taskTransfer.read(b.project,b.task)?.destination && !taskTransfer.read(b.project,b.task)?.integrating) {
-    try {
-      const r = url.pathname === '/api/task/handup' ? taskTransfer.offer(b) : taskTransfer.apply(b); if(!r.handedUp)setUnread(b.project,b.task,false);
-      record('absorb', {project:r.parentProject,task:r.parent}, {child:b.task,childProject:b.project,files:r.files,receipt:r.record});
-      return send(res,200,r);
-    } catch(e) { return send(res,409,{error:e.message}); }
-  }
-  if(url.pathname === '/api/task/integrate/records/save'){
-    try {const waiting=integrationBlockers(b,{op:'receipt'});if(waiting.length)throw Object.assign(Error(lt('保存先の処理が終了してからHub記録を保存してください')),{delivery:{state:'not-sent'}});const r=require('./lib/integration-record-save').save(taskIntegrate,b);record('integration-record-save',{project:b.project,task:b.task},{commit:r.commit,paths:r.paths});return send(res,200,r);} catch(e){integrationFailure(b,e,'records-save');return send(res,409,{error:e.message,delivery:e.delivery});}
-  }
-  if(url.pathname === '/api/task/integrate/abandon'){
-    try{const out=b.preview===true?integrationAbandon.preview(b):integrationAbandon.apply(b);if(out.abandoned||out.recovered)record(out.recovered?'integrate-abandon-'+out.recovered:'integrate-abandon',b,{id:out.id,received:0,cleaned:0});return send(res,200,out);}catch(e){return send(res,e.delivery?500:409,{error:e.message,waiting:e.waiting,delivery:e.delivery||{state:'not-sent'}});}
-  }
-  if(url.pathname === '/api/task/integrate/keep'){
-    try{return send(res,200,taskIntegrate.simple.saveKeep(b));}catch(e){integrationFailure(b,e,'keep');return send(res,409,{error:e.message});}
-  }
-  if(url.pathname === '/api/task/integrate/preview') {
-    try{return send(res,200,integrateAuto.preview(b));}catch(e){integrationFailure(b,e,'preview');return send(res,409,{error:e.message});}
-  }
-  if(['/api/task/body/apply','/api/task/body/recover','/api/task/body/summary'].includes(url.pathname)){
-    try{const out=url.pathname.endsWith('/recover')?textBudget.recover(b):url.pathname.endsWith('/summary')?textBudget.replaceSummary(b):textBudget.apply(b);record('text-body',b,{id:out.id});return send(res,200,out);}catch(e){return send(res,409,{error:e.message});}
-  }
-  if(url.pathname==='/api/project/notes/archive/preview'||url.pathname==='/api/project/notes/archive'){
-    try{const out=url.pathname.endsWith('/preview')?projectNotes.preview(b.project,b.keepLines):projectNotes.apply(b);if(out.ok)record('project-notes-archive',b,{archive:out.archive});return send(res,200,out);}catch(e){return send(res,409,{error:e.message});}
-  }
-  if(url.pathname === '/api/task/integrate/resume') {
-    try{const r=integrateAuto.resume(b);setImmediate(()=>{void integrateAuto.tick();});record('integrate-resume',b,{id:r.id,thenMain:false});return send(res,200,r);}catch(e){integrationFailure(b,e,url.pathname.endsWith('/resume')?'resume':'start');return send(res,409,{error:e.message,code:e.code,stage:e.stage||'refresh',waiting:e.waiting});}
-  }
-  if(['/api/task/integrate','/api/task/absorb'].includes(url.pathname)) {
-    try { const r=integrateAuto.apply(b);if(b.auto) setImmediate(()=>{void integrateAuto.tick();}); record('integrate',b,{ok:r.ok,complete:r.complete,conflict:r.conflict});pruneUnread();return send(res,r.partial?200:r.conflict?409:200,r); }
-    catch(e){integrationFailure(b,e,url.pathname.endsWith('/resume')?'resume':'start');return send(res,409,{error:e.message,code:e.code,stage:e.stage||'refresh',waiting:e.waiting});}
-  }
-  if (url.pathname === '/api/task/results/organize') {
-    try { await resultsGate.trigger(b.project,b.task,{manual:true,expectedHash:b.expectedHash}); return send(res,200,{ok:true}); }
-    catch(e) {return send(res,409,{error:e.message});}
-  }
-  if (url.pathname === '/api/task/integrate/results') {
-    try {
-      const request=taskIntegrate.resultsRequest(b),role=executionRoles().roles.find(r=>r.name==='調査');
-      if(!role?.main.model || !['codex','claude-code','agy','grok'].includes(role.main.ai))throw Error(lt('設定の調査担当を確かめてください'));
-      // この画面の明示操作だけ、完了した子へ成果整理を依頼できる。起動失敗時は完了状態を保持。
-      return await delegateRequest({...request,role:role.name,ai:role.main.ai==='claude-code'?'claude':role.main.ai,model:role.main.model,effort:role.main.effort},res,{allowCompleted:true,resultsOrganize:true,resultsRecovery:b,beforeStart:()=>taskIntegrate.resultsRequest(b)});
-    }catch(e){integrationFailure(b,e,'results');return send(res,409,{error:e.message});}
-  }
-  if (url.pathname === '/api/task/integrate/resolve') {
-    try {
-      const request=taskIntegrate.conflictRequest(b);
-      const role=executionRoles().roles.find(r=>r.name==='コーディング');
-      if(!role?.main.model || !['codex','claude-code','agy','grok'].includes(role.main.ai))throw Error(lt('設定のコーディング担当を確かめてください'));
-      return await delegateRequest({...request,role:role.name,ai:role.main.ai==='claude-code'?'claude':role.main.ai,model:role.main.model,effort:role.main.effort},res,{beforeStart:()=>taskIntegrate.conflictRequest(b)});
-    }catch(e){integrationFailure(b,e,'resolve');return send(res,409,{error:e.message});}
-  }
-  if (url.pathname === '/api/delegate') return delegateRequest(b,res);
+  if (routes.taskintegration.handupPreview.matches(req, url)) return routes.taskintegration.handupPreview.handle(req, res, url, b);
+  if (routes.taskintegration.handup.matches(req, url, b)) return routes.taskintegration.handup.handle(req, res, url, b);
+  if (routes.taskintegration.records.matches(req, url)) return routes.taskintegration.records.handle(req, res, url, b);
+  if (routes.taskintegration.abandon.matches(req, url)) return routes.taskintegration.abandon.handle(req, res, url, b);
+  if (routes.taskintegration.keep.matches(req, url)) return routes.taskintegration.keep.handle(req, res, url, b);
+  if (routes.taskintegration.preview.matches(req, url)) return routes.taskintegration.preview.handle(req, res, url, b);
+  if (routes.taskbodywrite.write.matches(req, url)) return routes.taskbodywrite.write.handle(req, res, url, b);
+  if (routes.project.archive.matches(req, url)) return routes.project.archive.handle(req, res, url, b);
+  if (routes.taskintegration.resume.matches(req, url)) return routes.taskintegration.resume.handle(req, res, url, b);
+  if (routes.taskintegration.apply.matches(req, url)) return routes.taskintegration.apply.handle(req, res, url, b);
+  if (routes.taskintegration.organize.matches(req, url)) return routes.taskintegration.organize.handle(req, res, url, b);
+  if (routes.taskintegration.results.matches(req, url)) return routes.taskintegration.results.handle(req, res, url, b);
+  if (routes.taskintegration.resolve.matches(req, url)) return routes.taskintegration.resolve.handle(req, res, url, b);
+  if (url.pathname === '/api/delegate') return extensions.route('delegate',req,res,url,b,send);
   // 会話に「人の依頼」を残すだけ。ここではAIを動かさない。
-  if (url.pathname === '/api/chat/note') {
-    const p = store.readProject(b.project), file = p && store.taskFile(b.project, b.task);
-    const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (!file || !text || text.length > 8000) return send(res, 400, { error: lt('作業と依頼を確かめてください') });
-    if (p.kind === 'freetalk') freetalk.nameTopic(b.task, text);
-    const row = chat.append(p.dir, b.task, { role: 'user', text, to: String(b.to || '').slice(0, 20) });
-    chats.emit(p.id, b.task, { type: 'row', row });
-    return send(res, 200, { ok: true });
-  }
-  if (url.pathname === '/api/chat/send') {
-    const snapshot=reqCtx.getStore().stopSnapshot;
-    let stopTicket={epoch:snapshot.epoch,task:snapshot.tasks[JSON.stringify([b.project,b.task])]?.epoch||0},manualResume=false;
-    try{stopControl.assert(b,stopTicket);}catch(e){
-      try{
-        if(b.fromQueue||b.mode||b.automation||!b.manualStopTicket||b.manualStopTicket.epoch!==stopTicket.epoch||b.manualStopTicket.task!==stopTicket.task)throw e;
-        stopControl.checkManual(b,stopTicket);manualResume=true;reqCtx.getStore().manualResume={project:b.project,task:b.task,ticket:stopTicket};
-      }catch(refused){return send(res,409,{error:refused.message});}
-    }
-    const resumeManual=()=>{
-      if(!manualResume)return;
-      if(chats.busy(b.project,b.task)||sessions.list().some(s=>s.running&&s.project===b.project&&s.task===b.task)||webchatActive(b.project,b.task))throw Error('前のAIの終了・保存を確認してから送ってください');
-      chats.assertHandoffReady(b.project,b.task);holdStoppedQueue(b.project,b.task);
-      stopTicket=stopControl.resumeTask(b,stopTicket);manualResume=false;
-      reqCtx.getStore().manualResume=null;
-    };
-    if(discussion.active(b.project,b.task))return send(res,409,{error:'話し合いが進行中です。停止または完了後に送ってください'});
-    try { void license.prepare(); licenseGuard({ ...b, ...(b.fromQueue ? { mode: 'queued' } : {}) }, 'accept'); }
-    catch (e) { return send(res, e.status || 403, { error: e.message, code: e.code, delivery: 'not-sent' }); }
-    // 待っている指示を今すぐ始める（再起動の後など、作業中でない時）
-    const fromQueue = b.fromQueue ? chats.queue(b.project, b.task).find(x => x.id === String(b.fromQueue)) : null;
-    try{if(fromQueue)chats.assertQueueStart({project:b.project,task:b.task,request:fromQueue.id});}catch(e){return send(res,409,{error:e.message});}
-    if (b.fromQueue && !fromQueue) return send(res, 404, { error: lt('その指示はもう待っていません') });
-    const queueKey = chats.key(b.project, b.task);
-    if (fromQueue && queueActions.has(queueKey)) return send(res, 409, { error: lt('待ち指示を送信中です。終わってから操作してください') });
-    if (fromQueue && typeof b.expectedText === 'string' && b.expectedText !== fromQueue.text) return send(res, 409, { error: lt('待ち指示が変更されています。内容を確認してから操作してください') });
-    if (fromQueue && b.expectedItem !== undefined && b.expectedItem !== JSON.stringify(fromQueue)) return send(res, 409, { error: lt('待ち指示が変更されています。内容を確認してから操作してください') });
-    const amendQueue = Boolean(fromQueue && b.mode === 'amend');
-    if (amendQueue && (!queueEditable(fromQueue) || !chats.busy(b.project, b.task) || chats.busy(b.project, b.task).pending)) return send(res, 409, { error: lt('今すぐ追加指示にできません。AIの作業中にもう一度操作してください') });
-    if (fromQueue) queueActions.add(queueKey);
-    try {
-    if (fromQueue) Object.assign(b, { account: fromQueue.account || 'default', ai: fromQueue.ai, model: fromQueue.model, effort: fromQueue.effort, text: fromQueue.text, mode: amendQueue ? 'amend' : '' });
-    if(fromQueue?.automation){
-      try{if(b.mode)throw Error('台帳の依頼は台帳から変更してください');const r0=ideas.read(b.project).runs[fromQueue.automation.runId];const loc=ideaDispatch.location(b.project,r0);
-        const o={...fromQueue,project:b.project,task:b.task,pdir:loc.pdir,dir:loc.dir,request:fromQueue.id,basePrompt:ideaDispatch.policy(r0),policy:ideaDispatch.policy(r0)};ideaDispatch.verify(o);
-        const r=await chats.sendQueued(o);if(!(await r.started))throw Error('AIを起動できませんでした');chats.unqueue(b.project,b.task,fromQueue.id);return send(res,200,{ok:true,ai:r.ai,model:r.model,answeredQuestion:null});
-      }catch(e){return send(res,409,{error:e.message});}
-    }
-    if(b.automation)return send(res,403,{error:'台帳の実行情報は一般の送信では受け付けません'});
-    if (b.ai === 'dot') return send(res,410,{error:'Dot連携は廃止しました',delivery:'not-sent'});
-    if (b.ai === 'chatgpt' && ['chat','app'].includes(b.model)) return send(res, 410, { error: lt('手動・アプリの経路は廃止しました。ChatGPT（Chat／Pro）を選び直してください') });
-    if (b.ai === 'chatgpt' && !['auto'].includes(b.model)) return send(res, 409, { error: chat.CHATGPT_RETIRED });
-    const p = store.readProject(b.project);
-    const file = store.taskFile(b.project, b.task);
-    const text = typeof b.text === 'string' ? b.text.trim() : '';
-    const sharing=p&&removalReview.read(p.id);
-    if(sharing?.task===b.task){
-      if(!fromQueue?.readOnly||sharing.status!=='running'||![sharing.id,'limit-'+sharing.id].includes(fromQueue.id))return send(res,409,{error:lt('共有確認は削除画面から操作してください')});
-      try{
-        const r=await chats.sendQueued({...fromQueue,project:p.id,task:b.task,pdir:p.dir,dir:p.dir,request:fromQueue.id,readOnly:true,
-          basePrompt:lt('読み取り専用の共有確認です。ファイルを編集せず、判定のJSONだけを返してください。'),policy:lt('読み取り専用。JSONだけを返してください。')});
-        if(!(await r.started))throw Error(lt('AIを起動できませんでした'));chats.unqueue(p.id,b.task,fromQueue.id);return send(res,200,{ok:true,ai:r.ai,model:r.model});
-      }catch(e){return send(res,409,{error:e.message});}
-    }
-
-    if (!p || !file || ![...launch.AIS, 'chatgpt'].includes(b.ai)) return send(res, 400, { error: lt('作業が見つかりません') });
-    if (!text) return send(res, 400, { error: lt('依頼を書いてください') });
-    if (b.ai === 'chatgpt' && b.model === 'auto') {
-      if (b.fromQueue || b.mode || b.images?.length) return send(res, 400, { error: lt('自動Chatへの依頼は本文だけを送ってください。画像は添付できません') });
-      try {
-        const t = store.readTask(file), answerQuestion = typeof b.answerQuestion === 'string' ? b.answerQuestion : t.question;
-        webchat.availability(p,t);resumeManual();
-        const r = webchat.submit(p, t, text,stopTicket);
-        let answeredQuestion = null;
-        // Acceptance has already been durably recorded. A metadata failure
-        // must not report a rejected send and invite a duplicate request.
-        if (p.kind !== 'freetalk') try {
-          const current = store.readTask(file);
-          if (current.question === answerQuestion) {
-            if (current.question || current.state === '返事待ち') store.updateTask(p.id,t.id,{question:'',state:'実行中'});
-            answeredQuestion = answerQuestion;
-          }
-        } catch(e) { record('webchat-metadata-error',{project:p.id,task:t.id},{error:e.message}); }
-        return send(res, 200, { ...r, answeredQuestion });
-      } catch(e) { return send(res, e.status || 409, { error: require('./lib/webchat').message(e.message), code: e.message, delivery: 'not-sent' }); }
-    }
-    let t = store.readTask(file);
-    const automatic = !fromQueue && !b.model && specialMode.pick(modelView.special(), rolesData(), t.role);
-    if (automatic) { b.ai = automatic.ai; b.model = automatic.model; b.effort = b.effort || automatic.effort; b.account = undefined; }
-    const delegated = Boolean(fromQueue?.requireModel);
-    if (delegated && t.state === '完了') return send(res, 409, { error: DELEGATE_COMPLETED_ERROR });
-    try{chats.assertHandoffReady(p.id,b.task);}catch(e){return send(res,409,{error:e.message,delivery:'not-sent'});}
-    const busy = chats.busy(p.id, b.task);
-    // redo: 取り消してやり直す ／ amend: 追加説明（一緒にやる）／ queue: 終わったら次に（interrupt は前の呼び名）
-    const want = b.mode === 'interrupt' ? 'redo' : b.mode;
-    if(busy?.automation&&['redo','amend'].includes(want))return send(res,409,{error:'台帳の実行中は台帳の項目から変更してください'});
-    const mode = busy ? (['redo', 'amend', 'queue'].includes(want) ? want : '') : '';
-    if (busy && !mode) return send(res, 409, { error: lt('まだ作業中です。［取り消してやり直す］［追加説明（一緒にやる）］［終わったら次に］から選んでください') });
-    const spec = pickSpec(t, b.ai);
-    const account = requestAccount(p, t.id, b.ai, b.account);
-    const model = launch.modelLabel(b.ai, b.model || spec.model);
-    const invalidModel = modelError(b.ai, model);
-    if (invalidModel) return send(res, 409, { error: invalidModel });
-    if(fromQueue){try{verifyIntegrationReviewSend({...fromQueue,project:p.id,task:t.id,request:fromQueue.id,mode:'queued'});}catch(e){return send(res,409,{error:e.message});}}
-    const { dir, note } = fromQueue?.isolatedReview ? (assertWorkspaceIdle(p,t,Boolean(mode)),{dir:isolatedReviewDir(p,t)}) : startDir(p, t, Boolean(mode));
-    if (b.ai === 'grok' && b.effort === 'Ultra') return send(res, 400, { error: lt('Grok の思考は 中・高・極高・MAX です') });
-    const effort = fromQueue?.integrationAssignment ? fromQueue.effort : b.ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : spec.effort;
-    let topicImages=[];
-    if(p.kind==='freetalk' && !fromQueue && b.images?.length) {
-      try { freetalk.checkGeneration(t.id,b.generation);topicImages=freetalkAttachments.images(t.id,b.images); }
-      catch(e){return send(res,409,{error:e.message});}
-    }
-    let attachmentDraft;
-    try { attachmentDraft = fromQueue?.attachmentDraft || queueEdit.accept(p, t.id, b.attachmentDraft, text, freetalkAttachments); }
-    catch (e) { return send(res, 400, { error: e.message }); }
-    const basePrompt = fromQueue?.isolatedReview?integrationReviewPrompt(p,t):taskPrompt(p, t, file, dir) + lt(' ここは会話画面。人からの依頼に答え、区切りで作業ファイルを更新すること。');
-    resumeManual();
-    // 受付時の質問だけを消す。起動待ち中に来た新しい質問には触れない。
-    const answerQuestion = typeof b.answerQuestion === 'string' ? b.answerQuestion : t.question;
-    const acceptAnswer = () => {
-      const current = store.readTask(file);
-      if (current.question !== answerQuestion) return null;
-      if (current.question || current.state === '返事待ち') store.updateTask(p.id, t.id, { question: '', state: '実行中' });
-      return answerQuestion;
-    };
-    let projectImages;
-    if(p.kind!=='freetalk'&&b.projectImages!==undefined){
-      if(!Array.isArray(b.projectImages)||b.projectImages.length>10)return send(res,400,{error:'添付画像の情報を確認してください'});
-      try{projectImages=b.projectImages.map(id=>{const f=start.imageFile(p,id);if(!fs.existsSync(f))throw Error('添付画像が見つかりません');return id;});}catch(e){return send(res,400,{error:e.message});}
-    }
-    // 追加：今の作業が終わったら続けて行う
-    if (mode === 'queue') {
-      const it = chats.enqueue(p.id, t.id, { ai: b.ai, account, model, effort, role: t.role, text, attachmentDraft, ...(projectImages?{projectImages}:{}), images: p.kind==='freetalk' ? topicImages : [], perm: permCmd(b.ai) });
-      if (p.kind === 'freetalk') freetalk.nameTopic(t.id, text);
-      record('chatqueue', { project: p.id, task: t.id, ai: b.ai }, { model });
-      return send(res, 200, { ok: true, queued: true, id: it.id, queue: chats.queue(p.id, t.id).length, answeredQuestion: acceptAnswer() });
-    }
-    // 取り消し・追加説明：今の作業を区切って（終わるのを待って）から、元の指示と合わせて伝え直す
-    let stopWaiting,switchAdvance;
-    if (!busy?.pending && (mode === 'redo' || mode === 'amend')) {
-      const switching=Object.values(require('./lib/chat-continuation').read(p.dir,t.id).advances).find(a=>a.source.turn===busy.userRow?.turn&&a.mode!=='fifo');
-      if(switching&&switching.id!==fromQueue?.id)return send(res,409,{error:'前の切替を確認中です。新しい文章はまだ受け付けていません'});
-      const waiting=stopWaiting=fromQueue || chats.enqueue(p.id,t.id,{ai:b.ai,account,model,effort,role:t.role,text,attachmentDraft,...(projectImages?{projectImages}:{}),images:topicImages,perm:permCmd(b.ai)});
-      try{switchAdvance=chats.prepareSwitch(p.id,t.id,waiting.id,mode,stopTicket);}catch(e){return send(res,409,{error:e.message,queued:true,id:waiting.id});}
-      try{await chats.stop(p.id,t.id,{interrupting:true});}catch(e){try{require('./lib/chat-continuation').update(p.dir,t.id,d=>{d.advances[switchAdvance.source.turn].reason=e.message;});}catch{/* The original intent remains; no new start is attempted here. */}return send(res,409,{error:e.message,queued:true,id:waiting.id});}
-      try{stopControl.assert({project:p.id,task:t.id},stopTicket);}catch(e){return send(res,409,{error:e.message,queued:true,id:waiting.id});}
-
-      record(mode === 'redo' ? 'chatredo' : 'chatamend', { project: p.id, task: t.id, ai: b.ai });
-
-    }
-    try {
-      // 答えを送ったら、AI からの質問は済んだことにする
-      // 質問は spawn の成功後にだけ解除する。
-      // AI が質問して終わったら「あなたの番」にする（左の丸が黄色になる）
-      const onEnd = row => { if (!fromQueue?.isolatedReview && row.asks && row.asks.length) store.updateTask(p.id, t.id, { state: '返事待ち', question: row.asks.map(a => a.question).filter(Boolean).join(' / ').slice(0, 300) || lt('選んでください') }); chatEnded(p.id, t.id); };
-      let replacement;
-      if (busy?.pending && (mode === 'redo' || mode === 'amend')) {
-        replacement = chats.replacePending(p.id, t.id, text, mode, p.kind === 'freetalk' ? topicImages : undefined);
-        await replacement.finished;
-        stopControl.assert({project:p.id,task:t.id},stopTicket);
-      }
-      if (!replacement && !fromQueue) {
-        const stopVersion = chats.stops.get(chats.key(p.id, t.id)) || 0;
-        await refreshLimitEvidence({ project: p.id, task: t.id, role: t.role, ai: b.ai, account, model });
-        if(p.kind==='freetalk' && b.images?.length)freetalk.checkGeneration(t.id,b.generation);
-        if ((chats.stops.get(chats.key(p.id, t.id)) || 0) !== stopVersion) throw Error(lt('利用枠の確認中に停止されました。AIは開始していません'));
-      }
-      const options={ stopTicket, project: p.id, task: t.id, pdir: p.dir, dir, ai: b.ai, account, model, effort, origin: fromQueue?.origin, integrationAssignment:fromQueue?.integrationAssignment, limitPolicy:fromQueue?.limitPolicy, isolatedReview:fromQueue?.isolatedReview, integrationReviewRequest:fromQueue?.integrationReviewRequest, readOnly:fromQueue?.readOnly, readDirs:fromQueue?.readDirs, images: p.kind==='freetalk' && b.ai==='codex' ? fromQueue?.images || topicImages : [], role: fromQueue ? fromQueue.role || '' : t.role, limitSlot: fromQueue?.limitSlot, limitSwitch: fromQueue?.limitSwitch, request: fromQueue?.id||stopWaiting?.id, requireModel: Boolean(fromQueue?.requireModel), requiredModel: fromQueue?.requiredModel, text, shown: amendQueue ? text : fromQueue?.shown || text, mode: mode || (fromQueue ? 'queued' : undefined), basePrompt, policy: modelPolicy(p, t), perm: permCmd(b.ai), onEnd };
-      const r = switchAdvance ? await chats.launchAdvance({...switchAdvance,liveRun:busy},options) : replacement
-        ? await chats.sendQueued(replacement.options)
-        : await (fromQueue ? chats.sendQueued.bind(chats) : chats.send.bind(chats))(options);
-      if(!r)throw Error('待ち指示は取り消されました。中断した依頼の記録を確認してください');
-      if (!(await r.started)) throw Error(lt('AIを起動できませんでした。CLIの導入状態を確認してください。作業の状態と質問は変更していません'));
-      if (p.kind === 'freetalk') freetalk.nameTopic(t.id, text);
-      const answeredQuestion = delegated || fromQueue?.isolatedReview ? null : acceptAnswer();
-      if (delegated && !fromQueue?.isolatedReview) {
-        store.updateTask(p.id, t.id, { state: '実行中', question: '' });
-      }
-      if (stopWaiting&&!fromQueue)chats.unqueue(p.id,t.id,stopWaiting.id);
-      if (fromQueue) chats.unqueue(p.id, t.id, fromQueue.id);
-      if (replacement) {
-        chats.unqueue(p.id, t.id, replacement.options.request);
-        record(mode === 'redo' ? 'chatredo' : 'chatamend', { project: p.id, task: t.id, ai: r.ai });
-      }
-      record('chat', { project: p.id, task: t.id, ai: r.ai }, { model: r.model, effort: r.effort, resume: r.resume });
-      return send(res, 200, { ok: true, model: r.model, effort: r.effort, note: r.limitSwitch?.preflight ? lt`${r.limitSwitch.from} 上限保持中のため ${r.model} で開始しました。` : note, resume: r.resume, answeredQuestion });
-    } catch (e) { return send(res, 409, { error: String(e.message || e),...(stopWaiting?{queued:true,id:stopWaiting.id}:{}) }); }
-    } finally { if (fromQueue) queueActions.delete(queueKey); }
-  }
-  if (url.pathname === '/api/chat/handoff/recover') {
-    try{return send(res,200,chats.recoverHandoff(b));}
-    catch(e){return send(res,409,{error:e.message,delivery:'not-sent'});}
-  }
-  if (url.pathname === '/api/chat/queue/retreat') {
-    const human=require('./lib/idea-api').humanRequest({...req,headers:{...req.headers,'x-hub-ui':req.headers['x-hub-ui']==='queue'?'ideas':''}});
-    if(!human)return send(res,403,{error:'この操作は待ち指示の［台帳へ退避］から行ってください'});
-    try {return send(res,200,queueRetreat.transfer(b));}
-    catch(e){return send(res,e.status||503,{error:e.message,code:e.code,opId:b.opId});}
-  }
-  if (url.pathname === '/api/chat/unfinished/resolve') {
-    const p=store.readProject(b.project);
-    if(!p||!store.taskFile(b.project,b.task))return send(res,400,{error:'作業が見つかりません'});
-    try{return send(res,200,{ok:true,entry:require('./lib/chat-continuation').resolve(p.dir,b.task,b)});}
-    catch(e){return send(res,409,{error:e.message});}
-  }
-  if (url.pathname === '/api/chat/queue/edit') {
-    const p = store.readProject(b.project), file = store.taskFile(b.project, b.task);
-    if (!p || !file) return send(res, 400, { error: lt('作業が見つかりません') });
-    const q = chats.queue(p.id, b.task), item = q.find(x => x.id === String(b.id || ''));
-    if (!item) return send(res, 404, { error: lt('その指示はもう待っていません') });
-    if (!queueEditable(item)) return send(res, 409, { error: lt('この待ち指示は編集できません') });
-    if (queueActions.has(chats.key(p.id, b.task)) || chats.busy(p.id, b.task)?.request === item.id) return send(res, 409, { error: lt('待ち指示を送信中です。終わってから操作してください') });
-    const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (!text && !(Array.isArray(b.attachmentIds) && b.attachmentIds.length)) return send(res, 400, { error: lt('依頼を書いてください') });
-    if (b.expectedText !== item.text) return send(res, 409, { error: lt('待ち指示が変更されています。内容を確認してから操作してください') });
-    try {
-      if (b.expectedItem !== undefined ? b.expectedItem !== JSON.stringify(item) : item.editRevision || item.attachmentDraft) throw Error('待ち指示が変更されています。編集を開き直してください');
-      let selection = {};
-      if (b.ai !== undefined || b.model !== undefined) {
-        if (!['claude', 'codex', 'agy', 'grok'].includes(b.ai) || typeof b.model !== 'string' || !b.model) throw Error('AI・モデルを選んでください');
-        const model = launch.modelLabel(b.ai, b.model), invalid = modelError(b.ai, model);
-        if (invalid) throw Error(invalid);
-        const t = store.readTask(file), account = requestAccount(p, b.task, b.ai, b.ai === item.ai ? item.account || 'default' : undefined);
-        const preferred = roles.EFFORTS.includes(item.effort) ? item.effort : pickSpec(t, b.ai).effort;
-        const effort = b.ai === 'agy' || b.ai === 'grok' && preferred === 'Ultra' ? '高' : preferred;
-        if (item.requireModel && !launch.flagFor(b.ai, model)) throw Error('指定モデルの起動名を確認できません');
-        selection = { ai: b.ai, model, account, effort, perm: permCmd(b.ai), requiredModel: item.requireModel ? launch.flagFor(b.ai, model) : undefined, limitSlot: item.role ? limitIdentity(rolesData(), { ai: b.ai, model, role: item.role })?.limitSlot : undefined };
-      }
-      let editedText = text, attachmentDraft, images = item.images, projectImages = item.projectImages;
-      if (b.attachmentIds !== undefined) {
-        const source = queueEdit.draft(p, b.task, item, freetalkAttachments);
-        if (!Array.isArray(b.attachmentIds) || new Set(b.attachmentIds).size !== b.attachmentIds.length || b.attachmentIds.some(id => !source.attachments.some(x => x.id === id))) throw Error('添付情報が変更されています');
-        const attachments = source.attachments.filter(x => b.attachmentIds.includes(x.id));
-        // 参照の削除だけなので、既に無い画像も残存添付の保存を妨げない。
-        attachmentDraft = { text: b.text, attachments };
-        editedText = queueEdit.format(b.text, attachments);
-        if (p.kind === 'freetalk') images = attachments.map(x => x.imagePath).filter(Boolean);
-        else projectImages = attachments.filter(x => x.kind !== 'file').map(x => x.id);
-      }
-      const edited = { ...item, ...selection, text: editedText, ...(item.shown !== undefined ? { shown: editedText } : {}),
-        ...(b.attachmentIds !== undefined ? { attachmentDraft, images, ...(p.kind !== 'freetalk' ? { projectImages } : {}) } : { attachmentDraft: undefined }),
-        ...(b.ai !== undefined || b.attachmentIds !== undefined ? { editRevision: require('node:crypto').randomUUID() } : {}), error: undefined };
-      const queue = chats.setQueue(p.id, b.task, q.map(x => x.id === item.id ? edited : x), true);
-      record('chatqueueedit', { project: p.id, task: b.task, ai: item.ai });
-      return send(res, 200, { ok: true, queue });
-    } catch (e) { return send(res, 409, { error: String(e.message || e) }); }
-  }
+  if (routes.chatnote.write.matches(req, url)) return routes.chatnote.write.handle(req, res, url, b);
+  if (routes.chatsend.send.matches(req, url)) return routes.chatsend.send.handle(req, res, url, b);
+  if (routes.chatrecovery.handoff.matches(req, url)) return routes.chatrecovery.handoff.handle(req, res, url, b);
+  if (routes.queuecontrol.retreat.matches(req, url)) return routes.queuecontrol.retreat.handle(req, res, url, b);
+  if (routes.chatrecovery.unfinished.matches(req, url)) return routes.chatrecovery.unfinished.handle(req, res, url, b);
+  if (routes.queuecontrol.edit.matches(req, url)) return routes.queuecontrol.edit.handle(req, res, url, b);
   // 未読の印を消す（画面が作業を開いた時）
-  if (url.pathname === '/api/task/read') {
-    if (typeof b.project !== 'string' || typeof b.task !== 'string') return send(res, 400, { error: lt('作業が見つかりません') });
-    setUnread(b.project, b.task, false);
-    return send(res, 200, { ok: true });
-  }
-  if (url.pathname === '/api/chat/unqueue') {
-    if (queueActions.has(chats.key(b.project, b.task))) return send(res, 409, { error: lt('待ち指示を送信中です。終わってから操作してください') });
-    try{queueRetreat.guard({project:b.project,task:b.task,id:b.id,action:'change'});}catch(e){return send(res,409,{error:e.message});}
-    const pending = fs.existsSync(ROLES_FILE) ? roleHistory.load(ROLES_FILE).journal.review : null;
-    if (pending?.project === b.project && pending.task === b.task && [pending.request, `limit-${pending.request}`].includes(b.id) && b.id) roleReview.cancel?.();
-    if (fromRemote()) record('chatunqueue', b);
-    return send(res, 200, { ok: true, queue: chats.unqueue(b.project, b.task, String(b.id || '')) });
-  }
+  if (routes.tasksettings.read.matches(req, url)) return routes.tasksettings.read.handle(req, res, url, b);
+  if (routes.queuecontrol.unqueue.matches(req, url)) return routes.queuecontrol.unqueue.handle(req, res, url, b);
   if (url.pathname === '/api/discussion/start' || url.pathname === '/api/discussion/summary') return extensions.route('discussion',req,res,url,b,send);
 
 
@@ -3021,188 +1470,32 @@ async function apiRequest(req, res, url) {
   }
 
   // CLI に渡すモデル名を保存する
-  if (url.pathname === '/api/cli-models') {
-    const clean = x => (x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).filter(([k, v]) => typeof k === 'string' && typeof v === 'string' && k.length < 40 && /^[\w.:\-/\[\]]*$/.test(v.trim())).map(([k, v]) => [k, v.trim()])) : {});
-    saveCliModels({ claude: clean(b.claude), codex: clean(b.codex) });
-    record('climodels', {});
-    return send(res, 200, { ok: true, overrides: launch.getOverrides() });
-  }
-
+  if (routes.modelsettings.cli.matches(req, url)) return routes.modelsettings.cli.handle(req, res, url, b);
   // Mac のフォルダ選択の窓を出して、選んだ場所を返す
-  if (url.pathname === '/api/pick-folder') {
-    if (DRY) return send(res, 200, { path: '' });
-    platform.pickFolder(b.prompt, selected => send(res, 200, { path: selected }));
-    return undefined;
-  }
+  if (routes.localfiles.pick.matches(req, url)) return routes.localfiles.pick.handle(req, res, url, b);
   // アプリの窓に落としたファイル（場所が分かる物）を渡す：作業ファイルに記録し、AI の入力欄に場所を入れる
-  if (url.pathname === '/api/task/attach') {
-    const p = store.readProject(b.project);
-    const file = p && store.taskFile(p.id, b.task);
-    if(p?.kind==='freetalk') {
-      let release;const attachments=[];
-      try {
-        if(!Array.isArray(b.paths)||!b.paths.length||b.paths.length>20)throw Error(lt('添付ファイルの指定が正しくありません'));
-        release=freetalk.holdUpload(b.task,b.generation);
-        for(const raw of b.paths)attachments.push(await freetalkAttachments.fromPath(b.task,raw,b.generation));
-        const paths=attachments.flatMap(a=>a.referencePaths);
-        store.updateTask(p.id,b.task,{memo:lt`ファイルを渡した: ${paths.join(' , ')}`});
-        record('upload',{project:p.id,task:b.task},{file:paths.join(' , ')});
-        return send(res,200,{ok:true,attachments,paths,typed:false});
-      }catch(e){for(const attachment of attachments)freetalkAttachments.discard(b.task,attachment);return send(res,409,{error:e.message});}
-      finally{release?.();}
-    }
-    const paths = (Array.isArray(b.paths) ? b.paths : []).map(x => String(x)).filter(x => path.isAbsolute(x) && fs.existsSync(x)).slice(0, 20);
-    if (!file) return send(res, 400, { error: lt('作業が見つかりません') });
-    if (!paths.length) return send(res, 400, { error: lt('ファイルが見つかりません') });
-    store.updateTask(p.id, b.task, { memo: lt`ファイルを渡した: ${paths.join(' , ')}` });
-    const ai = launch.AIS.includes(b.ai) ? b.ai : '';
-    const typed = ai ? sessions.write(p.id, b.task, ai, paths.map(x => (/\s/.test(x) ? `"${x}"` : x)).join(' ') + ' ') : false;
-    record('upload', { project: p.id, task: b.task, ai }, { file: paths.join(' , ') });
-    return send(res, 200, { ok: true, paths, typed });
-  }
+  if (routes.taskattachments.attach.matches(req, url)) return routes.taskattachments.attach.handle(req, res, url, b);
 
   // 参考フォルダ・ファイルを足す（作った後のプロジェクトにも）
-  if (url.pathname === '/api/project/refs') {
-    const paths = (Array.isArray(b.paths) ? b.paths : []).map(x => expandHome(String(x))).filter(x => path.isAbsolute(x) && fs.existsSync(x)).slice(0, 30);
-    if (!paths.length) return send(res, 400, { error: lt('フォルダが見つかりません') });
-    const r = store.addRefs(b.project, paths);
-    if (!r) return send(res, 400, { error: lt('プロジェクトが見つかりません') });
-    record('refs', { project: b.project }, { paths: paths.join(' , ') });
-    return send(res, 200, { ok: true, added: r.added, folders: r.project.folders });
-  }
+  if (routes.project.refs.matches(req, url)) return routes.project.refs.handle(req, res, url, b);
 
   // 新しいプロジェクトを始める
   // 中身の無い作業・子プロジェクトを探す／ゴミ箱へまとめて移す
-  if (url.pathname === '/api/empty/scan' || url.pathname === '/api/empty/trash') {
-    const busy = (project, task) => webchatActive(project, task) || sessions.list().some(x => x.running && x.project === project && x.task === task) || Boolean(chats.busy(project, task));
-    if (url.pathname === '/api/empty/scan') return send(res, 200, { ok: true, items: emptyLib.scan(store, busy) });
-    const r = emptyLib.trash(store, busy, Array.isArray(b.items) ? b.items : []);
-    record('emptytrash', {}, { moved: r.moved });
-    return send(res, 200, { ok: true, ...r });
-  }
-  if (url.pathname === '/api/task/tidy/preview' || url.pathname === '/api/task/tidy/apply') {
-    try {
-      if (url.pathname.endsWith('/preview')) return send(res, 200, removal.tidyPreview(b.project, b.task));
-      const result = removal.tidyApply(b); record('tasktidy', b, { transaction: result.record, moved: result.moved.length }); return send(res, 200, result);
-    } catch (e) { return send(res, 409, { error: e.message }); }
-  }
-  if (url.pathname.startsWith('/api/hierarchy/remove/')) {
-    try {
-      let result;
-      if(url.pathname.endsWith('/preview')) {const review=b.task?null:removalReview.status(b.project);result={...removal.preview(b.project,b.task),review};}
-      else if(url.pathname.endsWith('/review/start')) result=await removalReview.begin(b.token);
-      else if(url.pathname.endsWith('/review/status')) {const review=removalReview.status(b.project);result={review,...(review?.status!=='running'?{preview:{...removal.preview(b.project),review}}:{})};}
-      else if(url.pathname.endsWith('/apply')) {const removalTarget=removal.tokens.get(b.token)?.d;if(removalTarget&&!removalTarget.task&&ideas.resolve(removalTarget.project))ideas.backup(removalTarget.project,{opId:crypto.randomUUID()});result=removal.apply(b);pruneUnread();record('remove',{}, {transaction:result.record,moved:result.moved.length});}
-      else if(url.pathname.endsWith('/restore')) {result=removal.restore(b.record,b.confirm);record('removerestore',{}, {transaction:b.record});}
-      else if(url.pathname.endsWith('/history')) result={history:removal.history()};
-      else return send(res,404,{error:'not found'});
-      return send(res,200,result);
-    }catch(e){return send(res,409,{error:e.message});}
-  }
-  if (url.pathname.startsWith('/api/maintenance/')) {
-    try {
-      let result;
-      if (url.pathname === '/api/maintenance/preview') result=maintenance.preview(b.project);
-      else if (url.pathname === '/api/maintenance/apply') {result=maintenance.apply(b.project,b.token,b.selected,b.confirm);record('cleanup', {project:b.project}, {transaction:result.id,moved:result.moved});}
-      else if (url.pathname === '/api/maintenance/restore') {result=maintenance.restore(b.project,b.transaction,b.confirm);record('restore',{project:b.project},{transaction:b.transaction});}
-      else if (url.pathname === '/api/maintenance/solve') {result=await problemResolution.solve(b.project);record('problemsolve',{project:b.project,task:result.task},{reused:result.reused,clear:result.clear});}
-      else if (url.pathname === '/api/maintenance/verify') {const owner='maintenance:'+b.project;let lease;try{result=await maintenance.verify(b.project,b.script,b.expectedHash,b.confirm,()=>{lease=executionGate.acquire({dir:baseOf(store.readProject(b.project)),owner,kind:'verification'});});}finally{if(lease)executionGate.release(owner,lease.id);}record('verify',{project:b.project},{ok:result.ok,script:b.script});}
-      else return send(res,404,{error:lt('操作が見つかりません')});
-      return send(res,200,result);
-    } catch(e) {return send(res,409,{error:e.message,...(e.task?{task:e.task}:{})});}
-  }
-  if (url.pathname === '/api/hierarchy/pin') {
-    try {
-      const result = projectOrder.pin(b);
-      record('projectpin', { project: b.project }, { pinned: b.pinned });
-      return send(res, 200, result);
-    } catch (e) { return send(res, 409, { error: e.message }); }
-  }
-  if (url.pathname === '/api/hierarchy/order') {
-    try {
-      const result = projectOrder.save(b);
-      record('projectorder', {}, { parent: b.parent, order: b.order });
-      return send(res, 200, result);
-    } catch (e) { return send(res, 409, { error: e.message }); }
-  }
-  if (url.pathname === '/api/hierarchy/rename') {
-    try {
-      const { Hierarchy } = require('./lib/hierarchy');
-      const value = new Hierarchy(store, id => sessions.list().some(s=>s.project===id && s.running) || [...chats.running.keys()].some(k=>k.startsWith(id+'\u0000'))).rename(b.project, b.task, b.name, b.expectedHash);
-      record('rename', { project: b.project, task: b.task }); return send(res, 200, value);
-    } catch(e) { return send(res, 409, { error: e.message }); }
-  }
-  if (url.pathname === '/api/project/new') {
-    const body = expandHome(b.body || '');
-    if (body && !fs.existsSync(body)) return send(res, 400, { error: lt`本体のフォルダが見つかりません: ${body}` });
-    if (body && !fs.statSync(body).isDirectory()) return send(res, 400, { error: lt`フォルダではありません（ファイルです）: ${body}` });
-    const refs = (Array.isArray(b.refs) ? b.refs : []).map(x => expandHome(String(x))).filter(x => path.isAbsolute(x) && fs.existsSync(x));
-    const pack = activePack(['templates']);
-    const r = store.createProject({ ...b, body, refs }, pack ? path.join(pack.directory, 'templates', 'project') : path.join(__dirname, '..', 'docs', 'project-hub', 'templates', 'project'));
-    if (r.error) return send(res, 400, { error: r.error });
-    record('newproject', { project: r.project.id });
-    return send(res, 200, r.project);
-  }
-  if (url.pathname === '/api/task/new') {
-    const t = store.createTask(b.project, b);
-    if (t) record('newtask', { project: b.project, task: t.id }, { title: t.title });
-    return t ? send(res, 200, t) : send(res, 400, { error: lt('作業名・親作業・派生元を確認してください') });
-  }
+  if (routes.taskmanagement.empty.matches(req, url)) return routes.taskmanagement.empty.handle(req, res, url, b);
+  if (routes.taskmanagement.tidy.matches(req, url)) return routes.taskmanagement.tidy.handle(req, res, url, b);
+  if (routes.hierarchy.remove.matches(req, url)) return routes.hierarchy.remove.handle(req, res, url, b);
+  if (routes.maintenance.write.matches(req, url)) return routes.maintenance.write.handle(req, res, url, b);
+  if (routes.hierarchy.organize.matches(req, url)) return routes.hierarchy.organize.handle(req, res, url, b);
+  if (routes.project.create.matches(req, url)) return routes.project.create.handle(req, res, url, b);
+  if (routes.taskmanagement.create.matches(req, url)) return routes.taskmanagement.create.handle(req, res, url, b);
 
   // 選ぶ欄にモデルを出す・出さない
-  if (url.pathname === '/api/models/hidden') {
-    if (!['claude-code', 'codex', 'agy', 'grok'].includes(b.ai) || typeof b.model !== 'string' || !b.model) return send(res, 400, { error: lt('形式が違います') });
-    return send(res, 200, { ok: true, ...modelView.setHidden(b.ai, b.model, Boolean(b.hidden)) });
-  }
-  if (url.pathname === '/api/special-mode') {
-    const r = modelView.setSpecial(b);
-    if (r.error) return send(res, r.status, { error: r.error });
-    record('specialmode', {}, r.specialMode);
-    return send(res, 200, { ok: true, ...r });
-  }
-  if (url.pathname === '/api/models/initial') {
-    const r = modelView.setInitial(b, rolesData().models, modelError);
-    if (r.error) return send(res, r.status, { error: r.error });
-    record('initialai', {}, r.initialPick);
-    return send(res, 200, { ok: true, ...r });
-  }
-  if (url.pathname === '/api/models/phone') {
-    const r = modelView.setPhone(b, rolesData().models);
-    return r.error ? send(res, r.status, { error: r.error }) : send(res, 200, { ok: true, ...r });
-  }
-  if (url.pathname === '/api/models/order') {
-    const r = modelView.setOrder(b.order, b.before, rolesData().models);
-    return r.error ? send(res, r.status, { error: r.error }) : send(res, 200, { ok: true, ...r });
-  }
-  // 最新のモデルに整理：役割の古いモデル名を、同じ系統の一番新しいモデルに。roles.yaml の一覧も今のものに
-  if (url.pathname === '/api/models/tidy') {
-    const r = roles.tidy(ROLES_FILE, { expectedRevision: b.expectedRevision });
-    if (!r.ok) return send(res, r.delivery ? 409 : 400, { error: r.error,...(r.delivery?{delivery:r.delivery}:{}) });
-    record('modeltidy', {}, { changes: r.changes.length });
-    return send(res, 200, { ok: true, changes: r.changes, roles: rolesData() });
-  }
+  if (routes.modelsettings.write.matches(req, url)) return routes.modelsettings.write.handle(req, res, url, b);
   // 役割分担の保存
-  if (url.pathname === '/api/roles') {
-    if (!Array.isArray(b.roles)) return send(res, 400, { error: lt('形式が違います') });
-    const r = roles.write(ROLES_FILE, b.roles, b.checkCredits, false, b.preferCredits, { expectedRevision: b.expectedRevision });
-    return r.ok ? send(res, 200, r.data) : send(res, r.status || 400, { error: r.errors.join(' / ') });
-  }
+  if (routes.rolesettings.write.matches(req, url)) return routes.rolesettings.write.handle(req, res, url, b);
   if (url.pathname === '/api/roles/review' || url.pathname === '/api/roles/review/cancel') return extensions.route('role_review', req, res, url, b, send);
-  if (url.pathname === '/api/roles/default') {
-    const r = roles.saveDefault(ROLES_FILE, b.roles, b.expectedRevision);
-    return r.ok ? send(res, 200, r.data) : send(res, r.status || 400, { error: r.errors.join(' / ') });
-  }
-  if (url.pathname === '/api/roles/restore') {
-    const current = roleHistory.load(ROLES_FILE);
-    if (!b.expectedRevision || b.expectedRevision !== current.revision) return send(res,409,{error:lt('役割設定が変わりました。読み直してください')});
-    const row = b.defaults === true ? current.journal.defaults : roleHistory.select(current.journal,b);
-    if (!row) return send(res,409,{error:lt('デフォルトはまだ保存されていません')});
-    const r = roles.write(ROLES_FILE, row.roles, undefined, true, undefined, {
-      expectedRevision:b.expectedRevision, restore:true, kind:b.defaults === true ? 'default' : 'restore',
-      reason:b.defaults === true ? lt('固定したデフォルトに戻した') : lt('履歴の設定に戻した') + `（${row.at}）`
-    });
-    return r.ok ? send(res,200,r.data) : send(res,r.status || 400,{error:r.errors.join(' / ')});
-  }
+  if (routes.rolesettings.defaults.matches(req, url)) return routes.rolesettings.defaults.handle(req, res, url, b);
+  if (routes.rolesettings.restore.matches(req, url)) return routes.rolesettings.restore.handle(req, res, url, b);
 
   return send(res, 404, { error: 'not found' });
 }
@@ -3379,17 +1672,18 @@ roleReview = extensions.create('role_review', { license:Object.freeze({require:f
   notice:(message,last)=>record('role-review',{}, {message,status:last?.status}) });
 if(fs.existsSync(ROLES_FILE)) roleReview.recover();
 const roleReviewTimer=setInterval(()=>{if(fs.existsSync(ROLES_FILE))void roleReview.tick().catch(e=>record('role-review-error',{}, {error:e.message}));},1500);roleReviewTimer.unref();
+const userDelegate=extensions.create('delegate',{license:Object.freeze({prepare:()=>license.prepare()}),licenseGuard,deliver:userDelivery,lt,roles,executionRoles,PORT});
 discussion = extensions.create('discussion', { license:Object.freeze({require:features=>license.require(features)}), file:path.join(ROOT,'_hub','discussions.json'), store, chats, tools:aiTools, accounts, usage, limits:limitEvidence, accountFor, modelError,
   notice:message=>record('discussion-error',{}, {error:message}),
   migrated:(p,t)=>p.kind==='freetalk'&&freetalkHistory.state(t.id).migrated, workDir:isolatedReviewDir, ended:chatEnded,
   blocked:p=>Boolean(stopControl.held(p)||restartControl?.committed||appUpdate.applying()||delegateTerminalError(p.project,p.task)||webchatActive(p.project,p.task)) });
-ideaLane=new (require('./lib/idea-lane').IdeaLane)({ideas,store,baseOf,gate:executionGate});
-const ideaVerification=new (require('./lib/idea-verification').IdeaVerification)({ideas,lane:ideaLane,gate:executionGate});ideaLane.profiles=ideaVerification;
-const ideaReview=new (require('./lib/idea-review').IdeaReview)({ideas,lane:ideaLane,verification:ideaVerification});
-ideaDispatch=new (require('./lib/idea-dispatch').IdeaDispatch)({ideas,lane:ideaLane,gate:executionGate,chats,spoolRoot:path.join(ROOT,'_hub','cli-runs'),roles:rolesData,delegate:(b,res,opts)=>{if(DRY){res.writeHead(409);res.end(JSON.stringify({error:'隔離試験では実AIを開始しません'}));return;}return delegateRequest(b,res,opts);},mayStart:(p,r)=>ideaRunner.mayStart(p,r)});
-ideaRelease=new (require('./lib/idea-release').IdeaRelease)({ideas,lane:ideaLane,gate:executionGate,verification:ideaVerification,review:ideaReview,git:gitw,versionCheck:dir=>require('./lib/version-check').checkVersion(f=>fs.readFileSync(path.join(dir,f),'utf8'))});
-ideaRunner=new (require('./lib/idea-runner').IdeaRunner)({ideas,lane:ideaLane,gate:executionGate,dispatch:ideaDispatch,verification:ideaVerification,review:ideaReview,release:ideaRelease,stopped:p=>Boolean(stopControl.held({project:p})||stopControl.view().tasks.some(t=>t.project===p)),busy:(p,t)=>Boolean(chats.busy(p,t)||webchatActive(p,t)||sessions.list().some(s=>s.running&&s.project===p&&s.task===t)),humanQueued:p=>{const q=store.readProject(p);return q.tasks.some(t=>chats.queue(p,t.id).some(x=>x.automation?.kind!=='idea'));},record:(project,e)=>record('idea-error',{project},{error:e.message})});ideaRelease.runner=ideaRunner;
-Object.assign(ideaAPI,{runner:ideaRunner,lane:ideaLane,release:ideaRelease,available:()=>true,wake:p=>{if(!DRY)ideaRunner.wake(p);},authorizeRecord:(req,b)=>ideaDispatch.authorizeRecord(req,b)||[...chats.running.values()].some(x=>x.options?.project===b.project&&x.options?.ideaRecord?.token===req.headers['x-idea-record'])});
+const ideaAutomationHost={ideas,store,baseOf,executionGate,chats,ROOT,rolesData,DRY,delegateRequest,gitw,stopControl,webchatActive,sessions,record};
+const ideaAutomation=extensions.state().included.includes('idea_automation')
+  ? extensions.create('idea_automation',ideaAutomationHost)
+  : require('./lib/idea-unavailable').create(ideaAutomationHost);
+({lane:ideaLane,release:ideaRelease,dispatch:ideaDispatch,runner:ideaRunner}=ideaAutomation);
+const {verification:ideaVerification,review:ideaReview}=ideaAutomation;
+Object.assign(ideaAPI,{runner:ideaRunner,lane:ideaLane,release:ideaRelease,automation:ideaAutomation.handle,available:()=>extensions.state().included.includes('idea_automation'),wake:p=>{if(!DRY)ideaRunner.wake(p);},authorizeRecord:(req,b)=>ideaDispatch.authorizeRecord(req,b)||[...chats.running.values()].some(x=>x.options?.project===b.project&&x.options?.ideaRecord?.token===req.headers['x-idea-record'])});
 ideaRunner.restore();
 for(const e of queueRetreat.restore())record('queue-retreat-recovery',e,{error:e.error});
 // Recover only unavailable features, before adoption can resume saved work.
@@ -3407,6 +1701,17 @@ if(!includedExtensions.includes('role_review')&&fs.existsSync(ROLES_FILE)){
 if(!includedExtensions.includes('discussion'))for(const p of store.listProjects())for(const t of p.tasks){
   const queue=chats.queue(p.id,t.id),remaining=queue.filter(q=>!/^(?:limit-)*discussion-/.test(q.id));
   if(remaining.length!==queue.length)chats.setQueue(p.id,t.id,remaining,true);
+}
+// These flags were assigned by the internal dispatcher, not copied from HTTP.
+const legacyInternalDelivery=q=>q.origin==='delegate'&&!q.automation&&Boolean(q.selectionOnly||q.resultsOrganize||q.integrationAssignment||q.integrationReviewRequest);
+for(const p of store.listProjects())for(const t of p.tasks){
+  const queue=chats.queue(p.id,t.id);
+  const remaining=queue.filter(q=>q.origin!=='delegate'||q.automation||legacyInternalDelivery(q)||includedExtensions.includes('delegate'))
+    .map(q=>legacyInternalDelivery(q)?{...q,origin:'hub-internal'}:q);
+  if(JSON.stringify(remaining)!==JSON.stringify(queue)){
+    chats.setQueue(p.id,t.id,remaining,true);
+    if(remaining.length!==queue.length)record('delegate-unavailable',{project:p.id,task:t.id},{removed:queue.filter(q=>!remaining.some(x=>x.id===q.id)).map(q=>q.id)});
+  }
 }
 chats.adopt();
 const finishedAdoptions=[...chats.running.values()].filter(r=>r.child?.dir&&require('./lib/cli-spool').strictRead(r.child.dir,'exit.json')).map(r=>r.settledP);

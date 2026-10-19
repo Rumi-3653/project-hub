@@ -51,6 +51,10 @@ test('確認方針は通常・自由対話の会話/ターミナルと全文へ�
       '行数ではなく', '権限・データ構造・外部連携', '一連の変更が揃い',
       '指示一通・返信一回を自動の区切りにしない', '再確認は変更箇所と影響範囲だけ',
       '根拠がある時だけ範囲を広げる', '最終確認も兼ねる', '影響の大きい操作の個別確認は維持',
+      'チェック後に変更がなければ、本体反映・公開の前に再チェックしない',
+      '人の承認が要る操作の承認は残す',
+      '読み取り・診断だけの手順や確認済み操作のやり直しにはチェックを挟まず',
+      '書き込む中身・公開する中身・対象が変わる時だけチェックする',
       '既定の役割は変更しない', 'mainの上限ではbackupへ',
     ]) assert.ok(text.includes(required) || required === 'mainの上限ではbackupへ' && text.includes('設定main⇔backup'), required);
     assert.doesNotMatch(text, /関連・全体試験→commit/);
@@ -60,7 +64,13 @@ test('確認方針は通常・自由対話の会話/ターミナルと全文へ�
   assert.match(instructions.templates(), /軽微な変更だけなら現在の担当の自己確認で終える/);
   assert.match(instructions.templates(), /チェック後の軽微な修正も自己確認で終え/);
   assert.match(instructions.templates(), /軽微な修正は修正担当の自己確認で終える/);
-  const previous = chat.buildTurn({ ...options, basePrompt: base.replace(instructions.WORKFLOW_RULE, '旧確認方針（fixture）') });
+  for (const template of instructions.templates().split('\n').slice(1)) {
+    assert.match(template, /チェック済みの内容・対象が同じ本体反映・公開や、読み取り・診断・確認済み操作のやり直しでは再委任しない/);
+    assert.match(template, /人の承認が要る操作の承認は残す/);
+  }
+  const previousRule = instructions.WORKFLOW_RULE.replace('チェック後に変更がなければ、本体反映・公開の前に再チェックしない。人の承認が要る操作の承認は残す。読み取り・診断だけの手順や確認済み操作のやり直しにはチェックを挟まず、書き込む中身・公開する中身・対象が変わる時だけチェックする。', '');
+  assert.notEqual(previousRule, instructions.WORKFLOW_RULE);
+  const previous = chat.buildTurn({ ...options, basePrompt: base.replace(instructions.WORKFLOW_RULE, previousRule) });
   const meta = { sessions: { claude: 'sid' }, rulesSent: { claude: { ...previous.rules, sid: 'sid' } } };
   const updated = chat.buildTurn({ ...options, basePrompt: base, meta });
   assert.equal(updated.shortRules, false);

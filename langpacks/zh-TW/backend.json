@@ -1,5 +1,9 @@
 {
   "messages": {
+    "Git for Windows の bash.exe が見つかりません。Git for Windows を入れてください": "找不到 Git for Windows 的 bash.exe。請安裝 Git for Windows",
+    "Git for Windows の bash.exe が見つかりません": "找不到 Git for Windows 的 bash.exe",
+    "[裏の作業の見張り] Windows では裏で動く AI の見張りを行いません": "[背景作業監看] Windows 不監看在背景執行的 AI",
+    "Windows では認証用の窓を前に出せません。開いている bash の窓で操作してください": "Windows 無法把驗證用的視窗移到前面，請在已開啟的 bash 視窗中操作",
     "人の発言": "使用者的發言",
     "依頼・通知（承認不可）": "委託或通知（不可視為核准）",
     "エラーあり": "發生錯誤",

@@ -45,6 +45,10 @@ function excluded(name) {
   if (name === 'hub/paid-bundle.json' || name.startsWith('hub/paid/') || name.startsWith('hub/public/paid/')) return true;
   // Local DMG acceptance uses the private publisher and macOS-only fixtures.
   if (['scripts/package-update.js', 'scripts/sign-update.js', 'scripts/release-keychain.js', 'scripts/release-keychain.swift', 'scripts/release-license-build.sql', 'hub/test/release-candidate.test.js', 'hub/test/app-update-packaged.test.js'].includes(name)) return true;
+  // Windows acceptance has an isolated private issuer fixture, never a release entry point.
+  if (['hub/check-license.cmd', 'hub/WINDOWS-LICENSE.md', 'hub/build-windows-license-kit.cjs', 'hub/collect-license-result-v4.cjs',
+    'hub/test/windows-guard-diagnostics-v4.test.js', 'hub/test/windows-license-result-v4.test.js',
+    'hub/test/windows-license-acceptance.cjs', 'hub/test/windows-license-storage.test.js', 'hub/test/windows-cache.test.js'].includes(name)) return true;
   if (name === 'hub/lib/license/owner-edition.js' || name.startsWith('hub/license-issuer/') ||
       name === 'hub/test/license.test.js' || name === 'hub/test/sandbox-local.test.js' || name === 'hub/test/fixtures/license-db.cjs') return true;
   const parts = name.split('/');
@@ -63,7 +67,7 @@ function excluded(name) {
   return false;
 }
 function selected(name, isPublic) {
-  return isPublic ? publicFiles.has(name) || name.startsWith('.github/ISSUE_TEMPLATE/')
+  return isPublic ? publicFiles.has(name) || name === '.gitattributes' || name.startsWith('.github/ISSUE_TEMPLATE/')
     || name === '.github/pull_request_template.md' || name.startsWith('.github/PULL_REQUEST_TEMPLATE/')
     || name === '.github/workflows/macos-app.yml'
     : name.startsWith('hub/') || name.startsWith('docs/project-hub/templates/') || packAsset(name)

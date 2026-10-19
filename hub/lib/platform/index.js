@@ -49,11 +49,12 @@ const darwin = require('./darwin');
 const adapters = new Map([['darwin', darwin]]);
 function forPlatform(value = process.platform) {
   if (value && typeof value === 'object') return value;
-  if (!adapters.has(value)) adapters.set(value, darwin.create({ name: value }));
+  if (!adapters.has(value)) adapters.set(value, value === 'win32' ? require('./win32').create() : darwin.create({ name: value }));
   return adapters.get(value);
 }
 // The pre-existing Linux process/trash helpers are retained by the factory;
-// other systems have no native implementation. No Windows backend is shipped.
+// other systems have no native implementation. Windows dependencies load only
+// when selected, so Mac supervisors retain their existing pinned file set.
 const selected = forPlatform();
 const supervisorFiles = Object.freeze([...new Set(['index.js', 'darwin.js', 'persistence.js', ...selected.supervisorFiles])]);
 module.exports = { ...selected, supervisorFiles, forPlatform, createDarwin: options => darwin.create(options) };

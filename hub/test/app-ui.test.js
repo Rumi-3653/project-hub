@@ -10,72 +10,8 @@ const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const git = require('../lib/git');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-
-function app(userAgent = '', sessionStorage) {
-  const elements = new Map();
-  const events = new Map();
-  const documentListeners = [];
-  const timers = new Map();
-  const timeouts = new Map();
-  const details = [];
-  let nextTimer = 0;
-  let stream;
-  function element(key) {
-    if (!elements.has(key)) elements.set(key, {
-      innerHTML: '', textContent: '', value: '', hidden: false, disabled: false,
-      scrollTop: 0, scrollHeight: 100, clientHeight: 100,
-      dataset: {}, handlers: {}, attributes: {}, addEventListener(name, cb) { this.handlers[name] = cb; },
-      setAttribute(name, value) { this.attributes[name] = String(value); },
-      contains(target) { return target === this; },
-      querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML() {}, focus() { document.activeElement = this; },
-    });
-    return elements.get(key);
-  }
-  class EventSource {
-    constructor() { stream = this; }
-    close() {}
-  }
-  const document = {
-    hidden: false, activeElement: null,
-    querySelector: s => s === '.ideas-dialog[open]' ? null : s.startsWith('details[open]') ? details.find(d => d.open && (!s.includes(':not(.project-notes)') || !d.classList.contains('project-notes'))) || null : s === '#msg-partial' ? elements.get(s) || null : element(s),
-    querySelectorAll: () => [],
-    addEventListener(name, cb, capture = false) { events.set(name, cb); documentListeners.push({ name, cb, capture }); },
-  };
-  const context = vm.createContext({
-    document, window: {}, navigator: { userAgent }, location: { href: '' },
-    localStorage: { getItem: () => null, setItem() {} },
-    sessionStorage,
-    fetch: () => new Promise(() => {}), // 起動時の load() は試験用の状態を上書きしない
-    EventSource, URL, URLSearchParams,
-    requestAnimationFrame: cb => cb(),
-    setInterval(cb, ms) { const id = ++nextTimer; timers.set(id, { cb, ms }); return id; },
-    clearInterval(id) { timers.delete(id); },
-    setTimeout(cb, ms) { const id = ++nextTimer; timeouts.set(id, { cb, ms }); return id; },
-    clearTimeout(id) { timeouts.delete(id); },
-    console, ModelOrder: require('../public/model-order'), ProjectOrder: require('../public/project-order'),
-    confirm: () => true,
-  });
-  context.window.HubChatHistory = require('../public/chat-history');
-  const reviewUI=path.join(__dirname, '..', 'public', 'paid', 'role-review.js');
-  if(fs.existsSync(reviewUI)) vm.runInContext(fs.readFileSync(reviewUI,'utf8'),context);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'role-settings.js'), 'utf8'), context);
-  const paidUI=path.join(__dirname,'../public/paid/discussion.js');
-  if(fs.existsSync(paidUI))vm.runInContext(fs.readFileSync(paidUI,'utf8'),context);
-  vm.runInContext(source, context);
-  return { context, document, elements, element, events, documentListeners, timers, timeouts, details, stream: () => stream };
-}
-
-const project = (state = '実行中') => ({
-  id: 'p', name: 'Project', parent: '', status: '進行中', description: '', updated: '',
-  phases: [], tasks: [{ id: 't', title: 'Task', state, owner: 'codex', role: '', model: '', effort: '',
-    phase: '', steps: [], skills: [], question: '', next: '', copy: false }],
-  folders: [], related: [], issues: [], chats: [],
-});
-const snapshot = (taskState = '実行中', sessions = []) => ({
-  root: '/tmp', projects: [project(taskState)], roles: { models: { codex: [], 'claude-code': [] }, roles: [], permissions: {} },
-  sessions, chatting: [], terminal: true, efforts: [], cliFlags: {}, version: '1', latest: '1',
-});
+const {app,project,snapshot}=require('./fixtures/app-ui-harness.cjs');
+const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
 
 test('summary-only tasks preserve progress segments, next step and finished filtering',()=>{
  const a=app();a.context.data=snapshot();
@@ -163,7 +99,7 @@ test('disclosures: outside closure synchronously updates task, project and setti
   a.context.rememberDisclosure(settings);a.context.rememberDisclosure(notes);
   a.fire('click',{target:{}});
   assert.equal(a.context.workFoldAttr({id:'p'},{id:'t'},'transfer',true),'');assert.equal(a.context.workFoldAttr({id:'p'},{id:'other'},'transfer',true),'open');
-  assert.equal(vm.runInContext('aiSettingsOpen.has("mcp")||projectNotesOpen.has("project")||webchatDetailsOpen||verOpen||stepsOpen',a.context),false);
+  assert.equal(vm.runInContext('aiSettingsOpen.has("mcp")||projectNotesOpen.has("project")||verOpen||stepsOpen',a.context),false);
   assert.equal(task.open,false);assert.equal(settings.open,false);
 });
 test('disclosures: freetalk summary remains closed for the same summary after rendering, while a new summary can open',()=>{
@@ -413,177 +349,6 @@ test('Skills loading preserves open AI sections, rejects duplicate requests and 
   const before = a.element('#skills-box').innerHTML, next = a.context.loadSkills(true);
   vm.runInContext('view.kind="project"', a.context); resolve({ ais: {} }); await next;
   assert.equal(a.element('#skills-box').innerHTML, before);
-});
-
-function webchatSettingsApp(values = {}) {
-  const a = app();
-  a.context.fixture = { ...snapshot(), webchat: { enabled: false, location: '', model: '', thinking: '', busy: false, ...values } };
-  vm.runInContext('state=fixture', a.context);
-  const notice = a.element('#webchat-settings-notice'), status = a.element('#webchat-login-status');
-  const controls = ['login', 'logout'].map(action => ({ dataset: { webchat: action }, disabled: false }));
-  const fields = ['enabled', 'location', 'model', 'thinking'].map(key => a.element('#webchat-' + key));
-  Object.assign(fields[0], { checked: values.enabled ?? false });
-  fields.slice(1).forEach((field, i) => { field.value = values[['location', 'model', 'thinking'][i]] || ''; });
-  const box = a.element('#webchat-box');
-  box.querySelector = s => s === '#webchat-settings-notice' ? notice : s === '#webchat-login-status' ? status : null;
-  box.querySelectorAll = () => [...fields, ...controls];
-  const click = a.documentListeners.find(x => x.cb.toString().includes("closest?.('[data-webchat]')")).cb;
-  const messages = []; a.context.toast = text => messages.push(text);
-  return { ...a, fields, controls, box, notice, status, messages, click: action => click({ target: { closest: () => controls.find(b => b.dataset.webchat === action) } }) };
-}
-function webchatSettingsUpdates(a) {
-  for (const name of ['syncChatPhoneLabels', 'syncAccountPickers', 'showVersion', 'updateTurnCounts', 'renderTree', 'drawPhoneLabels', 'drawModelOrder', 'syncRoleModelOrder', 'drawInitialPick']) a.context[name] = () => {};
-  a.context.window.HubMobile = { badges() {} };
-  vm.runInContext('view={kind:"settings"}; renderedTreeKey=treeKey();', a.context);
-  return busy => ({ ...snapshot(), webchat: { enabled: true, location: '/installed/folder', model: 'Pro', thinking: 'Extended', check: { loggedIn: true }, busy } });
-}
-test('Chat settings have one auth button, collapsed editable details and no repetitive instructions', () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended' });
-  for (const loggedIn of [true, false, 'unknown', undefined]) {
-    a.context.fixtureCheck = loggedIn === undefined ? null : { loggedIn, modelsError: 'webchat_remote_model_menu_unavailable' };
-    vm.runInContext('state.webchat.check=fixtureCheck', a.context);
-    const html = vm.runInContext('webchatSettingsHtml(state.webchat)', a.context);
-    assert.equal([...html.matchAll(/<button\b/g)].length, 1);
-    assert.match(html, new RegExp('data-webchat="' + (loggedIn === true ? 'logout' : 'login') + '"'));
-    assert.match(html, /id="webchat-details" data-ai-fold="webchat" ><summary>設定/);
-    assert.doesNotMatch(html, /data-webchat="(?:save|status|models)"|最初は無効|一覧は未取得|選んで保存|ログインを確認しました/);
-    assert.doesNotMatch(html, /モデル一覧を取得できません/);
-    assert.match(html, /value="Existing" selected/); assert.match(html, /value="Extended" selected/);
-    assert.match(html, /id="webchat-settings-notice"[^>]*hidden/);
-  }
-});
-test('idle polling updates the one auth action and status without rebuilding unsaved detail fields', async () => {
-  const a = webchatSettingsApp({ location: '/installed', model: 'Existing' }), next = webchatSettingsUpdates(a);
-  const auth = { dataset: { webchat: 'login' }, disabled: false, textContent: 'ログイン' };
-  a.box.querySelector = s => s === '[data-webchat]' ? auth : s === '#webchat-login-status' ? a.status : s === '#webchat-settings-notice' ? a.notice : null;
-  a.fields[1].value = '/typing'; a.box.innerHTML = 'retained form';
-  a.context.fetchState = async () => next(false); await a.context.pollState();
-  assert.equal(auth.dataset.webchat, 'logout'); assert.equal(auth.textContent, 'ログアウト'); assert.equal(a.status.textContent, 'ログイン済み');
-  assert.equal(a.fields[1].value, '/typing'); assert.equal(a.box.innerHTML, 'retained form');
-  a.context.fetchState = async () => ({ ...next(false), webchat: { ...next(false).webchat, check: { loggedIn: 'unknown' } } }); await a.context.pollState();
-  assert.equal(auth.dataset.webchat, 'login'); assert.equal(a.status.textContent, 'ログイン状態を判定できません');
-});
-test('login validates the real path and performs one combined save/auth request without model discovery', async () => {
-  const invalid = webchatSettingsApp({ enabled: true }); invalid.context.api = () => assert.fail('missing path must not call backend');
-  await invalid.click('login'); assert.match(invalid.notice.textContent, /場所が空欄/);
-  const a = webchatSettingsApp({ location: '/installed', model: 'Existing', thinking: 'Extended' });
-  const calls = []; a.context.api = async (url, body) => { calls.push({ url, body }); return { ...body, enabled: true, busy: false, check: { loggedIn: true } }; };
-  await a.click('login');
-  assert.deepEqual(calls.map(c => c.url), ['/api/webchat/login']);
-  assert.equal(calls[0].body.model, 'Existing'); assert.equal(calls[0].body.thinking, 'Extended');
-  assert.match(a.box.innerHTML, /data-webchat="logout"/); assert.match(a.box.innerHTML, /id="webchat-enabled" checked/);
-  assert.equal(a.notice.textContent, ''); assert.equal(vm.runInContext('webchatReady()', a.context), true);
-  assert.equal(a.messages.length, 0);
-});
-test('autosave serializes rapid edits and keeps the newest draft across a redraw and stale polling', async () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended' });
-  const next = webchatSettingsUpdates(a), calls = []; let resolve;
-  a.context.api = (url, body) => { calls.push({ url, body }); return new Promise(r => { resolve = r; }); };
-  let finishPoll; a.context.fetchState = () => new Promise(r => { finishPoll = r; }); const stale = a.context.pollState();
-  a.fields[1].value = '/first'; const first = a.context.saveWebchatSettings(); await new Promise(r => setImmediate(r));
-  a.fields[1].value = '/second'; const second = a.context.saveWebchatSettings();
-  assert.equal(calls.length, 1); assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/second"/);
-  resolve({ ...calls[0].body, busy: false }); await first; await new Promise(r => setImmediate(r));
-  assert.equal(calls.length, 2); assert.equal(calls[1].body.location, '/second');
-  resolve({ ...calls[1].body, busy: false }); await second;
-  finishPoll(next(true)); await stale;
-  assert.equal(vm.runInContext('state.webchat.location', a.context), '/second');
-  assert.equal(vm.runInContext('webchatSettingsDraft', a.context), null); assert.equal(a.notice.textContent, '');
-  assert.equal(a.fields[2].value, 'Existing'); assert.equal(a.fields[3].value, 'Extended');
-});
-test('failed autosave retains unsaved fields and displays failure rather than a success message', async () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed' }); let calls = 0;
-  a.fields[1].value = '/corrected'; a.context.api = async () => { calls++; throw Error('webchat_busy'); };
-  await a.context.saveWebchatSettings(); assert.equal(calls, 1);
-  assert.match(a.notice.textContent, /保存できませんでした/); assert.equal(a.notice.hidden, false);
-  assert.equal(vm.runInContext('state.webchat.location', a.context), '/installed');
-  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/corrected"/);
-  a.fields[1].value = '/valid'; a.context.api = async (url, body) => ({ ...body, busy: false });
-  await a.context.saveWebchatSettings(); assert.equal(a.notice.textContent, '');
-  assert.equal(vm.runInContext('state.webchat.location', a.context), '/valid');
-});
-test('typing before blur survives panel replacement and an older save cannot erase the draft', async () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing' });
-  const input = a.documentListeners.find(x => x.name === 'input' && x.cb.toString().includes('webchat-location')).cb;
-  let resolve; a.context.api = (url, body) => new Promise(r => { resolve = () => r({ ...body, busy: false }); });
-  const saving = a.context.saveWebchatSettings(); await new Promise(r => setImmediate(r));
-  a.fields[1].value = '/still-typing'; input({ target: { id: 'webchat-location' } });
-  resolve(); await saving;
-  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/still-typing"/);
-  assert.equal(vm.runInContext('state.webchat.location', a.context), '/installed');
-  assert.equal(a.notice.textContent, '未保存');
-});
-test('auth waits for queued autosave, blocks duplicate clicks and ignores poll snapshots until completion', async () => {
-  const a = webchatSettingsApp({ location: '/installed', model: 'Existing' }), next = webchatSettingsUpdates(a);
-  const calls = []; let saveResolve, authResolve;
-  a.context.api = (url, body) => { calls.push({ url, body }); return new Promise(r => { if (url === '/api/webchat') saveResolve = r; else authResolve = r; }); };
-  a.fields[1].value = '/edited'; const saving = a.context.saveWebchatSettings(); await new Promise(r => setImmediate(r));
-  const auth = a.context.operateWebchatSettings('login'); await a.context.operateWebchatSettings('login');
-  assert.ok(a.fields.every(c => c.disabled)); assert.equal(calls.length, 1);
-  a.context.fetchState = async () => next(true); await a.context.pollState();
-  assert.equal(vm.runInContext('state.webchat.location', a.context), '/installed');
-  saveResolve({ ...calls[0].body, busy: false }); await saving; await new Promise(r => setImmediate(r));
-  assert.equal(calls.length, 2); assert.equal(calls[1].url, '/api/webchat/login'); assert.equal(calls[1].body.location, '/edited');
-  authResolve({ ...calls[1].body, enabled: true, busy: false, check: { loggedIn: true } }); await auth;
-  assert.ok(a.fields.every(c => !c.disabled)); assert.match(a.box.innerHTML, /data-webchat="logout"/);
-});
-test('logout confirms once, uses the saved profile and does not clear model/thinking', async () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended', check: { loggedIn: true } });
-  let confirms = 0; a.context.confirm = () => { confirms++; return true; };
-  a.fields[1].value = '/unsaved'; const calls = [];
-  a.context.api = async (url, body) => { calls.push({ url, body }); return { ...a.context.fixture.webchat, enabled: false, check: { loggedIn: false } }; };
-  await a.click('logout'); assert.equal(confirms, 1);
-  assert.deepEqual(calls.map(c => c.url), ['/api/webchat/logout']); assert.equal(calls[0].body.confirm, true);
-  assert.equal(Object.hasOwn(calls[0].body, 'location'), false);
-  assert.match(a.box.innerHTML, /未ログイン/); assert.match(a.box.innerHTML, /data-webchat="login"/);
-  assert.match(a.box.innerHTML, /value="Existing" selected/); assert.equal(vm.runInContext('webchatReady()', a.context), false);
-  a.context.confirm = () => false; a.context.api = () => assert.fail('cancel must not authenticate'); await a.click('logout');
-});
-test('auth errors refresh the recorded state once without repeating auth or losing the draft', async () => {
-  const a = webchatSettingsApp({ location: '/installed', model: 'Existing' });
-  a.fields[1].value = '/edited'; const calls = [];
-  a.context.api = async url => { calls.push(url); if (url.endsWith('/login')) throw Error('webchat_not_installed'); return { enabled: false, location: '/edited', model: 'Existing', thinking: '', check: { loggedIn: 'unknown', statusError: 'webchat_not_installed' } }; };
-  await a.click('login');
-  assert.deepEqual(calls, ['/api/webchat/login', '/api/webchat']); assert.match(a.notice.textContent, /実行ファイルがありません/);
-  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /value="\/edited"/);
-  assert.equal(vm.runInContext('state.webchat.enabled', a.context), false); assert.ok(a.fields.every(c => !c.disabled));
-});
-test('unknown, human verification and execution are precise and never render login success', async () => {
-  const a = webchatSettingsApp({ location: '/installed' });
-  for (const check of [{ loggedIn: 'unknown' }, { loggedIn: 'unknown', statusError: 'webchat_remote_challenge_required' }]) {
-    a.context.api = async () => ({ enabled: false, location: '/installed', busy: false, model: '', thinking: '', check });
-    await a.click('login'); assert.doesNotMatch(a.box.innerHTML, /ログイン済み|data-webchat="logout"/);
-    assert.equal(a.status.textContent, 'ログイン状態を判定できません');
-    if (check.statusError) assert.match(a.notice.textContent, /人間確認/);
-  }
-  vm.runInContext('state.webchat.busy=true', a.context);
-  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /実行中/);
-  assert.match(vm.runInContext('webchatSettingsHtml(state.webchat)', a.context), /data-webchat="login" disabled/);
-});
-test('initial settings display reads existing login once, never saves or lists models, and later loads do not repeat a failed check', async () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed' }); const calls = [];
-  let r = { ...a.context.fixture.webchat, check: null };
-  a.context.api = async url => { calls.push(url); if (url.endsWith('/status')) r = { ...r, check: { loggedIn: 'unknown', statusError: 'webchat_remote_challenge_required' } }; return r; };
-  await a.context.loadWebchat(); assert.deepEqual(calls, ['/api/webchat', '/api/webchat/status']);
-  await a.context.loadWebchat(); assert.deepEqual(calls, ['/api/webchat', '/api/webchat/status', '/api/webchat']);
-  assert.match(a.notice.textContent, /人間確認/);
-});
-test('optional model discovery happens only on model/thinking focus, once per saved location, and keeps explicit values', async () => {
-  const a = webchatSettingsApp({ enabled: true, location: '/installed', model: 'Existing', thinking: 'Extended', check: { loggedIn: true } });
-  const focus = a.documentListeners.find(x => x.name === 'focusin' && x.cb.toString().includes('webchat-model')).cb;
-  const calls = []; a.context.api = async url => { calls.push(url); return { ...a.context.fixture.webchat, check: { loggedIn: true, modelsChecked: true, models: [{ label: 'Other' }], thinking: [], modelsError: 'webchat_remote_model_menu_unavailable' } }; };
-  await focus({ target: { id: 'webchat-location' } }); assert.equal(calls.length, 0);
-  await focus({ target: { id: 'webchat-model' } }); await focus({ target: { id: 'webchat-thinking' } });
-  assert.deepEqual(calls, ['/api/webchat/models']); assert.match(a.box.innerHTML, /value="Existing" selected/);
-  assert.match(a.notice.textContent, /モデル一覧を取得できません/);
-});
-
-test('webchat settings synchronize already adopted idle on a 304 poll without redrawing the form', async () => {
-  const a = webchatSettingsApp({ location: '/unsaved/folder' }); const next = webchatSettingsUpdates(a);
-  a.context.fixture = next(false); vm.runInContext('state=fixture;', a.context);
-  [...a.fields, ...a.controls].forEach(c => { c.disabled = true; });
-  a.context.fetchState = async () => null; await a.context.pollState();
-  assert.ok([...a.fields, ...a.controls].every(c => !c.disabled)); assert.equal(a.fields[1].value, '/unsaved/folder');
 });
 
 test('自動ChatをGPT子の既定にし、旧依頼とrequest別の処理済み表示を保持する', () => {
@@ -3028,14 +2793,14 @@ test('スマホAI一覧は指定の短い名前、PCは従来名、表示名変�
   const html = () => a.context.chatHtml(s.projects[0], s.projects[0].tasks[0]);
   const option = (markup, value) => markup.match(new RegExp('<option value="' + value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*>([^<]*)</option>'))[1];
   let h = html();
-  for (const [key, text] of [['claude|Opus 5.5', 'Opus 5.5'], ['codex|GPT-6.1-Sol', '6.1-Sol'], ['agy|Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro (High)'], ['chatgpt|auto', 'Chat／Pro']]) assert.equal(option(h, key), text);
+  for (const [key, text] of [['claude|Opus 5.5', 'Opus 5.5'], ['codex|GPT-6.1-Sol', '6.1-Sol'], ['agy|Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro (High)'], ...(a.context.window.HubPaidWebchat ? [['chatgpt|auto', 'Chat／Pro']] : [])]) assert.equal(option(h, key), text);
   assert.match(h, /value="codex\|GPT-6.1-Sol"[^>]*selected/);
   const before = vm.runInContext('JSON.stringify([state.roles,state.cliFlags,state.projects,chatPick(state.projects[0],state.projects[0].tasks[0])])', a.context);
   vm.runInContext('state.phoneLabels={labels:"short",names:{"codex|GPT-6.1-Sol":"私のソル","chatgpt|auto":"貼る <文>"}}', a.context);
-  assert.equal(option(html(), 'codex|GPT-6.1-Sol'), '私のソル'); assert.equal(option(html(), 'chatgpt|auto'), '貼る &lt;文&gt;');
+  assert.equal(option(html(), 'codex|GPT-6.1-Sol'), '私のソル'); if(a.context.window.HubPaidWebchat)assert.equal(option(html(), 'chatgpt|auto'), '貼る &lt;文&gt;');else assert.doesNotMatch(html(),/value="chatgpt\|auto"/);
   a.context.matchMedia = () => ({ matches: false });
   assert.equal(option(html(), 'codex|GPT-6.1-Sol'), 'Codex・GPT-6.1-Sol');
-  assert.equal(option(html(), 'chatgpt|auto'), 'ChatGPT（Chat／Pro）');
+  if(a.context.window.HubPaidWebchat)assert.equal(option(html(), 'chatgpt|auto'), 'ChatGPT（Chat／Pro）');
   a.context.matchMedia = () => ({ matches: true }); vm.runInContext('state.phoneLabels.labels="full"', a.context);
   assert.equal(option(html(), 'codex|GPT-6.1-Sol'), 'Codex・GPT-6.1-Sol');
   assert.equal(vm.runInContext('JSON.stringify([state.roles,state.cliFlags,state.projects,chatPick(state.projects[0],state.projects[0].tasks[0])])', a.context), before);
@@ -3082,7 +2847,7 @@ test('スマホ設定カードの保存/失敗と遅いpoll、他端末更新も
 
 // 保存のたびにカードを置換していないことと、移動先のフォーカスを検証するDOM。
 function phoneCard(a, s) {
-  const box = a.element('#phone-labels'), keys = [...a.context.orderedModels(), 'chatgpt|auto'];
+  const box = a.element('#phone-labels'), keys = [...a.context.orderedModels(), ...(a.context.window.HubPaidWebchat ? ['chatgpt|auto'] : [])];
   const inputs = keys.map(key => ({ dataset: { phoneName: key }, value: s.phoneLabels.names[key] || '', disabled: false }));
   const radios = ['short', 'full'].map(mode => ({ dataset: { phoneMode: mode }, checked: mode === s.phoneLabels.labels, disabled: false }));
   const status = { textContent: '' }; let replacements = 0;
@@ -3096,7 +2861,7 @@ function phoneCard(a, s) {
 test('名前保存中の欄移動・追加入力・連続保存でDOMと移動先フォーカスを保つ', async () => {
   const a = app(), s = snapshot(), calls = [], waits = [];
   const input = a.documentListeners.find(x => x.name === 'input' && x.cb.toString().includes('phoneLabelDrafts')).cb;
-  s.roles.models = { codex: ['GPT-6.1-Sol'] }; s.phoneLabels = { labels: 'short', names: {} };
+  s.roles.models = { codex: ['GPT-6.1-Sol','GPT-6-Astra'] }; s.phoneLabels = { labels: 'short', names: {} };
   vm.runInContext('state=' + JSON.stringify(s) + ';view={kind:"settings",project:"p"}', a.context);
   const card = phoneCard(a, s), [first, second] = card.inputs;
   let stored = JSON.parse(JSON.stringify(s.phoneLabels));
@@ -3117,7 +2882,7 @@ test('名前保存中の欄移動・追加入力・連続保存でDOMと移動�
   assert.equal(a.document.activeElement, second); assert.equal(second.value, '次の欄の入力');
   assert.equal(first.value, 'まだ未確定の追加入力'); assert.equal(card.replacements(), 0);
   assert.ok(card.inputs.every(el => !el.disabled));
-  assert.equal(vm.runInContext('state.phoneLabels.names["chatgpt|auto"]', a.context), '次の欄の入力');
+  assert.equal(vm.runInContext('state.phoneLabels.names["codex|GPT-6-Astra"]', a.context), '次の欄の入力');
 });
 
 test('名前保存中のradioを順に保存し、失敗しても入力を残して自動再試行しない', async () => {
@@ -3201,15 +2966,15 @@ for (const next of ['name', 'mode']) test(`名前の保存失敗を後続の${ne
 
 test('複数項目の失敗は個別に解除し、mode失敗も無関係な名前成功で消さない', async () => {
   const a = app(), s = snapshot();
-  s.roles.models = { codex: ['GPT-6.1-Sol'] }; s.phoneLabels = { labels: 'short', names: {} };
+  s.roles.models = { codex: ['GPT-6.1-Sol','GPT-6-Astra'] }; s.phoneLabels = { labels: 'short', names: {} };
   vm.runInContext('state=' + JSON.stringify(s) + ';view={kind:"settings",project:"p"}', a.context);
-  const card = phoneCard(a, s), [sol, chatgpt] = card.inputs;
+  const card = phoneCard(a, s), [sol, astra] = card.inputs;
   a.context.api = async () => { throw Error('ディスクエラー'); };
   await a.context.savePhoneLabels({ key: sol.dataset.phoneName, name: 'ソル' });
-  await a.context.savePhoneLabels({ key: chatgpt.dataset.phoneName, name: 'チャット' });
+  await a.context.savePhoneLabels({ key: astra.dataset.phoneName, name: 'アストラ' });
   await a.context.savePhoneLabels({ labels: 'full' });
   assert.match(card.status.textContent, /6\.1-Sol の名前は未保存/);
-  assert.match(card.status.textContent, /Chat／Pro の名前は未保存/);
+  assert.match(card.status.textContent, /Astra の名前は未保存/);
   assert.match(card.status.textContent, /表示方法は未保存/);
   const stored = JSON.parse(JSON.stringify(s.phoneLabels));
   let release; const hold = new Promise(resolve => { release = resolve; });
@@ -3222,13 +2987,13 @@ test('複数項目の失敗は個別に解除し、mode失敗も無関係な名�
   assert.match(card.status.textContent, /保存中.*6\.1-Sol の名前は未保存/);
   release(); await saving;
   assert.doesNotMatch(card.status.textContent, /6\.1-Sol の名前は未保存/);
-  assert.match(card.status.textContent, /Chat／Pro の名前は未保存/);
+  assert.match(card.status.textContent, /Astra の名前は未保存/);
   assert.match(card.status.textContent, /表示方法は未保存/);
   await a.context.savePhoneLabels({ labels: 'full' });
   assert.doesNotMatch(card.status.textContent, /表示方法は未保存/);
-  assert.match(card.status.textContent, /Chat／Pro の名前は未保存/);
+  assert.match(card.status.textContent, /Astra の名前は未保存/);
   await a.context.savePhoneLabels({ labels: 'short' });
-  await a.context.savePhoneLabels({ key: chatgpt.dataset.phoneName, name: '修正チャット' });
+  await a.context.savePhoneLabels({ key: astra.dataset.phoneName, name: '修正アストラ' });
   assert.equal(card.status.textContent, 'スマホの表示を保存しました');
 });
 
@@ -3387,7 +3152,7 @@ test('契約枠と手動候補を撤去し、自動Chat／ProとCodexのAstraを
  const p=s.projects[0],t=p.tasks[0];let html=a.context.chatHtml(p,t);
  assert.doesNotMatch(html,/value="chatgpt\|gpt-6-astra"|chat-plan-label|契約枠/);
  assert.doesNotMatch(html,/dot\|inbox/);
- for(const value of ['chatgpt|auto'])assert.ok(html.includes('value="'+value+'"'));
+ assert.equal(html.includes('value="chatgpt|auto"'),Boolean(a.context.window.HubPaidWebchat));
  assert.ok(s.roles.models.codex.includes('Astra'));
  a.context.chatPick=()=>({ai:'chatgpt',model:'gpt-6-astra',effort:''});html=a.context.chatHtml(p,t);
  assert.match(html,/value="chatgpt\|gpt-6-astra"[^>]*selected disabled/);
@@ -3658,176 +3423,6 @@ test('conversation rotation rejection and generation reset preserve an unsent dr
  a.context.api=async()=>{throw Error('会話を整理中です');};await a.element('#composer').handlers.submit({preventDefault(){}});await new Promise(r=>setImmediate(r));
  assert.equal(input.value,'整理後に送る指示');assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context),'整理後に送る指示');
  a.context.load=async()=>{};a.stream().onmessage({data:JSON.stringify({type:'reset',generation:2})});assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context),'整理後に送る指示');assert.equal(a.context.HubChatGenerations.get('p\0t'),2);
-});
-
-test('自動Chatは初期無効、設定済みで選択可、送信不明は明示的な再送と停止を区別する', () => {
-  const a = app(); a.context.fixture = snapshot();
-  vm.runInContext('state=fixture;view={kind:"work",project:"p",task:"t"};',a.context);
-  const html=()=>vm.runInContext('chatHtml(state.projects[0],state.projects[0].tasks[0])',a.context);
-  assert.match(html(),/<option[^>]*value="chatgpt\|auto"[^>]*disabled[^>]*>ChatGPT（Chat／Pro）/);
-  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|chat"/);
-  vm.runInContext('state.webchat={enabled:true,location:"/external",model:"Pro",thinking:"Extended",jobs:[]}',a.context);
-  assert.match(html(),/<option[^>]*value="chatgpt\|auto"[^>]*>ChatGPT（Chat／Pro）/);
-  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|auto"[^>]*disabled/);
-  for (const model of ['chat','auto','app']) {
-    a.context.localStorage.getItem = () => JSON.stringify({ai:'chatgpt',model,effort:''});
-    assert.equal(vm.runInContext('chatPick(state.projects[0],state.projects[0].tasks[0]).model',a.context), model);
-    assert.match(html(),new RegExp(`<option[^>]*value="chatgpt\\|${model}"[^>]*selected`));
-  }
-  a.context.localStorage.getItem = () => null;
-  a.context.matchMedia = () => ({matches:true});
-  assert.match(html(),/<option[^>]*value="chatgpt\|auto"[^>]*>Chat／Pro<\/option>/);
-  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|chat"/);
-  vm.runInContext('state.phoneLabels={labels:"full"}',a.context);
-  assert.doesNotMatch(html(),/<option[^>]*value="chatgpt\|chat"/);
-  a.context.matchMedia = () => ({matches:false});
-  vm.runInContext('state.webchat.jobs=[{project:"p",parent:"t",task:"child",request:"r",kind:"conversation",state:"unknown",model:"Pro",error:"webchat_timeout"}]',a.context);
-  assert.match(html(),/送信済みか不明・自動再送なし/);assert.match(html(),/data-webchat="retry"/);assert.doesNotMatch(html(),/data-webchat="stop"/);
-  vm.runInContext('state.webchat.jobs[0].state="sending"',a.context);
-  assert.match(html(),/Chat／Proへ送信中/);assert.doesNotMatch(html(),/data-webchat="(?:stop|retry)"/);
-  const settings=vm.runInContext('webchatSettingsHtml(state.webchat)',a.context);
-  assert.match(settings,/WebChatMCPの場所（絶対パス）/);assert.match(settings,/data-webchat="login"/);assert.doesNotMatch(settings,/data-webchat="(?:save|status|models)"/);
-  assert.match(settings,/<summary>設定/);
-});
-test('Chat conversation sends from the composer without a child warning, preserves rejection drafts and records accepted sends',async()=>{
- const a=historyUI(),calls=[];let send;
- vm.runInContext('state.webchat={enabled:true,location:"/fake",model:"",thinking:""}',a.context);
- a.context.bindAskAnswers=(_box,cb)=>{send=cb;};a.context.openChat(project(),project().tasks[0]);
- a.element('#chat-ai').value='chatgpt|auto';a.element('#chat-effort').value='';
- a.context.warnChildren=async()=>assert.fail('conversation must not warn about child work');
- a.context.load=async()=>{};a.type('same conversation request');
- a.context.api=async(route,body)=>{calls.push({route,body});throw Error('人間確認の画面で停止しています');};
- assert.equal(await send(),false);assert.equal(a.element('#chat-in').value,'same conversation request');
- assert.equal(vm.runInContext('chatDraft[chatAttachmentKey("p","t")]',a.context),'same conversation request');
- a.context.api=async(route,body)=>{calls.push({route,body});return {ok:true,webchat:true,task:'t',request:'r'};};
- assert.equal(await send(),true);assert.equal(a.element('#chat-in').value,'');
- assert.equal(calls[1].route,'/api/chat/send');assert.equal(calls[1].body.task,'t');assert.equal(calls[1].body.model,'auto');
- assert.doesNotMatch(a.element('#toast').textContent,/子作業/);
-});
-test('Chat conversation busy state hides CLI controls, ignores stale polls and stops updating a navigated conversation',async()=>{
- const a=conversationApp();let resolve;
- const partial=()=>{const el=a.element('#msg-partial');el.querySelector=s=>a.element('partial-'+s);el.remove=()=>a.elements.delete('#msg-partial');};partial();
- a.element('#msgs').insertAdjacentHTML=(_where,html)=>{if(html.includes('id="msg-partial"'))partial();};
- const emit=ev=>a.stream().onmessage({data:JSON.stringify(ev)});
- a.context.api=()=>new Promise(r=>resolve=r);
- emit({type:'webchat'});
- emit({type:'busy',ai:'codex',model:'GPT-6.1-Sol',started:1});
- resolve({jobs:[{project:'p',task:'t',state:'sending',at:new Date().toISOString()}]});await new Promise(r=>setImmediate(r));
- assert.equal(a.element('#chat-redo').hidden,false,'stale webchat response cannot mask CLI controls');
- emit({type:'busy',ai:'chatgpt',model:'',started:1,webchat:true});assert.equal(a.element('#chat-redo').hidden,true);assert.equal(a.element('#chat-q').hidden,true);
- emit({type:'webchat'});const old=a.stream();
- vm.runInContext('closePanes();openChat(proj("p"),taskOf(proj("p"),"t"))',a.context);
- resolve({jobs:[]});await new Promise(r=>setImmediate(r));
- old.onmessage({data:JSON.stringify({type:'busy',ai:'chatgpt',webchat:true})});
- assert.equal(vm.runInContext('chatBusy',a.context),null);
-});
-function webchatAvailabilityUI() {
-  const a=conversationApp(), s=snapshot();
-  s.webchat={enabled:true,location:'/fake',check:{loggedIn:true,temporaryChat:true},jobs:[]};
-  s.projects[0].tasks[0].webchatReason='webchat_busy';
-  vm.runInContext('state='+JSON.stringify(s)+';renderedMainKey=mainKey()',a.context);
-  const option={value:'chatgpt|auto',disabled:true,dataset:{}}, other={value:'codex|GPT-6.1-Sol',disabled:false,dataset:{}};
-  const select=a.element('#chat-ai'), input=a.element('#chat-in');
-  select.options=[other,option];select.value=option.value;select.selectedOptions=[option];
-  input.value='次の依頼を書いている';input.tagName='TEXTAREA';input.selectionStart=2;input.selectionEnd=5;
-  a.document.activeElement=input;
-  let renders=0;a.context.render=()=>{renders++;};a.context.renderTree=()=>{};
-  return {...a,s,option,other,select,input,renders:()=>renders};
-}
-test('Chat availability poll restores the disabled option while focused and details stay open, preserving the draft and selections',async()=>{
-  const a=webchatAvailabilityUI();a.details.push({open:true,classList:{contains:()=>false}});
-  a.context.syncChatWebchatAvailability();assert.match(a.element('#webchat-notice').innerHTML,/動いています/);
-  const ready=JSON.parse(JSON.stringify(a.s));ready.projects[0].tasks[0].webchatReason='';
-  a.context.fetchState=async()=>ready;await a.context.pollState();
-  assert.equal(a.option.disabled,false);assert.equal(a.element('#webchat-notice').innerHTML,'');
-  assert.equal(a.renders(),0);assert.equal(a.document.activeElement,a.input);assert.equal(a.element('#chat-in'),a.input);
-  assert.equal(a.input.value,'次の依頼を書いている');assert.deepEqual([a.input.selectionStart,a.input.selectionEnd],[2,5]);
-  assert.equal(a.select.value,'chatgpt|auto');assert.equal(a.other.disabled,false);assert.equal(a.element('#chat-ai'),a.select);
-  a.option.disabled=true;a.context.fetchState=async()=>null;await a.context.pollState();assert.equal(a.option.disabled,false,'304 still repairs the DOM');
-});
-test('Chat availability refresh and preserved load synchronize actual reasons without selecting another AI',async()=>{
-  const a=webchatAvailabilityUI();
-  for(const [reason,text] of [
-    ['webchat_busy',/自動Chatが動いています/],['webchat_task_busy',/この会話でAI/],
-    ['webchat_selection_unconfirmed',/自動再送はしません/],['webchat_login_unconfirmed',/ログイン状態を判定できない/],
-    ['webchat_temporary_chat_unconfirmed',/一時チャットを確認できない/],['webchat_remote_challenge_required',/人間確認/],
-  ]) {
-    const next=JSON.parse(JSON.stringify(a.s));next.projects[0].tasks[0].webchatReason=reason;
-    a.context.fetchState=async()=>next;await a.context.refreshTree();
-    assert.equal(a.option.disabled,true);assert.match(a.element('#webchat-notice').innerHTML,text);assert.equal(a.select.value,'chatgpt|auto');
-    if(reason.includes('busy'))assert.doesNotMatch(a.element('#webchat-notice').innerHTML,/data-go="settings"/);
-  }
-  a.select.value=a.other.value;a.context.syncChatWebchatAvailability();assert.equal(a.element('#webchat-notice').innerHTML,'');
-  const ready=JSON.parse(JSON.stringify(a.s));ready.projects[0].tasks[0].webchatReason='';
-  a.context.fetchState=async()=>ready;await a.context.load({preserveMain:true});
-  assert.equal(a.option.disabled,false);assert.equal(a.select.value,a.other.value);assert.equal(a.renders(),0);
-  assert.equal(a.document.activeElement,a.input);assert.equal(a.input.value,'次の依頼を書いている');
-});
-test('Chat composer accepts a second request after terminal SSE while the next draft stays focused',async()=>{
-  const a=webchatAvailabilityUI();let send,next=JSON.parse(JSON.stringify(a.s));
-  next.projects[0].tasks[0].webchatReason='';
-  a.context.fetchState=async()=>next;await a.context.refreshTree();
-  a.context.bindAskAnswers=(_box,cb)=>{send=cb;};a.context.openChat(next.projects[0],next.projects[0].tasks[0]);
-  const load=a.context.load;a.context.load=()=>load({preserveMain:true});
-  const requests=[];
-  a.context.api=async(route,body)=>{
-    if(route==='/api/webchat')return next.webchat;
-    assert.equal(route,'/api/chat/send');requests.push(body);
-    next=JSON.parse(JSON.stringify(next));next.projects[0].tasks[0].webchatReason='webchat_busy';
-    next.webchat.jobs.push({project:'p',task:'t',request:'r'+requests.length,kind:'conversation',state:'sending'});
-    return {ok:true,webchat:true,task:'t',request:'r'+requests.length};
-  };
-  for(const text of ['1回目','2回目']) {
-    a.input.value=text;a.input.handlers.input();assert.equal(await send(),true);assert.equal(a.option.disabled,true);
-    a.input.value='続けて書いている';a.input.handlers.input();a.input.focus();
-    next=JSON.parse(JSON.stringify(next));next.projects[0].tasks[0].webchatReason='';next.webchat.jobs.at(-1).state='done';
-    a.stream().onmessage({data:JSON.stringify({type:'webchat'})});await new Promise(r=>setImmediate(r));
-    assert.equal(a.option.disabled,false);assert.equal(a.document.activeElement,a.input);assert.equal(a.input.value,'続けて書いている');
-    assert.equal(a.select.value,'chatgpt|auto');
-  }
-  assert.deepEqual(requests.map(r=>r.text),['1回目','2回目']);assert.ok(requests.every(r=>r.project==='p' && r.task==='t'));
-  assert.equal(a.renders(),0);
-});
-for(const terminal of ['done','blocked','unknown','stopped']) test('Chat terminal SSE refreshes availability without redrawing the focused composer: '+terminal,async()=>{
-  const a=webchatAvailabilityUI(), next=JSON.parse(JSON.stringify(a.s));
-  next.projects[0].tasks[0].webchatReason=terminal==='unknown'?'webchat_login_unconfirmed':'';
-  next.webchat.jobs=[{project:'p',task:'t',state:terminal,kind:'conversation'}];
-  let fetches=0;a.context.fetchState=async()=>{fetches++;return next;};a.context.api=async()=>next.webchat;
-  a.stream().onmessage({data:JSON.stringify({type:'webchat'})});await new Promise(r=>setImmediate(r));
-  assert.equal(fetches,1);assert.equal(a.option.disabled,terminal==='unknown');assert.equal(a.renders(),0);
-  assert.equal(a.document.activeElement,a.input);assert.equal(a.input.value,'次の依頼を書いている');
-  assert.equal(a.select.value,'chatgpt|auto');
-});
-test('Chat terminal state fetch cannot overwrite a newer SSE or a different conversation',async()=>{
-  for(const interrupt of ['new-event','navigation']) {
-    const a=webchatAvailabilityUI(), stale=JSON.parse(JSON.stringify(a.s));
-    stale.projects[0].tasks[0].webchatReason='';stale.webchat.jobs=[{project:'p',task:'t',state:'done'}];
-    let release;a.context.fetchState=()=>new Promise(r=>release=r);a.context.api=async()=>stale.webchat;
-    a.stream().onmessage({data:JSON.stringify({type:'webchat'})});await new Promise(r=>setImmediate(r));
-    assert.ok(release);
-    if(interrupt==='navigation')vm.runInContext('closePanes();openChat(proj("p"),taskOf(proj("p"),"t"))',a.context);
-    else {a.context.api=()=>new Promise(()=>{});a.stream().onmessage({data:JSON.stringify({type:'webchat'})});}
-    release(stale);await new Promise(r=>setImmediate(r));
-    assert.equal(a.option.disabled,true);assert.equal(vm.runInContext('proj("p").tasks[0].webchatReason',a.context),'webchat_busy');
-  }
-});
-test('Chat availability shows a concise actual reason before sending, and legacy jobs cannot be replayed',()=>{
- const a=app(),s=snapshot();s.projects[0].tasks[0].owner='chatgpt';s.projects[0].tasks[0].webchatReason='webchat_remote_challenge_required';
- s.webchat={enabled:true,location:'/fake',jobs:[{project:'p',task:'t',request:'legacy',state:'unknown',error:'webchat_restart'}]};
- vm.runInContext('state='+JSON.stringify(s),a.context);const html=a.context.chatHtml(s.projects[0],s.projects[0].tasks[0]);
- assert.match(html,/人間確認/);assert.match(html,/value="chatgpt\|auto"[^>]*selected[^>]*disabled/);assert.doesNotMatch(html,/data-webchat="retry"|保存してから送/);
-});
-test('ChatGPT担当は自動を既定とし、未設定なら無効と設定案内を出す',()=>{
- const a=app(),s=snapshot(),p=s.projects[0],t=p.tasks[0];t.owner='chatgpt';vm.runInContext('state='+JSON.stringify(s),a.context);
- assert.equal(a.context.chatPick(p,t).model,'auto');let html=a.context.chatHtml(p,t);
- assert.match(html,/ChatGPT（Chat／Pro）は未設定/);assert.match(html,/data-go="settings"/);
- const disabledOptions=[...html.matchAll(/<option([^>]*)>[^<]*<\/option>/g)].filter(m=>m[1].includes('chatgpt|'));
- assert.equal(disabledOptions.length,1);assert.match(disabledOptions[0][1],/auto/);assert.match(disabledOptions[0][1],/selected/);assert.match(disabledOptions[0][1],/disabled/);
- assert.doesNotMatch(html,/value="chatgpt\|(?:chat|app)"/);
- vm.runInContext('state.webchat={enabled:true,location:"/fake/external",model:"Pro"}',a.context);html=a.context.chatHtml(p,t);
- const options=[...html.matchAll(/<option([^>]*)>[^<]*<\/option>/g)].filter(m=>m[1].includes('chatgpt|'));
- assert.equal(options.length,1);assert.match(options[0][1],/auto/);assert.match(options[0][1],/selected/);assert.doesNotMatch(options[0][1],/disabled/);
- assert.doesNotMatch(html,/未設定です/);
 });
 
 test('Project chat links allow only parsed HTTP/HTTPS URLs and retain unsafe values as escaped text', () => {
@@ -4421,4 +4016,15 @@ test('missing role-review UI preserves free role settings, history and defaults 
  const cb=a.documentListeners.find(x=>x.name==='click'&&String(x.cb).includes('[data-role-setting]')).cb;
  for(const action of ['review','cancel','topic'])await cb({target:{closest:()=>({dataset:{roleSetting:action,task:'forged'}})}});
  assert.equal(calls.length,0);
+});
+
+// A public build also exercises this with no private UI file on disk.
+test('external screen controls are absent while free MCP settings and old conversation rows remain',()=>{
+ const a=app(),s=snapshot();s.extensions={included:[],missing:[],notice:''};a.context.data=s;
+ vm.runInContext('state=data;view={kind:"settings"};renderSettings();',a.context);
+ const settings=a.context.accountSettingsHtml();
+ assert.doesNotMatch(settings,/id="webchat-box"|data-webchat=/);
+ assert.match(settings,/id="chatgpt-box"|id="mcp-box"|data-ai-fold="mcp"/);
+ assert.doesNotMatch(a.context.chatModelChoices(s.projects[0],s.projects[0].tasks[0]),/value="chatgpt\|auto"/);
+ assert.match(a.context.msgHtml({role:'assistant',ai:'chatgpt-chat',text:'Retained old reply'}),/Retained old reply/);
 });

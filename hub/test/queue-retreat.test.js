@@ -123,8 +123,3 @@ test('backup/relocate retain retreat fence, ledger image and hand-edited markdow
  assert.equal(f.transfer.transfer(b).id,r.id);assert.equal(f.ideas.view('P').total,1);assert.deepEqual(f.ideas.image('P',f.ideas.read('P').items[r.id].images[0].id).bytes,PNG);assert.deepEqual(fs.readFileSync(path.join(moved,'アイデア帳.md')),md);
  const preserved=JSON.parse(fs.readFileSync(path.join(f.ideas.resolve('P').dir,'preserved-markdown.json'),'utf8'));assert.deepEqual(Buffer.from(preserved.base64,'base64'),md);assert.throws(()=>f.seed([q]),e=>e.code==='queue-retreat');
 });
-test('enabled automatic runner never organizes or builds a parked directive',async t=>{
- const f=require('./idea-fixture.cjs').fixture(t),chats=new ChatRunner({dirOf:()=>f.dir});let transfer;chats.queueGuard=o=>transfer.guard(o);transfer=new QueueRetreat({ideas:f.ideas,chats});
- f.auto(true);const q={id:U.uuid(),text:'後で考える',ai:'codex',model:'gpt-6.1-sol'};chats.setQueue('P','lane',[q],true);const before=U.hash(f.ideas.read('P').settings);transfer.transfer({project:'P',task:'lane',id:q.id,opId:U.uuid(),expected:version(q)});
- await f.runner.tick('P');await f.runner.tick('P');assert.equal(f.starts.length,0);assert.equal(Object.keys(f.ideas.read('P').runs).length,0);assert.equal(U.hash(f.ideas.read('P').settings),before);
-});

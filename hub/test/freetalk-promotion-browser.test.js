@@ -388,7 +388,15 @@ else {
   const phone=await browser.newPage({viewport:{width:390,height:844}});
   try {
    const source=await page.evaluate(()=>localStorage.getItem('hub-view'));await phone.addInitScript(view=>localStorage.setItem('hub-view',view),source);await phone.goto(base);await phone.locator('#mobile-info').click();
+   // Hold both real clicks at the request boundary. Otherwise the first
+   // completed migration can remove the other screen's button before Playwright
+   // finishes its actionability check, without exercising the second request.
+   let arrived=0,release;
+   const bothRequests=new Promise(resolve=>{release=resolve;});
+   const synchronize=async route=>{if(++arrived===2)release();await bothRequests;await route.continue();};
+   await page.route('**/api/freetalk/project-start',synchronize);await phone.route('**/api/freetalk/project-start',synchronize);
    await Promise.all([page.locator('[data-act="freetalkautopromote"]:enabled').click(),phone.locator('[data-act="freetalkautopromote"]:enabled').click()]);
+   assert.equal(arrived,2);
    const r=await migrated();await Promise.all([page.waitForFunction(project=>JSON.parse(localStorage.getItem('hub-view')).project===project,r.project),phone.waitForFunction(project=>JSON.parse(localStorage.getItem('hub-view')).project===project,r.project)]);
    await Promise.all([page.locator('.freetalk-topic[data-t="'+topic.id+'"]').waitFor({state:'detached'}),phone.locator('.freetalk-topic[data-t="'+topic.id+'"]').waitFor({state:'detached'})]);
    assert.equal(await page.locator('.freetalk-topic[data-t="'+topic.id+'"]').count(),0);assert.equal(await phone.locator('.freetalk-topic[data-t="'+topic.id+'"]').count(),0);

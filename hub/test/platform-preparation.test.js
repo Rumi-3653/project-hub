@@ -65,12 +65,12 @@ test('Darwin and existing Linux ownership retain numeric UID and process-group i
   assert.deepEqual(platforms.supervisorFiles, ['index.js', 'darwin.js', 'persistence.js']); assert.equal(Object.isFrozen(platforms.supervisorFiles), true);
 });
 
-test('unavailable Windows licensing blocks paid operations without reading keys, writing or sending', async () => {
+test('unsupported OS licensing blocks paid operations without reading keys, writing or sending', async () => {
   const { License } = require('../lib/license'), { PAID } = require('../lib/license/codec');
   const unexpected = () => assert.fail('unavailable licensing must have no side effects');
-  const license = new License({ owner: false, platform: 'win32', config: { licenseEnforcement: false, endpoint: 'https://invalid.test', trialDays: 30 },
+  const license = new License({ owner: false, platform: 'unsupported-test', config: { licenseEnforcement: false, endpoint: 'https://invalid.test', trialDays: 30 },
     store: { read: unexpected, write: unexpected }, secret: { get: unexpected, put: unexpected, elapsed: unexpected, watchResume: unexpected }, fetcher: unexpected });
-  const status = license.status(); assert.match(status.reason, /Windowsでは未対応/); assert.doesNotMatch(status.reason, /自動で始まります/);
+  const status = license.status(); assert.match(status.reason, /このOSは利用コードの対象外/); assert.doesNotMatch(status.reason, /自動で始まります/);
   assert.equal(status.supported, false); assert.equal(status.enforcement, true); assert.equal(status.features.chat_basic.allowed, true);
   for (const feature of PAID) { assert.equal(status.features[feature].allowed, false); assert.throws(() => license.require([feature]), { code: 'license_held', status: 403 }); }
   assert.doesNotThrow(() => license.require(['chat_basic']));
@@ -90,6 +90,8 @@ test('license settings show the unavailable reason and hide registration while r
   const html = render({ edition: 'public', supported: false, reason: 'Windowsでは未対応：ライセンスの安全な保管' });
   assert.match(html, /Windowsでは未対応/); assert.doesNotMatch(html, /<form|id="license-code"/);
   assert.match(render({ edition: 'public', reason: 'Macの状態' }), /id="license-form"/);
+  assert.match(render({ edition: 'public', activationAvailable: true, reason: 'Windowsの状態' }), /id="license-form"/);
+  assert.doesNotMatch(render({ edition: 'public', activationAvailable: false, reason: '受付は準備中' }), /<form|id="license-code"/);
   assert.match(render({ edition: 'owner' }), /製作者版：鍵不要・全機能・期限なし/);
 });
 

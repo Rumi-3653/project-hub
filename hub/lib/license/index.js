@@ -10,16 +10,18 @@ function ownerEdition() {
   catch (e) { if (e.code === 'MODULE_NOT_FOUND' && e.message.includes("'./owner-edition'")) return false; throw e; }
 }
 const message = '利用権を確認できません。利用コードを登録するか、表示された期限と時刻を確認してください。資料の閲覧・保存・取り出しは使えます';
-const windowsUnavailable = 'Windowsでは未対応：ライセンスの安全な保管・無料体験・利用コードの登録はまだ使えません。基本の機能と資料の閲覧・保存・取り出しは使えます';
 const macMachineHint = platforms.forPlatform('darwin').machineHint;
 class License {
-  constructor({ root, config = policy, owner = ownerEdition(), store = new LicenseStore(root), secret = platforms.secretStore(), fetcher = fetch,
-    elapsed, wall = () => Date.now() / 1000, platform = process.platform, machineHint = macMachineHint } = {}) {
+  constructor({ root, platform = process.platform, config = policy.forPlatform(platform), owner = ownerEdition(),
+    store = new LicenseStore(root, platforms.forPlatform(platform)), secret = platforms.forPlatform(platform).secretStore(), fetcher = fetch,
+    elapsed, wall = () => Date.now() / 1000, machineHint = platforms.forPlatform(platform).machineHint, extensions = require('../extensions').loadExtensions() } = {}) {
     this.config = config; this.owner = owner; this.store = store; this.secret = secret; this.fetcher = fetcher;
     this.elapsed = elapsed || (() => secret.elapsed()); this.wall = wall; this.platform = platform;
+    this.execution = ['queue_auto','limit_switch','parallel'].map(id => ({id,included:extensions.state().included.includes(id),policy:extensions.create(id,{})}));
+    for (const {policy} of this.execution) if (typeof policy.features !== 'function') throw Error('invalid execution decision contract');
     this.machineHint = machineHint; this.trialUsed = false;
     this.identity = null; this.clock = null; this.proofs = []; this.lastResult = null; this.lastOnline = 0; this.retryAfter = 0;
-    if (!owner && platform !== 'win32') {
+    if (!owner && ['darwin', 'win32'].includes(platform)) {
       try {
         this.proofs = store.read('state')?.proofs || [];
         const meta = store.read('device');
@@ -58,11 +60,12 @@ class License {
   }
   status() {
     if (this.owner) return { edition: 'owner', enforcement: false, features: Object.fromEntries(['chat_basic', ...PAID].map(f => [f, { allowed: true, state: 'owner', expiry: null }])) };
-    if (this.platform === 'win32') return { edition: 'public', enforcement: true, supported: false, unsupportedReason: 'windows', reason: windowsUnavailable,
+    if (!['darwin', 'win32'].includes(this.platform)) return { edition: 'public', enforcement: true, supported: false, reason: 'このOSは利用コードの対象外です',
       features: Object.fromEntries(['chat_basic', ...PAID].map(f => [f, { allowed: f === 'chat_basic', state: f === 'chat_basic' ? 'basic' : 'held', expiry: null }])) };
     let clock = { t: this.wall(), wall: this.wall(), mode: 'U', valid: false };
+    if (this.platform === 'win32' && this.resumeUnavailable && this.clock) this.clock.mode = 'U';
     try { if (this.proofs.length) clock = this.makeClock().tick(); } catch { this.loadError = true; }
-    const result = evaluate({ proofs: this.proofs, keys: this.config.trustedKeys, device: { ok: Boolean(this.identity), dev: this.identity?.dev }, build: this.config.build, clock });
+    const result = evaluate({ proofs: this.proofs, keys: this.config.trustedKeys, device: { ok: Boolean(this.identity) && !(this.platform === 'win32' && this.loadError), dev: this.identity?.dev }, build: this.config.build, clock });
     const personal = this.proofs.map(e => { try { return validateProof(verifyEnvelope(e, this.config.trustedKeys, 'proof')); } catch { return null; } })
       .find(p => p?.kind === 'trial' && p.dev === this.identity?.dev && scopeMatches(p.scope, this.config.build));
     const expiry = personal ? Math.min(personal.exp, personal.entEndsAt, personal.betaExpiresAt ?? Infinity, personal.globalEndAt ?? Infinity) : null;
@@ -75,10 +78,11 @@ class License {
     let purchaseUrl = '';
     try { const url = new URL(this.config.purchaseUrl); if (url.protocol === 'https:' && !url.username && !url.password) purchaseUrl = url.href; } catch {}
     const purchased = PAID.every(f => result.features[f].state === 'purchased');
-    return { edition: 'public', enforcement: this.config.licenseEnforcement, ...result, trial, purchaseUrl, purchased,
+    return { edition: 'public', enforcement: this.config.licenseEnforcement, ...result, trial, purchaseUrl, purchased, activationAvailable: Boolean(this.config.endpoint),
       introAvailable: Boolean(purchaseUrl && !purchased && !this.loadError && personal && trial.state === 'active' && personal.entStartsAt <= clock.t && clock.t < expiry),
       reason: purchased ? '購入した版の全機能を期限なしで使えます' :
-        this.loadError ? '端末の鍵・保存内容・経過時計を確認できません' : reasons[trial.state] || message };
+        this.loadError ? '端末の鍵・保存内容・経過時計を確認できません' :
+        this.platform === 'win32' && !this.config.endpoint && trial.state === 'pending' ? 'Windows確認版です。無料体験と購入の受付は準備中です。基本の機能と資料は使えます' : reasons[trial.state] || message };
   }
   require(features) {
     const result = this.status(); this.lastResult = result;
@@ -99,15 +103,18 @@ class License {
     if (options.origin === 'discussion') features.push('discussion');
     if (options.origin === 'role-review') features.push('role_review');
     if (options.automation?.kind === 'idea') features.push('idea_automation');
-    if (options.mode === 'queued' || options.mode === 'amend' && options.request) features.push('queue_auto');
-    if (options.limitSwitch) features.push('limit_switch');
-    if (active.some(x => x.running !== false && !x.exited && !(x.project === options.project && x.task === options.task && x.ai === options.ai))) features.push('parallel');
-    try { return this.require([...new Set(features)]); }
+    for (const {policy} of this.execution) features.push(...policy.features(options, active));
+    try {
+      const required=[...new Set(features)], result=this.require(required);
+      const unavailable=this.execution.filter(x=>!x.included && required.includes(x.id)).map(x=>x.id);
+      if(unavailable.length)throw Object.assign(Error(result.reason || message),{code:'license_held',status:403,features:unavailable});
+      return result;
+    }
     catch (e) { if (stage === 'start') e.licenseHeld = true; throw e; }
   }
   os() { const value = { darwin: 'mac', win32: 'windows' }[this.platform]; if (!value) throw Error('unsupported_os'); return value; }
   requireSupported() {
-    if (!this.owner && this.platform === 'win32') throw Object.assign(Error(windowsUnavailable), { code: 'license_unsupported', status: 403 });
+    if (!this.owner && !['darwin', 'win32'].includes(this.platform)) throw Object.assign(Error('このOSは利用コードの対象外です'), { code: 'license_unsupported', status: 403 });
   }
   async post(route, body) {
     this.requireSupported();
@@ -158,6 +165,7 @@ class License {
   async activate(code) {
     if (this.owner) return { ok: true, owner: true, note: '製作者版は利用コードの登録が不要です' };
     this.requireSupported();
+    if (!this.config.endpoint) throw Error('この版の利用コード受付は準備中です。実際のコードは入力せずお待ちください');
     if (typeof code !== 'string' || !code.trim() || code.length > 256) throw Error('invalid_code');
     if (this.online) throw Error('license_busy');
     this.online = true;
@@ -179,7 +187,7 @@ class License {
     } finally { clock.cancel(); }
   }
   async prepare() {
-    if (this.owner || this.platform === 'win32' || !this.config.endpoint) return;
+    if (this.owner || !['darwin', 'win32'].includes(this.platform) || !this.config.endpoint) return;
     if (this.preparing) return this.preparing;
     if (this.online) return;
     this.preparing = this.prepareOnline();
@@ -194,7 +202,7 @@ class License {
       let proofs = this.proofs.map(e => { try { return validateProof(verifyEnvelope(e, this.config.trustedKeys, 'proof')); } catch { return null; } })
         .filter(p => p && p.dev === this.identity?.dev && scopeMatches(p.scope, this.config.build));
       if (!proofs.length && !this.trialUsed) {
-        if (this.platform !== 'darwin') throw Error('machine_hint_unavailable'); // Windows is a separate implementation step.
+        this.requireSupported();
         const hint = this.machineHint();
         const r = await this.signedRequest('trial', { machineHint: hint });
         const p = this.acceptProof(r.proof); proofs = [p];
@@ -214,9 +222,13 @@ class License {
     }
   }
   start() {
-    if (this.owner || this.platform === 'win32' || this.timer) return;
+    if (this.owner || !['darwin', 'win32'].includes(this.platform) || this.timer) return;
     const resume = () => { try { this.clock?.resume(); } catch { this.loadError = true; } };
-    if (this.config.endpoint || this.proofs.length) this.stopResume = this.secret.watchResume?.(resume, resume);
+    if (this.config.endpoint || this.proofs.length) {
+      const unavailable = () => { this.resumeUnavailable = true; resume(); };
+      this.stopResume = this.secret.watchResume?.(resume, unavailable);
+      if (this.platform === 'win32' && !this.stopResume) unavailable();
+    }
     void this.prepare();
     this.timer = setInterval(() => {
       try { if (this.proofs.length) this.status(); } catch {}

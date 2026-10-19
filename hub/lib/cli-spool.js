@@ -52,7 +52,8 @@ function worker(dir){
  const fd=fs.openSync(path.join(dir,'out.jsonl'),'a',0o600),decoder=new StringDecoder('utf8');let n=0,rest='',err='',ended=false,timer;
  const line=l=>{fs.writeSync(fd,JSON.stringify({n:++n,line:l})+'\n');fs.fsyncSync(fd);};
  const chunk=d=>{rest+=d;const parts=rest.split('\n');rest=parts.pop();for(const l of parts)line(l);};
- let owned;let cli;const end=(code,signal,error)=>{if(ended)return;ended=true;clearInterval(timer);chunk(decoder.end());if(rest)line(rest);fs.closeSync(fd);atomic(dir,'stderr.json',{text:err});atomic(dir,'exit.json',{code,signal,error});};
+ let owned;let cli;
+ const stop=signal=>{if(owned)return owned.signal(signal);};const end=(code,signal,error)=>{if(ended)return;ended=true;clearInterval(timer);chunk(decoder.end());if(rest)line(rest);fs.closeSync(fd);atomic(dir,'stderr.json',{text:err});atomic(dir,'exit.json',{code,signal,error});};
  try{
    if(read(dir,'cancel.json'))throw Error('開始前に停止されました');
    require(path.join(__dirname,'owned-processes.cjs')).assertLaunchOwnership();
@@ -60,13 +61,13 @@ function worker(dir){
      if(d?.version!==1||!Number.isSafeInteger(d.epoch)||d.epoch<0||typeof d.all!=='boolean'||!d.tasks||typeof d.tasks!=='object'||Array.isArray(d.tasks)||Object.entries(d.tasks).some(([k,t])=>!t||k!==JSON.stringify([t.project,t.task])||typeof t.project!=='string'||typeof t.task!=='string'||!Number.isSafeInteger(t.epoch)||t.epoch<0||typeof t.held!=='boolean'||t.autoHeld!==undefined&&typeof t.autoHeld!=='boolean')||d.restartIds!==undefined&&(!Array.isArray(d.restartIds)||d.restartIds.some(id=>typeof id!=='string'||!id||id.length>80)))throw Error('停止記録を確認できないため開始しません');
      const t=d.tasks[JSON.stringify([req.options.project,req.options.task])];
      if(!d||fs.existsSync(path.join(c.dir,'intent.json'))||d.all||t?.held||t?.autoHeld&&c.ticket?.manual!==true||d.epoch!==c.ticket?.epoch||(t?.epoch||0)!==c.ticket?.task)throw Error('停止後の依頼は開始しません');}
-   cli=spawn(req.turn.command,req.turn.args,{cwd:req.options.dir,env:process.env,detached:true,stdio:['pipe','pipe','pipe']});}catch(e){end(1,null,e.message);return;}
- timer=setInterval(()=>{const c=read(dir,'cancel.json');if(c&&c.n!==lastCancel){lastCancel=c.n;try{owned?.signal(c.signal);}catch{}}},25);let lastCancel=0;
+   cli=spawn(req.turn.command,req.turn.args,{cwd:req.options.dir,env:process.env,detached:true,windowsHide:true,stdio:['pipe','pipe','pipe']});}catch(e){end(1,null,e.message);return;}
+ timer=setInterval(()=>{const c=read(dir,'cancel.json');if(c&&c.n!==lastCancel){lastCancel=c.n;try{stop(c.signal);}catch{}}},25);let lastCancel=0;
  cli.on('spawn',()=>{let identity,ownershipError;try{const P=require(path.join(__dirname,'owned-processes.cjs'));identity=P.capture(cli.pid);owned=new P.OwnedProcesses(identity);owned.collect();}catch(e){ownershipError=e.message;}atomic(dir,'started.json',{supervisorPid:process.pid,cliPid:cli.pid,at:Date.now(),identity,ownershipError});});
  cli.stdin.on('error',()=>{});cli.stdin.end(req.turn.stdin);
  cli.stdout.on('data',d=>chunk(decoder.write(d)));cli.stderr.on('data',d=>{err=(err+d.toString('utf8')).slice(-4000);atomic(dir,'stderr.json',{text:err});});
  cli.on('error',e=>end(1,null,e.code==='ENOENT'?'CLIが見つかりません：'+req.turn.command:e.message));cli.on('close',(code,signal)=>end(code,signal));
- process.on('SIGTERM',()=>{try{owned?.signal('SIGTERM');}catch{}});
+ process.on('SIGTERM',()=>{try{stop('SIGTERM');}catch{}});
 }
 class SpoolChild extends EventEmitter{
  constructor(dir,owner){super();this.dir=dir;this.owner=owner;try{this.requestHash=digest(fs.readFileSync(path.join(dir,'request.json')));}catch{this.requestHash=null;}this.stdout=new EventEmitter();this.stderr=new EventEmitter();this.stdout.setEncoding=this.stderr.setEncoding=()=>{};this.stdin=new EventEmitter();this.stdin.end=()=>{};this.cursor=read(dir,'cursor.json',{n:0}).n;this.cancelN=read(dir,'cancel.json',{n:0}).n;this.offset=0;this.partial='';this.decoder=new StringDecoder('utf8');this.closed=false;}
@@ -105,7 +106,7 @@ function start(root,serverId,options,turn,meta,rows,env){
  for(const [name,source]of PLATFORM_SOURCE)fs.writeFileSync(path.join(dir,'platform',name),source,{mode:0o600});
  const clean={};for(const [k,v]of Object.entries(options))if(k!=='env'&&typeof v!=='function')clean[k]=v;
  atomic(dir,'request.json',{options:clean,turn,meta,rows});const owner=claim(dir,serverId);
- const p=spawn(process.execPath,[path.join(dir,'worker.cjs'),'--worker',dir],{env,detached:true,stdio:'ignore'});p.unref();if(p.pid){let identity;try{identity=require('./owned-processes').capture(p.pid);}catch{}atomic(dir,'launch.json',{supervisorPid:p.pid,identity});}
+ const p=spawn(process.execPath,[path.join(dir,'worker.cjs'),'--worker',dir],{env,detached:true,windowsHide:true,stdio:'ignore'});p.unref();if(p.pid){let identity;try{identity=require('./owned-processes').capture(p.pid);}catch{}atomic(dir,'launch.json',{supervisorPid:p.pid,identity});}
  const child=new SpoolChild(dir,owner);p.once('error',e=>atomic(dir,'exit.json',{code:1,error:e.message}));return child;
 }
 // Display-only shortcut for proven, finished runs. Directory changes catch

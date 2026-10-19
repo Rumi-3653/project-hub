@@ -20,7 +20,6 @@ test('C8: record権限をbuildへ昇格しない、停止世代を別保存', t 
   const { ideas } = fixture(t); assert.throws(() => add(ideas, '実装', { intent: 'invalid' }), e => e.status === 400);
   assert.throws(() => ideas.add('P', { opId: U.uuid(), text: '実装', intent: 'build' }), e => e.status === 403);
   const r = add(ideas, '実装', { intent: 'build' }); let d = ideas.read('P'); assert.equal(d.settings.auto.enabled, false); assert.equal(d.settings.manualPaused, false); assert.equal(d.items[r.id].grant.by, 'human-ui');
-  ideas.auto('P', { opId: U.uuid(), settingsRev: d.settings.rev, enabled: false }); d = ideas.read('P'); assert.equal(d.settings.manualPaused, true); assert.equal(d.settings.stopGeneration, 2); assert.equal(d.settings.auto.generation, 2);
 });
 for (const boundary of ['staging', 'intent', 'rename', 'directory-sync', 'cleanup']) test('C4/F7: 保存停止注入 ' + boundary, t => {
   let armed = false; const { ideas, store } = fixture(t, { fault(stage, { file }) { if (armed && stage === boundary && file.endsWith('/ideas.json')) { armed = false; throw Error('injected-' + stage); } } });

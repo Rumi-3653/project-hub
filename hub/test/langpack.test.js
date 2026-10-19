@@ -166,7 +166,20 @@ test('Missing template, seed or documentation inputs fall back during portable b
 });
 test('Project creation selects Japanese templates when an external pack has incomplete templates', t => {
   const f = fixture(t);
-  const select = "const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),{activePack}=require('./lib/locale');const source=fs.readFileSync('./server.js','utf8');const start=source.indexOf(\"    const pack = activePack(['templates']);\");const end=source.indexOf('    if (r.error)',start);let selected;vm.runInNewContext(source.slice(start,end),{activePack,path,__dirname:process.cwd(),b:{},body:'',refs:[],store:{createProject:(data,template)=>{selected=template;return {}}}});console.log(selected);";
+  const select = `
+    const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+    const {activePack}=require('./lib/locale');
+    let selected;
+    const route=require('./lib/routes/project')({
+      fs,path,activePack,__dirname:process.cwd(),expandHome:value=>value,record:()=>{},
+      store:{createProject:(data,template)=>{selected=template;return {project:{id:'test-project'}};}},
+      send:(res,status)=>assert.equal(status,200),
+    }).create;
+    const req={method:'POST'},url={pathname:'/api/project/new'};
+    assert.equal(route.matches(req,url),true);
+    route.handle(req,{},url,{});
+    console.log(selected);
+  `;
   const absent = f.run(select); assert.equal(absent.status, 0, absent.stderr);
   assert.equal(absent.stdout.trim(), path.resolve(hub, '../docs/project-hub/templates/project'));
   completeAssets(f);

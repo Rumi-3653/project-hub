@@ -14,7 +14,7 @@ function fixture(t) {
 // Node's fs and the running Hub are never patched. Tests use real temp files.
 function modules(persistence, overrides = {}) {
   const cache = new Map(), names = new Set(['stop-control', 'cli-spool', 'safe-file',
-    'integration-writes', 'integration-abandon-recovery', 'ideas', 'webchat']);
+    'integration-writes', 'integration-abandon-recovery', 'ideas']);
   function load(name) {
     if (cache.has(name)) return cache.get(name).exports;
     const file = require.resolve('../lib/' + name), original = createRequire(file), module = { exports: {} };
@@ -146,10 +146,4 @@ test('idea recovery retains intent and candidate until both file and namespace d
   broken = false; cold.recoverFile(file);
   assert.equal(JSON.parse(fs.readFileSync(file)).rev, 1);
   assert.equal(fs.existsSync(cold.pending(file)), true); // Recovery itself never discards the evidence.
-});
-test('webchat publication reports namespace failures instead of successful settings saves', t => {
-  const root = fixture(t), p = { ...native.persistence, syncDirectory() { throw Error('namespace flush failed'); } };
-  const load = modules(p);
-  const { Webchat } = load('webchat'), w = new Webchat({ root, gpt: {}, store: {}, chat: {} });
-  assert.throws(() => w.save({ enabled: false }), /namespace flush failed/); w.shutdown();
 });

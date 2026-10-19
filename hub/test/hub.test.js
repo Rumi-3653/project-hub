@@ -858,6 +858,8 @@ test('作業中の指示：① 取り消してやり直す／② 追加説明（
   fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node
 let i='';process.stdin.on('data',d=>i+=d);process.stdin.on('end',()=>{const o=x=>console.log(JSON.stringify(x));
 o({type:'system',subtype:'init',session_id:'S-q'});
+// The stop case must still be active even if a loaded host delays the next HTTP request.
+if((i.split('# 今回の依頼\\n').at(-1)||'').startsWith('五つ目')){require('node:fs').writeFileSync(${JSON.stringify(path.join(bin,'stop-ready'))},'ready');setInterval(()=>{},1000);return;}
 setTimeout(()=>{o({type:'assistant',message:{content:[{type:'text',text:'DONE['+(i.split('# 今回の依頼\\n')[1]||i)+']'}]}});o({type:'result',is_error:false,result:'',session_id:'S-q'});},600);});
 process.on('SIGTERM',()=>process.exit(143));
 `, { mode: 0o755 });
@@ -896,6 +898,7 @@ process.on('SIGTERM',()=>process.exit(143));
     assert.strictEqual(rows().find(r => r.role === 'user' && r.text === '色は青で').mode, 'amend');
     // ［止める］は、待っている指示を送信せずに保持して保留する
     await say('五つ目');
+    await waitForFixture(()=>fs.existsSync(path.join(bin,'stop-ready')),'the fifth mock turn must stay active until the stop request');
     await say('六つ目', 'queue');
     await post2('/api/chat/stop', { project: 'サンプルアプリ', task: 'q-test' });
     await waitN(7);

@@ -31,14 +31,21 @@ function fixture(t, mode) {
   const normal = [{ id: 'ordinary-before', text: '人の通常の依頼', ai: 'codex', nested: { unchanged: true } }, { id: 'ordinary-after', text: '文中に discussion- があっても通常の依頼', error: '既存の保留', stopHeld: true }];
   const discussion = ['discussion-stale-0', 'limit-discussion-stale-1', 'limit-limit-discussion-stale-2'].map(id => ({ id, ai: 'codex', text: '話し合いの残り' }));
   const review = ['role-review-stale-review-0', 'limit-role-review-stale-review-0'].map(id => ({ id, ai: 'codex', text: '見直しの残り' }));
+  const delegates=[{id:'old-user-delegate',origin:'delegate',ai:'codex',text:'利用者の委任'}, {id:'new-internal',origin:'hub-internal',ai:'codex',text:'内部整理'}, {id:'old-internal',origin:'delegate',selectionOnly:true,ai:'codex',text:'履歴整理'}];
+  const automation={id:'old-idea-run',origin:'delegate',ai:'codex',text:'old automatic request',automation:{kind:'idea',runId:'old'}};
+  if(mode!=='bundled'){
+    const {Ideas}=require('../lib/ideas'),ideaStore={root,readProject:id=>id===project?{id:project,dir:pdir,tasks:[{id:task}]}:null},ideas=new Ideas({store:ideaStore});
+    ideas.add(project,{opId:require('node:crypto').randomUUID(),text:'FREE-RECOVERY-IDEA',intent:'record'},{human:true});
+    ideas.internal(project,require('node:crypto').randomUUID(),{seed:true},d=>{d.settings.auto.enabled=true;d.runs.old={id:'old',delivery:'unknown',closed:false,targets:[]};});ideas.close();
+  }
   const queueFile = path.join(pdir, '.ai/chat', task + '.queue.json');
   fs.mkdirSync(path.dirname(queueFile), { recursive: true });
-  fs.writeFileSync(queueFile, JSON.stringify([normal[0], ...discussion, ...review, normal[1]]));
+  fs.writeFileSync(queueFile, JSON.stringify([normal[0], ...discussion, ...review, ...delegates, ...(mode==='bundled'?[]:[automation]), normal[1]]));
   const otherFile = path.join(root, 'Product/サンプルサイト/.ai/chat/sample-site-01.queue.json');
   const other = [{ id: 'unrelated-user-turn', text: '別作業はそのまま' }];
   fs.mkdirSync(path.dirname(otherFile), { recursive: true }); fs.writeFileSync(otherFile, JSON.stringify(other));
   const env = { ...process.env, HOME: temp, PATH: '/usr/bin:/bin', HUB_ROOT: root, HUB_AI_HOME: temp, HUB_FREETALK_HOME: path.join(temp, 'home'), HUB_DRY_RUN: '1', HUB_LANG: 'ja', HUB_PORT: String(50000 + Math.floor(Math.random() * 5000)), TEST_HUB: hub, TEST_MODE: mode };
-  return { temp, hub, root, rolesFile, queueFile, otherFile, env, current, normal, discussion, other };
+  return { temp, hub, root, rolesFile, queueFile, otherFile, env, current, normal, discussion, delegates, other };
 }
 
 function bootProbe() {
@@ -60,12 +67,17 @@ function bootProbe() {
     assert.equal(journal.lastReview.message, fixture.restartMessage);
     assert.equal(journal.lastReview.project, fixture.project); assert.equal(journal.lastReview.task, fixture.task);
     const queue = app.chats.queue(fixture.project, fixture.task);
-    assert.deepEqual(queue, process.env.TEST_MODE === 'bundled' ? [fixture.normal[0], ...fixture.discussion, fixture.normal[1]] : fixture.normal);
+    const internal=fixture.delegates.slice(1).map(q=>({...q,origin:'hub-internal'}));
+    assert.deepEqual(queue, process.env.TEST_MODE === 'bundled' ? [fixture.normal[0], ...fixture.discussion, fixture.delegates[0], ...internal, fixture.normal[1]] : [fixture.normal[0], ...internal, fixture.normal[1]]);
     app.chats.verifyQueues();
     assert.deepEqual(JSON.parse(fs.readFileSync(fixture.otherFile, 'utf8')), fixture.other);
     // With the bundle installed, its unchanged verifier rejects stale rounds.
     if (process.env.TEST_MODE === 'bundled') assert.throws(() => app.chats.refreshQueued({ project: fixture.project, task: fixture.task, request: fixture.discussion[0].id }), /この話し合いの回は終了/);
     assert.equal(app.chats.running.size, 0);
+    if(process.env.TEST_MODE!=='bundled'){
+      const d=app.ideas.read(fixture.project);assert.equal(d.settings.auto.enabled,false);assert.equal(d.settings.manualPaused,true);assert.equal(d.runs.old.delivery,'unknown');assert.equal(d.runs.old.closed,false);assert.ok(app.ideas.view(fixture.project).items.some(i=>i.text==='FREE-RECOVERY-IDEA'));
+    }
+
     await new Promise(resolve => app.server.listen(Number(process.env.HUB_PORT), '127.0.0.1', resolve));
     const base = 'http://127.0.0.1:' + app.server.address().port;
     const response = await fetch(base + '/api/state'), state = await response.json();
@@ -94,7 +106,7 @@ function bootProbe() {
 for (const mode of ['public', 'missing', 'bundled']) test('startup recovers unavailable paid leftovers and preserves free roles: ' + mode, { skip: mode === 'bundled' && !hasBundle }, t => {
   const f = fixture(t, mode), probe = path.join(f.temp, 'probe.cjs');
   fs.writeFileSync(probe, '(' + bootProbe.toString() + ')();');
-  f.env.TEST_EXPECTED = JSON.stringify({ history: f.current.journal.history, defaults: f.current.journal.defaults, roles: f.current.roles, restartMessage, project, task, normal: f.normal, discussion: f.discussion, otherFile: f.otherFile, other: f.other });
+  f.env.TEST_EXPECTED = JSON.stringify({ history: f.current.journal.history, defaults: f.current.journal.defaults, roles: f.current.roles, restartMessage, project, task, normal: f.normal, discussion: f.discussion, delegates:f.delegates, otherFile: f.otherFile, other: f.other });
   const first = execFileSync(process.execPath, [probe], { env: f.env, encoding: 'utf8', timeout: 30000 });
   const saved = require('../lib/role-history').load(f.rolesFile);
   f.env.TEST_EXPECTED = JSON.stringify({ ...JSON.parse(f.env.TEST_EXPECTED), history: saved.journal.history, defaults: saved.journal.defaults });

@@ -20,6 +20,14 @@ test('Public overlay selects Chinese documents, PR templates and only the intend
   for (const name of publicNames) assert.equal(selected(name, true), true, name);
   for (const name of ['.github/workflows/private.yml', '.github/secrets.txt', 'private.md']) assert.equal(selected(name, true), false, name);
 });
+test('Windows local acceptance kit is excluded with its issuer fixture while the native license implementation stays exportable', () => {
+  for (const name of ['hub/check-license.cmd','hub/WINDOWS-LICENSE.md','hub/build-windows-license-kit.cjs','hub/collect-license-result-v4.cjs',
+    'hub/test/windows-guard-diagnostics-v4.test.js','hub/test/windows-license-result-v4.test.js',
+    'hub/test/windows-license-acceptance.cjs','hub/test/windows-license-storage.test.js','hub/test/windows-cache.test.js','hub/test/fixtures/license-db.cjs'])
+    assert.equal(excluded(name),true,name);
+  for (const name of ['hub/lib/license/index.js','hub/lib/license/policy.js','hub/lib/license/windows-storage.js','hub/lib/platform/win32-native.js'])
+    assert.equal(excluded(name),false,name);
+});
 test('Both template languages and fictional seeds remain selected and inspected', () => {
   for (const name of [...sourceNames, 'docs/project-hub/templates/project/.ai/rules.md', 'docs/project-hub/templates/_hub/roles.yaml', 'hub/seed/example/.ai/tasks/one.md']) {
     assert.equal(selected(name, false), true, name);

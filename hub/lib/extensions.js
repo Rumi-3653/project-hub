@@ -1,9 +1,21 @@
 'use strict';
 const fs = require('node:fs'), path = require('node:path');
 const VERSION = 1;
-const absent = () => ({
+// These fallbacks only identify forbidden operations; they never authorize paid execution.
+const executionRequirements = {
+ queue_auto: o => o.mode === 'queued' || o.mode === 'amend' && o.request,
+ limit_switch: o => Boolean(o.limitSwitch),
+ parallel: (o, active) => active.some(x => x.running !== false && !x.exited && !(x.project === o.project && x.task === o.task && x.ai === o.ai)),
+};
+const absent = id => ({
+  features: (o, active) => executionRequirements[id]?.(o, active) ? [id] : [],
+  enabled: () => false, backup: () => null,
   active: () => false, read: () => ({ sessions: {} }), limitModels: () => ({}),
   verify() { throw Error('この版には含まれていません'); },
+  jobs: [], control: false, tail: Promise.resolve(), busy: () => [],
+  view: () => ({ included: false, enabled: false, busy: false, jobs: [] }),
+  availability() { const e=Error('feature_not_included'); e.status=404; throw e; },
+  message: () => 'この版には含まれていません', shutdown() {},
   recover() {}, tick: async () => {}, stop: () => false, settled: async () => {},
 });
 // Resolve absence separately from execution: a missing dependency inside a
@@ -24,7 +36,7 @@ function loadExtensions({ hub = path.join(__dirname, '..') } = {}) {
   const missing = (expected?.features || []).filter(id => !definitions.has(id));
   const notice = missing.length ? '有料部品が見つかりません：' + missing.join('、') : '';
   return Object.freeze({
-    definition(id) { return definitions.get(id) || Object.freeze({ id, feature: id, version: VERSION, isRequest: () => false, basePrompt: '', create: absent }); },
+    definition(id) { return definitions.get(id) || Object.freeze({ id, feature: id, version: VERSION, isRequest: () => false, basePrompt: '', create: () => absent(id) }); },
     create(id, host) {
       const value = this.definition(id).create(Object.freeze(host));
       instances.set(id, value); return value;

@@ -5,6 +5,54 @@ const platform = require('./platform');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const WIN = process.platform === 'win32';
+const WIN_EXTS = ['.exe', '.cmd', '.bat'];
+// 実行ファイルを PATH から探す。Windows は拡張子の無い名前に .exe → .cmd → .bat を補う（npm のシムは .cmd）
+function findExe(name, envPath = process.env.PATH, extraDirs = []) {
+  if (!name || typeof name !== 'string') return '';
+  const ok = f => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } };
+  const exts = WIN && !path.extname(name) ? [...WIN_EXTS, ''] : [''];
+  if (/[\\/]/.test(name)) return exts.map(e => name + e).find(ok) || '';
+  for (const dir of [...String(envPath || '').split(path.delimiter), ...extraDirs]) {
+    if (!dir) continue;
+    for (const e of exts) { const f = path.join(dir, name + e); if (ok(f)) return f; }
+  }
+  return '';
+}
+// spawn / execFile に渡す形にする。Windows の .cmd（npm のシム）は中で呼ぶ本体に展開し、cmd.exe を通さない（引数をそのまま渡すため）
+function exeArgv(file, args = [], envPath = process.env.PATH) {
+  if (!WIN || !file) return { file, args };
+  const ext = path.extname(file).toLowerCase();
+  if (!ext) {
+    if (!/[\\/]/.test(file)) { const found = findExe(file, envPath); return found ? exeArgv(found, args, envPath) : { file, args }; }
+    const sibling = WIN_EXTS.map(e => file + e).find(f => fs.existsSync(f));
+    if (sibling) return exeArgv(sibling, args, envPath);
+    // 拡張子の無いスクリプト（#! 付き）は Windows では直接動かせないので、その行の解釈系で動かす（node なら自分自身、他は Git for Windows の bash）
+    let head = ''; try { head = fs.readFileSync(file, 'utf8').split(/\r?\n/)[0]; } catch { return { file, args }; }
+    if (!head.startsWith('#!')) return { file, args };
+    return /\bnode(?:\.exe)?\b/i.test(head) ? { file: process.execPath, args: [file, ...args] } : { file: gitBash() || file, args: [file, ...args] };
+  }
+  if (ext === '.exe' || !WIN_EXTS.includes(ext)) return { file, args };
+  let text = ''; try { text = fs.readFileSync(file, 'utf8'); } catch { return { file, args }; }
+  const targets = [...text.matchAll(/%~?dp0%?\\([^"\r\n]+?\.(exe|[cm]?js))"/gi)]
+    .map(m => ({ target: path.join(path.dirname(file), m[1]), js: m[2].toLowerCase() !== 'exe' }))
+    .filter(t => path.basename(t.target).toLowerCase() !== 'node.exe' && fs.existsSync(t.target));
+  const t = targets[targets.length - 1]; // npm.cmd は補助 JS（npm-prefix.js）の後に本体（npm-cli.js）が来る
+  if (!t) return { file, args };
+  return t.js ? { file: process.execPath, args: [t.target, ...args] } : { file: t.target, args };
+}
+// Preserve native PATH lookup on macOS/Linux; Windows resolves using this request's environment.
+function resolveCli(file, args, env = process.env) {
+  return WIN ? exeArgv(findExe(file, env.PATH) || file, args, env.PATH) : { file, args };
+}
+// Git for Windows の bash（外部ターミナルとコマンド実行に使う）。他の OS は /bin/bash
+function gitBash() {
+  if (!WIN) return '/bin/bash';
+  if (process.env.HUB_BASH) return process.env.HUB_BASH;
+  const roots = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')].filter(Boolean).map(r => path.join(r, 'Git'));
+  const git = findExe('git'); if (git) roots.push(path.dirname(path.dirname(git)));
+  return roots.map(r => path.join(r, 'bin', 'bash.exe')).find(f => fs.existsSync(f)) || '';
+}
 const AIS = ['claude', 'codex', 'agy', 'grok'];
 const AI_KEY = { claude: 'claude-code', codex: 'codex', agy: 'agy', grok: 'grok' };
 const AI_LABEL = { claude: 'Claude Code', codex: 'Codex', agy: 'Agy CLI', grok: 'Grok' };
@@ -202,4 +250,4 @@ const openFolder = (...args) => platform.openPath(...args);
 const revealFile = (...args) => platform.revealPath(...args);
 const openUrl = (...args) => platform.openUrl(...args);
 
-module.exports = { GROK_API_ENV, GROK_AUTH_ENV, grokCommand, accelerationArgs, setAccounts, accountEnv, accountArgs, accountShell, AIS, AI_KEY, AI_LABEL, agyModelId, agyAccountError, agyAccountShell, childEnv, buildCommand, buildArgv, openTerminal, openFolder, revealFile, openUrl, sq, DEFAULT_CMD, CODEX_CONTEXT_ARGS, CONTEXT_RULE, MODEL_FLAG, EFFORT_FLAG, SWITCH_CMD, switchCommand, focusAuthTerminal, flagFor, modelLabel, startupInfo, setOverrides, getOverrides, setDiscoveredModels };
+module.exports = { WIN, findExe, exeArgv, resolveCli, gitBash, GROK_API_ENV, GROK_AUTH_ENV, grokCommand, accelerationArgs, setAccounts, accountEnv, accountArgs, accountShell, AIS, AI_KEY, AI_LABEL, agyModelId, agyAccountError, agyAccountShell, childEnv, buildCommand, buildArgv, openTerminal, openFolder, revealFile, openUrl, sq, DEFAULT_CMD, CODEX_CONTEXT_ARGS, CONTEXT_RULE, MODEL_FLAG, EFFORT_FLAG, SWITCH_CMD, switchCommand, focusAuthTerminal, flagFor, modelLabel, startupInfo, setOverrides, getOverrides, setDiscoveredModels };

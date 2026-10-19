@@ -1,0 +1,14 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),create=require('../lib/routes/phase');
+function fixture(){
+ const calls=[],v={current:{completionHash:'h'},continued:{id:'p'},next:{phases:['next']},sessions:[],running:new Map()};
+ const mark=(n,f)=>(...a)=>{calls.push([n,...a]);return f(...a);};
+ const routes=create({send:(_r,status,body)=>({status,body}),lt:s=>s,store:{readProject:mark('read',()=>v.current),continuePhase:mark('continue',()=>v.continued),nextPhase:mark('next',()=>v.next)},sessions:{list:mark('sessions',()=>v.sessions)},chats:{running:v.running},record:mark('audit',()=>{})});
+ assert.deepEqual(calls,[]);return {v,calls,routes,run:(slot,b={})=>routes[slot].handle({}, {},new URL('/api/phase/'+slot,'http://localhost'),{project:'p',expectedHash:'h',confirm:true,...b})};
+}
+test('phase slots preserve exact original paths',()=>{const f=fixture();for(const slot of ['continue','next']){assert.equal(f.routes[slot].matches({},new URL('/api/phase/'+slot,'http://localhost')),true);assert.equal(f.routes[slot].matches({},new URL('/api/phase/'+slot+'/x','http://localhost')),false);}});
+test('continue checks current confirmation before saving and preserves response',()=>{const f=fixture();for(const current of [null,{completionHash:'old'}]){f.calls.length=0;f.v.current=current;assert.equal(f.run('continue').status,409);assert.deepEqual(f.calls.map(x=>x[0]),['read']);}f.v.current={completionHash:'h'};f.calls.length=0;const r=f.run('continue');assert.equal(r.status,200);assert.equal(r.body,f.v.continued);assert.deepEqual(f.calls.map(x=>x[0]),['read','continue']);});
+test('next refuses missing confirmation before project access and stale hash before busy checks',()=>{const f=fixture();assert.equal(f.run('next',{confirm:false}).status,400);assert.deepEqual(f.calls,[]);assert.equal(f.run('next',{expectedHash:'old'}).status,409);assert.deepEqual(f.calls.map(x=>x[0]),['read']);});
+test('next refuses running terminal or same-project chat before saving',()=>{const f=fixture();f.v.sessions=[{project:'p',running:true}];assert.equal(f.run('next').status,409);assert.deepEqual(f.calls.map(x=>x[0]),['read','sessions']);f.v.sessions=[];f.v.running.set('p\u0000t',{});f.calls.length=0;assert.equal(f.run('next').status,409);assert.deepEqual(f.calls.map(x=>x[0]),['read','sessions']);});
+test('next permits unrelated activity and records only after phase save',()=>{const f=fixture();f.v.sessions=[{project:'other',running:true},{project:'p',running:false}];f.v.running.set('prefixp\u0000t',{});const r=f.run('next');assert.deepEqual(r,{status:200,body:{ok:true,phases:['next']}});assert.deepEqual(f.calls.map(x=>x[0]),['read','sessions','next','audit']);assert.equal(f.calls[3][1],'nextphase');});
+test('next missing save result keeps error response without audit',()=>{const f=fixture();f.v.next=null;assert.equal(f.run('next').status,400);assert.deepEqual(f.calls.map(x=>x[0]),['read','sessions','next']);});

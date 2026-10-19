@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
-const { fixture, U } = require('./idea-fixture.cjs'), { Ideas } = require('../lib/ideas'), IM = require('../lib/idea-images'), { validGrant } = require('../lib/idea-runner');
+const { fixture, U } = require('./idea-fixture.cjs'), { Ideas } = require('../lib/ideas'), IM = require('../lib/idea-images');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR4nGP4z8DA8B+MgBgAHfAD/dPQfSYAAAAASUVORK5CYII=', 'base64');
 const upload = (f, more = {}, bytes = PNG) => f.ideas.uploadImage('P', { opId: U.uuid(), name: 'スクショ.png', ...more }, bytes);
 const add = (f, refs, more = {}) => f.ideas.add('P', { opId: U.uuid(), text: '', images: refs.map(x => x.image.id), intent: 'record', ...more }, { human: true });
@@ -44,34 +44,11 @@ for (const stage of ['image-original', 'image-preview', 'staging', 'intent', 're
   const result = reopened.uploadImage('P', b, PNG); assert.equal(Object.keys(reopened.read('P').images).length, 1); assert.deepEqual(reopened.image('P', result.image.id).bytes, PNG);
   assert.deepEqual(fs.readdirSync(path.join(reopened.resolve('P').controlDir,'image-staging',b.opId)),[]);
 });
-test('images: 項目保存の応答断/再送と内容版・作る許可・過去版の画像保全', t => {
-  const f = fixture(t), a = upload(f), b = { opId: U.uuid(), text: '', images: [a.image.id], intent: 'build' }; let armed = true;
-  f.ideas.fault = (at, { file }) => { if (armed && at === 'rename' && file.endsWith('/ideas.json')) { armed = false; throw Error('lost-response'); } };
-  assert.throws(() => f.ideas.add('P', b, { human: true }), /lost-response/); const receipt = f.ideas.receipt('P', b.opId); assert.equal(receipt.saved, true);
-  assert.equal(f.ideas.add('P', b, { human: true }).id, receipt.id); let i = f.ideas.read('P').items[receipt.id]; assert.equal(validGrant(i), true);
-  const changed = structuredClone(i); changed.images[0].hash = '0'.repeat(64); assert.equal(validGrant(changed), false);
-  f.ideas.update('P', { opId: U.uuid(), id:i.id, baseContentRev:i.contentRev, baseControlRev:i.controlRev, change:{text:'説明を追加'} }); i = f.ideas.read('P').items[i.id]; assert.equal(i.grant,null); assert.equal(i.contentRev,2); assert.equal(i.images[0].hash,a.image.hash); assert.equal(i.revisionHistory[0].previous.images[0].hash,a.image.hash);
-});
-test('images: 原本/参照の改変とリンクを拒否し、実行と確認対象をすり替えない', async t => {
-  const f = fixture(t), a = upload(f), r = add(f,[a],{intent:'build'}); f.auto(true); const i=f.ideas.read('P').items[r.id];
-  const run = await f.runner.startRun('P',{purpose:'plan',items:[i]}), input = U.json(path.join(f.ideas.resolve('P').controlDir,'runs',run.id+'.json'));
-  assert.equal(input.items[0].imageReferences[0].originalPath, f.ideas.image('P',a.image.id).file); assert.deepEqual(fs.readFileSync(input.items[0].imageReferences[0].path).subarray(0,8), PNG.subarray(0,8));
-  const source=f.ideas.image('P',a.image.id).file; fs.writeFileSync(source,'tampered'); assert.throws(()=>f.runner.mayStart('P',run),e=>e.code==='image-integrity'); fs.writeFileSync(source,PNG);
-  const alias=source+'.original';fs.renameSync(source,alias);fs.symlinkSync(alias,source); assert.throws(()=>f.ideas.image('P',a.image.id),/リンク/);
-});
 test('images: JPEG・GIF・WebPも原本を保持し、CLI用PNGで参照できる', t => {
   const f=fixture(t,{bind:false}),input=path.join(f.root,'source.png'),jpg=path.join(f.root,'source.jpg');fs.writeFileSync(input,PNG);
   require('node:child_process').execFileSync('/usr/bin/sips',['-s','format','jpeg',input,'--out',jpg],{stdio:'pipe'});
   const variants=[['写真.JPEG',fs.readFileSync(jpg)],['図.gif',Buffer.from('R0lGODdhAgACAIEAAFpujAAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7','base64')],['図.webp',Buffer.from('UklGRjIAAABXRUJQVlA4ICYAAABQAQCdASoCAAIAAUAmJQBOgC6gAP7rjl+KHmt7B3J1xc2Q3gAAAA==','base64')]];
   for(const [name,bytes] of variants){const a=upload(f,{name},bytes);assert.deepEqual(f.ideas.image('P',a.image.id).bytes,bytes);assert.deepEqual(f.ideas.image('P',a.image.id,true).bytes.subarray(0,8),PNG.subarray(0,8));}
-});
-test('images: 固定した確認資料・backupでも原本/PNGの改変とハードリンクを拒否', async t => {
-  const f=fixture(t),a=upload(f),r=add(f,[a],{intent:'build'}),head=f.commit(),e=await f.verification.run('P',{head});
-  f.ideas.internal('P',U.uuid(),{kind:'fixture-images-implemented'},d=>{const i=d.items[r.id];i.status='implemented';i.organizationRequested=false;i.acceptance=[{id:'image',text:'保存画像',sourceRefs:['item:images'],verification:'inspection'}];i.implementation={head,tree:U.snapshot(f.work).tree,contentRev:i.contentRev,planRev:i.planRev,laneBindingRev:d.settings.lane.bindingRev,verificationId:e.id};});
-  const v=f.review.prepare('P'),bundle=U.json(v.bundleFile),original=f.ideas.image('P',a.image.id),preview=f.ideas.image('P',a.image.id,true);
-  assert.equal(bundle.items[0].images[0].hash,a.image.hash);assert.equal(bundle.items[0].imageReferences[0].path,preview.file);assert.doesNotThrow(()=>f.review.verify('P',v));
-  for(const file of [original.file,preview.file]){const bytes=fs.readFileSync(file);fs.writeFileSync(file,'tampered');assert.throws(()=>f.review.verify('P',v),e=>e.code==='image-integrity');assert.throws(()=>f.ideas.backup('P',{opId:U.uuid()}),e=>e.code==='image-integrity');fs.writeFileSync(file,bytes);}
-  const alias=original.file+'.hardlink';fs.linkSync(original.file,alias);assert.throws(()=>f.ideas.image('P',a.image.id),e=>e.code==='image-file');fs.unlinkSync(alias);assert.doesNotThrow(()=>f.review.verify('P',v));
 });
 for (const colocated of [false,true]) test('images: '+(colocated?'Git同居':'別台帳')+' backup/relocateで原本と下書き画像を復元', t => {
   const f=fixture(t,{bind:false});if(colocated)U.git(f.dir,['init','-q']);const a=upload(f),draft=upload(f,{name:'未使用.png'}),r=add(f,[a]);const s=f.ideas.resolve('P'),saved=f.ideas.backup('P',{opId:U.uuid()});

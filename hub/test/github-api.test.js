@@ -125,3 +125,22 @@ test('an active product ledger blocks outer-project connection without overwriti
     assert.equal(execFileSync('git',['-C',product,'remote','get-url','origin'],{encoding:'utf8'}).trim(),'https://github.com/kieiken/existing.git');assert.equal(git('remote'),'');
   }finally{sessions.list=list;}
 });
+
+test('extracted free HTTP routes retain common guards, methods and error responses', async () => {
+  assert.equal((await fetch(base + '/api/locale')).status, 200);
+  assert.equal((await fetch(base + '/api/langpacks')).status, 200); // Local GET has never required X-Hub.
+  assert.equal((await fetch(base + '/api/langpacks', { headers: { 'X-Hub': '1' } })).status, 200);
+  assert.equal((await post('/api/langpacks', {})).status, 405);
+  assert.equal((await fetch(base + '/api/langpacks/remove', { headers: { 'X-Hub': '1' } })).status, 405);
+  assert.equal((await post('/api/language', { language: 'ja' }, { 'X-Hub': '1', Origin: 'https://evil.example' })).status, 403);
+  const invalid = await fetch(base + '/api/language', { method: 'POST', headers: { 'X-Hub': '1', 'Content-Type': 'application/json' }, body: '{' });
+  assert.equal(invalid.status, 400);
+  assert.equal((await post('/api/language', { language: 'ja' })).status, 200);
+  assert.equal((await fetch(base + '/api/maintenance/preview')).status, 405);
+  assert.equal((await post('/api/maintenance/preview', { project: 'P' }, {})).status, 403);
+  assert.equal((await post('/api/maintenance/preview', { project: 'missing' })).status, 409);
+  assert.equal((await post('/api/maintenance/unknown', { project: 'P' })).status, 404);
+  const internal = await post('/api/maintenance/preview', { project: 'P', origin: 'hub-internal' });
+  assert.equal(internal.status, 403); assert.equal((await internal.json()).delivery, 'not-sent');
+  assert.equal((await post('/api/maintenance/preview', { project: 'freetalk' })).status, 409);
+});

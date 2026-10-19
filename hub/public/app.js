@@ -203,7 +203,7 @@ function adoptState(next) {
 async function load({ preserveMain = false } = {}) {
   const epoch = ++stateLoadEpoch;
   const next = await fetchState();
-  if (epoch !== stateLoadEpoch || webchatSettingsPending || webchatSettingsSaving || accountSelectionSaving || taskFastSaving || accelerationSaving) return;
+  if (epoch !== stateLoadEpoch || webchatUIPending() || accountSelectionSaving || taskFastSaving || accelerationSaving) return;
   if (next) adoptState(next);
   syncAccountPickers();
   syncChatWebchatAvailability();
@@ -958,7 +958,7 @@ function renderOverview(p) {
           <label>ツリーの親作業<select name="parent"><option value="">（なし）</option>${taskOpts}</select></label>
           <label>役割<select name="role"><option value="">（なし）</option>${roleOpts}</select></label>
           ${phaseOpts ? UI.template`<label>フェーズ<select name="phase">${phaseOpts}</select></label>` : ''}
-          <label>担当<select name="owner"><option value="claude-code">Claude Code</option><option value="codex">Codex</option><option value="agy">Agy CLI</option><option value="grok">Grok</option><option value="chatgpt">ChatGPT</option>${agentOpts}<option value="人">あなた</option></select></label>
+          <label>担当<select name="owner"><option value="claude-code">Claude Code</option><option value="codex">Codex</option><option value="agy">Agy CLI</option><option value="grok">Grok</option>${webchatUI()?UI.html('<option value="chatgpt">ChatGPT</option>'):''}${agentOpts}<option value="人">あなた</option></select></label>
           <label>どこで頼んだか（Discord の時。例：#サンプル作業）<input name="via" maxlength="80"></label>
           <label>手順（1行に1つ。3〜5個）<textarea name="steps" rows="4" maxlength="600" placeholder="題材を決める&#10;下書き&#10;チェック&#10;投稿"></textarea></label>
           <div><button class="btn" type="submit">作業を足す</button></div>
@@ -1092,7 +1092,7 @@ function rememberWorkFold(el) {
 function rememberDisclosure(el) {
   if(el.isConnected===false)return;
   rememberWorkFold(el);
-  if(el.id==='webchat-details')webchatDetailsOpen=el.open;
+  webchatUI()?.rememberDisclosure(el);
   if(el.id==='verd')verOpen=el.open;
   if(el.classList?.contains('steps'))stepsOpen=el.open;
   if(el.classList?.contains('project-notes')) {
@@ -1457,7 +1457,7 @@ function chatModelChoices(p, t, selected) {
   const available = pick.ai === 'chatgpt' ? (pick.model === 'auto' && webchatReady(t)) : shownModels(AI_KEY[pick.ai],pick.model).includes(pick.model);
   const unavailable = UI.text(pick.ai === 'chatgpt' && ['chat','app'].includes(pick.model) ? '（廃止された経路です。選び直してください）' : '（利用不可。選び直してください）');
   const old = pick.ai === 'agy' && !pick.model ? chatModelOption('agy', '', UI.text('Agy のモデルを選んでください'), 'selected disabled') : pick.model && !available && !(pick.ai === 'chatgpt' && pick.model === 'auto') ? chatModelOption(pick.ai, pick.model, UI.template`${AI_LABEL[pick.ai]}・${pick.model}${unavailable}`, 'selected disabled', unavailable) : '';
-  const autoOpt = chatModelOption('chatgpt', 'auto', UI.text('ChatGPT（Chat／Pro）'), (pick.ai === 'chatgpt' && pick.model === 'auto' ? 'selected ' : '') + (webchatReady(t) ? '' : 'disabled'));
+  const autoOpt = webchatUI()?.option(t,pick) || '';
   const gptOpt = autoOpt;
   return old + orderedModels().filter(id => { const [key, m] = id.split('|'); const a = key === 'claude-code' ? 'claude' : key; return shownModels(key, pick.ai === a ? pick.model : '').includes(m); }).map(id => {
     const [key, m] = id.split('|'), a = key === 'claude-code' ? 'claude' : key;
@@ -2170,7 +2170,7 @@ function openChat(p, t, savedScroll) {
     if(!r.complete)return false;
     localStorage.removeItem(retreatKey);retreatPending=null;retreatSaved=true;retreatError=false;retreatNotice=r.removed?'退避した記録は削除済みです。':'台帳へ退避しました。制作は始まりません。';return true;
   };
-  const editableQueue = x => !x.automation && !x.selectionOnly && !x.readOnly && !x.limitSwitch && !x.resultsOrganize && !x.integrationAssignment && !x.isolatedReview && !x.integrationReviewRequest;
+  const editableQueue = x => x.origin !== 'hub-internal' && !x.automation && !x.selectionOnly && !x.readOnly && !x.limitSwitch && !x.resultsOrganize && !x.integrationAssignment && !x.isolatedReview && !x.integrationReviewRequest;
   const queueChoices = draft => chatModelChoices(p, t, { ai: draft.ai, model: draft.model }).replace(/<option value="chatgpt[\s\S]*?<\/option>/g, '');
   const changedDraft = draft => JSON.stringify([draft.text, draft.ai, draft.model, draft.attachments.map(x => x.id)]);
   const drawQueue = q => {
@@ -2380,17 +2380,7 @@ function openChat(p, t, savedScroll) {
       window.HubMobile?.badges();
     } else if (ev.type === 'webchat') {
       const poll=++webchatPoll, current=()=>chatES===stream && poll===webchatPoll;
-      api('/api/webchat').then(async r => {
-        if(!current())return;
-        state.webchat=r;
-        const slot=$('#webchat-progress'); if(slot)slot.innerHTML=webchatProgress(p,t);
-        const jobs=(r.jobs||[]).filter(j=>j.project===p.id && j.task===t.id);
-        const job=jobs.find(j=>['queued','checking','sending','reporting'].includes(j.state));
-        if(job)setBusy({ai:'chatgpt',model:job.model,started:Date.parse(job.at),text:'',webchat:true});
-        else if(chatBusy?.webchat)setBusy(null);
-        if(['done','blocked','unknown','stopped'].includes(jobs.at(-1)?.state)) await refreshTree(current);
-        if(current())syncChatWebchatAvailability();
-      }).catch(()=>{});
+      webchatUI()?.event(p,t,{current,setBusy,busy:()=>chatBusy,refreshTree});
     } else if (ev.type === 'history-auto') { globalThis.HubTaskHistory?.receiveAuto(p.id, t.id, ev);
     } else if (ev.type === 'reset') { if(p.id!=='freetalk'&&globalThis.HubTaskHistory?.resetAuto(p.id,t.id))return; if(p.id==='freetalk')clearSentChatImages(p.id,t.id,[...chatImages(p.id,t.id)]); if(ev.generation)(globalThis.HubChatGenerations ||=new Map()).set(p.id+'\0'+t.id,ev.generation); renderedMainKey=''; load(); } else if (ev.type === 'busy') { webchatPoll++; setBusy({ ...(chatBusy || {}), ai: ev.ai, model: ev.model, started: ev.started, text: '', webchat:Boolean(ev.webchat) }); refreshTree(); }
     else if (ev.type === 'partial') setBusy({ ...(chatBusy || { ai: ev.ai }), text: ev.text });
@@ -2655,7 +2645,7 @@ function refreshRoleModelChoices() {
 async function refreshAiToolCatalog() {
   const epoch = ++stateLoadEpoch;
   const next = await api('/api/state');
-  if (epoch !== stateLoadEpoch || webchatSettingsPending || webchatSettingsSaving || accountSelectionSaving || taskFastSaving || accelerationSaving) return;
+  if (epoch !== stateLoadEpoch || webchatUIPending() || accountSelectionSaving || taskFastSaving || accelerationSaving) return;
   adoptState(next);
   refreshRoleModelChoices();
   if (view.kind === 'settings') await loadCliModels(true);
@@ -2896,7 +2886,7 @@ function phoneLabelsHtml() {
     <label><input type="radio" name="phone-label-mode" data-phone-mode="short" ${full ? '' : 'checked'}> 短い名前</label>
     <label><input type="radio" name="phone-label-mode" data-phone-mode="full" ${full ? 'checked' : ''}> AI名・モデル名（PCと同じ）</label>
   </div><p class="small">名前を入力するとスマホの一覧に使います。空欄で元の短い名前に戻ります（24字以内・改行なし）。</p>
-  <div class="phone-label-rows">${[...orderedModels(), 'chatgpt|auto'].map(key => {
+  <div class="phone-label-rows">${[...orderedModels(), ...(webchatUI()?['chatgpt|auto']:[])].map(key => {
     const [k, model] = key.split('|'), ai = k === 'claude-code' ? 'claude' : k;
     const label = ai === 'chatgpt' ? 'ChatGPT' : UI.template`${AI_LABEL[ai]}・${model}`;
     return UI.template`<label class="phone-label-row"><span>${esc(label)}</span><input type="text" data-phone-name="${esc(key)}" maxlength="24" aria-label="${esc(label)} のスマホ表示名" placeholder="${esc(shortModelLabel(ai, model))}" value="${esc(phoneLabelDrafts.has(key) ? phoneLabelDrafts.get(key) : phone.names?.[key] || '')}" ${full ? 'disabled' : ''}></label>`;
@@ -2906,7 +2896,7 @@ function drawPhoneLabels() {
   return preserveSettingsScroll(() => {
     const box = $('#phone-labels');
     if (view.kind !== 'settings' || !box) return;
-    const inputs = [...box.querySelectorAll('[data-phone-name]')], keys = [...orderedModels(), 'chatgpt|auto'];
+    const inputs = [...box.querySelectorAll('[data-phone-name]')], keys = [...orderedModels(), ...(webchatUI()?['chatgpt|auto']:[])];
     if (JSON.stringify(inputs.map(el => el.dataset.phoneName)) !== JSON.stringify(keys)) {
       // 候補が変わった時だけ組み直す。入力・保存中は次のpollまで待つ。
       if (inputs.length && (phoneLabelsSaving || box.contains(document.activeElement))) return;
@@ -3125,206 +3115,24 @@ document.addEventListener('click', async e => {
   } catch (error) { toast(error.message); }
   finally { shellRebuilding = false; drawShellAlerts(); }
 });
-function webchatReady(t) { const s=state.webchat; return Boolean(s?.enabled && s.location && !s.journalError && !t?.webchatReason); }
-function webchatNoticeHtml(t, selected) {
-  if (!selected || webchatReady(t)) return '';
-  const reason=t.webchatReason, setup=!reason || ['webchat_disabled','webchat_setup_required'].includes(reason);
-  const settings=setup || ['webchat_login_required','webchat_login_unconfirmed','webchat_remote_login_unconfirmed'].includes(reason);
-  return UI.template`<p class="small" role="status">${esc(setup?UI.text('ChatGPT（Chat／Pro）は未設定です。設定で外部WebChatMCPの場所と［自動Chatを使う］を確認してください。'):webchatError(reason))}${settings?UI.html(' <button type="button" class="btn plain sm" data-go="settings">設定</button>'):''}</p>`;
+let webchatUIInstance;
+function webchatUI() {
+  if(!window.HubPaidWebchat || state.extensions && !state.extensions.included.includes('webchat'))return null;
+  return webchatUIInstance ||= window.HubPaidWebchat.create(Object.freeze({
+    UI,$,esc,api:(...args)=>api(...args),toast:(...args)=>toast(...args),taskOf,proj,preserveAiSettings,load:(...args)=>load(...args),chatModelOption,
+    get state(){return state;},get view(){return view;},get epoch(){return stateLoadEpoch;},advanceEpoch:()=>++stateLoadEpoch,
+  }));
 }
-function syncChatWebchatAvailability() {
-  if (view.kind !== 'work') return;
-  const t=taskOf(proj(view.project),view.task), select=$('#chat-ai');
-  if (!t || !select) return;
-  const option=[...(select.options || [])].find(o=>o.value==='chatgpt|auto');
-  if (option) option.disabled=!webchatReady(t);
-  const notice=$('#webchat-notice');
-  if (notice) {
-    const html=webchatNoticeHtml(t,select.value==='chatgpt|auto');
-    if (notice.innerHTML!==html) notice.innerHTML=html;
-  }
-}
-function webchatError(code) {
-  if (code === 'webchat_location_required') return UI.text('WebChatMCPの場所が空欄です。別途導入したフォルダの絶対パスを入力してください。薄い表示は入力例です');
-  if (code === 'webchat_location_absolute') return UI.text('WebChatMCPの場所は「/」から始まるフォルダの絶対パスで入力してください');
-  if (code === 'webchat_not_installed') return UI.text('指定フォルダにWebChatMCPの実行ファイルがありません。導入・ビルドを確認してください。保存だけでは導入されません');
-  if (code === 'webchat_remote_browser_not_installed') return UI.text('外部ソフト用のChromiumが見つかりません。ブラウザの導入先を確認してください');
-  if (code === 'webchat_remote_browser_profile_busy') return UI.text('自動Chat用のブラウザが別の処理で使用中です。終了を待ってください');
-  if (['webchat_remote_navigation_failed', 'webchat_remote_navigation_timeout', 'webchat_remote_page_not_ready'].includes(code)) return UI.text('ChatGPTの画面を読み込めません。接続とブラウザ画面を確認してください。送信は繰り返さないでください');
-  if (code === 'webchat_remote_model_menu_unavailable') return UI.text('モデル一覧を取得できません。モデルを指定する場合はChatGPTの画面を確認してください');
-  if (code === 'webchat_remote_challenge_required') return UI.text('人間確認の画面で停止しています。ログイン状態は確認できません。ブラウザで本人による確認が必要です');
-  if (['webchat_start_failed', 'webchat_disconnected', 'webchat_tools_missing', 'webchat_invalid_mcp'].includes(code)) return UI.text('外部WebChatMCPへ接続できません。導入したソフト・依存ソフト・対応版を確認してください');
-  if (code === 'webchat_logout_unconfirmed') return UI.text('ログアウトを確認できません。ChatGPTの画面を確認してください');
-  if (code === 'webchat_logout_unavailable') return UI.text('このWebChatMCPはログアウトに対応していません');
-  if (code === 'webchat_login_required') return UI.text('ログインを確認できません。設定でログインしてください');
-  if (['webchat_login_unconfirmed', 'webchat_remote_login_unconfirmed'].includes(code)) return UI.text('ログイン状態を判定できないため送信前に停止しました。設定で状態を確認してください');
-  if (['webchat_temporary_chat_unconfirmed', 'webchat_remote_temporary_chat_unconfirmed'].includes(code)) return UI.text('一時チャットを確認できないため送信前に停止しました。ChatGPTの画面を確認してください');
-  if (code === 'webchat_model_unavailable') return UI.text('指定モデル・思考を確認できません。別のモデルには切り替えません');
-  if (code === 'webchat_selection_unconfirmed') return UI.text('送信後の状態を確認できません。自動再送はしません');
-  if (code === 'webchat_disabled' || code === 'webchat_setup_required') return UI.text('設定で外部WebChatMCPの場所と［自動Chatを使う］を確認してください');
-  if (code === 'webchat_task_completed') return UI.text('完了した作業は再開してから送ってください');
-  if (code === 'webchat_task_busy') return UI.text('この会話でAI・整理・確認が動いています。終了を待ってください');
-  if (code === 'webchat_legacy_request') return UI.text('以前の子作業への依頼は再送できません。通常の会話から新しい依頼を送ってください');
-  if (code === 'webchat_history_failed') return UI.text('会話を保存できないため送信していません');
-  if (code === 'webchat_topic_readonly') return UI.text('移行済みの話題は読み取り専用です');
-  if (code === 'webchat_restarting') return UI.text('再起動中です。終了を待ってください');
-  if (code === 'webchat_work_disabled') return UI.text('実作業が許可されていないため停止しました');
-  if (code === 'webchat_busy') return UI.text('自動Chatが動いています。終了してから操作してください');
-  if (code === 'webchat_invalid_envelope' || code === 'webchat_invalid_tool') return UI.text('道具の要求を確認できないため停止しました');
-  return UI.text('Chat／Proが停止しました。送信記録を確認してください。自動再送はしません');
-}
-function webchatProgress(p,t) {
-  const jobs=(state.webchat?.jobs||[]).filter(j=>j.project===p.id && [j.task,j.parent].includes(t.id)).slice(-1).filter(j=>j.state!=='done');
-  const names={queued:UI.text('自動送信の順番待ち'),checking:UI.text('ログイン・モデルを確認中'),sending:UI.text('Chat／Proへ送信中'),tools:UI.text('GPT子で作業中'),reporting:UI.text('この会話に返信を保存中'),done:UI.text('返信済み'),unknown:UI.text('送信済みか不明・自動再送なし'),blocked:UI.text('送信前に停止'),stopped:UI.text('停止・自動再送なし')};
-  return jobs.map(j=>UI.template`<div class="small account-row" role="status"><b>${esc(names[j.state] || names.unknown)}</b>${j.model?'・'+esc(j.model):''}${j.thinking?'・'+esc(j.thinking):''}${j.error?UI.template`<p>${esc(webchatError(j.error))}</p>`:''}
-    ${['queued','checking','sending','tools','reporting'].includes(j.state) && j.kind!=='conversation'?UI.template`<button type="button" class="btn plain sm" data-webchat="stop" data-p="${esc(p.id)}" data-t="${esc(t.id)}" data-request="${esc(j.request)}">停止</button>`:!['queued','checking','sending','reporting','done'].includes(j.state) && j.kind==='conversation'?UI.template`<button type="button" class="btn plain sm" data-webchat="retry" data-p="${esc(p.id)}" data-t="${esc(t.id)}" data-request="${esc(j.request)}">もう一度送る</button>`:''}</div>`).join('');
-}
-let webchatSettingsPending = false;
-let webchatSettingsNotice = '';
-let webchatSettingsDraft = null;
-let webchatSettingsRevision = 0;
-let webchatSettingsSaving = 0;
-let webchatSaveTail = Promise.resolve();
-let webchatDetailsOpen = false;
-let webchatModelsLocation = '';
-function webchatLoginText(check) {
-  return !check ? UI.text('未確認') : check.loggedIn === true ? UI.text('ログイン済み') : check.loggedIn === false ? UI.text('未ログイン') : UI.text('ログイン状態を判定できません');
-}
-function webchatSettingsMessage(r) {
-  return webchatSettingsNotice || (r?.check?.statusError ? webchatError(r.check.statusError) : r?.journalError ? UI.text('送信記録を読めないため自動Chatを停止しています') : '');
-}
-function syncWebchatSettingsControls() {
-  const box = $('#webchat-box'); if (!box) return;
-  const disabled = webchatSettingsPending || Boolean(state.webchat?.busy);
-  box.querySelectorAll('input,select,[data-webchat]').forEach(c => { c.disabled = disabled; });
-  const auth = box.querySelector('[data-webchat]');
-  if (auth) {
-    const action = state.webchat?.check?.loggedIn === true ? 'logout' : 'login';
-    auth.dataset.webchat = action; auth.textContent = action === 'logout' ? UI.text('ログアウト') : UI.text('ログイン');
-    auth.disabled = disabled || webchatSettingsSaving > 0;
-  }
-  const status = box.querySelector('#webchat-login-status');
-  if (status) status.textContent = webchatSettingsPending ? UI.text('確認中…') : state.webchat?.busy ? UI.text('実行中') : webchatLoginText(state.webchat?.check);
-  const notice = box.querySelector('#webchat-settings-notice');
-  if (notice) { notice.textContent = webchatSettingsMessage(state.webchat); notice.hidden = !notice.textContent; }
-}
-function webchatSettingsHtml(r) {
-  const values = webchatSettingsDraft || r;
-  const option=(a,current)=>[...new Set([current,...(a||[]).map(x=>x.label)].filter(Boolean))].map(v=>UI.template`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(v)}</option>`).join('');
-  const disabled = r.busy || webchatSettingsPending ? 'disabled' : '';
-  const action = r.check?.loggedIn === true ? 'logout' : 'login';
-  const message = webchatSettingsMessage(r);
-  return UI.template`<div class="ai-account-line"><b>ChatGPT <span class="small">（Chat／Pro）</span></b><span id="webchat-login-status" class="ai-account-status small" role="status">${webchatSettingsPending?UI.text('確認中…'):r.busy?UI.text('実行中'):webchatLoginText(r.check)}</span><span class="ai-account-note"></span><div class="acts"><button type="button" class="btn plain sm" data-webchat="${action}" ${disabled || (webchatSettingsSaving ? 'disabled' : '')}>${action==='logout'?UI.text('ログアウト'):UI.text('ログイン')}</button></div>
-    <details class="more ai-account-detail" id="webchat-details" data-ai-fold="webchat" ${webchatDetailsOpen?'open':''}><summary>設定</summary><div class="ai-detail-body">
-      <label class="chk"><input type="checkbox" id="webchat-enabled" ${values.enabled?'checked':''} ${disabled}> 自動Chatを使う</label>
-      <label>WebChatMCPの場所（絶対パス）<input id="webchat-location" value="${esc(values.location)}" placeholder="/path/to/WebChatMCP.js" ${disabled}></label>
-      <label>モデル<select id="webchat-model" ${disabled}><option value="" ${!values.model?'selected':''}>ChatGPT側の現在の設定を使う</option>${option(r.check?.models,values.model)}</select></label>
-      <label>思考<select id="webchat-thinking" ${disabled}><option value="" ${!values.thinking?'selected':''}>指定しない（ChatGPT側の設定）</option>${option(r.check?.thinking,values.thinking)}</select></label>
-    </div></details></div><p id="webchat-settings-notice" class="small ai-account-message" role="status" ${message?'':'hidden'}>${esc(message)}</p>`;
-}
-function readWebchatSettings() {
-  return { enabled: $('#webchat-enabled').checked, location: $('#webchat-location').value.trim(), model: $('#webchat-model').value, thinking: $('#webchat-thinking').value };
-}
-function validateWebchatSettings(body, requireLocation = false) {
-  if ((requireLocation || body.enabled) && !body.location) throw Error('webchat_location_required');
-  if (body.location && !body.location.startsWith('/')) throw Error('webchat_location_absolute');
-}
-function drawWebchatSettings() {
-  const box = $('#webchat-box'); if (!box) return;
-  preserveAiSettings(() => {
-    box.innerHTML = webchatSettingsHtml(state.webchat || { enabled: false, location: '', model: '', thinking: '' });
-    syncWebchatSettingsControls();
-  });
-}
-async function saveWebchatSettings() {
-  if (webchatSettingsPending || state.webchat?.busy) return;
-  const body = readWebchatSettings(), revision = ++webchatSettingsRevision;
-  webchatSettingsDraft = body; webchatSettingsSaving++; ++stateLoadEpoch;
-  webchatSettingsNotice = UI.text('設定を保存中…'); syncWebchatSettingsControls();
-  const save = webchatSaveTail.catch(() => {}).then(async () => {
-    try {
-      validateWebchatSettings(body);
-      state.webchat = await api('/api/webchat', body);
-      if (revision === webchatSettingsRevision) { webchatSettingsDraft = null; webchatSettingsNotice = ''; }
-    } catch (e) {
-      if (revision === webchatSettingsRevision) webchatSettingsNotice = UI.template`設定を保存できませんでした：${webchatError(e.message)}`;
-      // Retain the draft; another edit or an explicit login can correct it.
-    } finally { --webchatSettingsSaving; ++stateLoadEpoch; syncWebchatSettingsControls(); }
-  });
-  webchatSaveTail = save; await save;
-}
-async function loadWebchat() {
-  const box = $('#webchat-box'); if (!box || webchatSettingsPending || webchatSettingsSaving) return;
-  const epoch = stateLoadEpoch;
-  try {
-    const r = await api('/api/webchat');
-    if ($('#webchat-box') !== box || epoch !== stateLoadEpoch || webchatSettingsPending || webchatSettingsSaving) return;
-    state.webchat = r; drawWebchatSettings();
-    // On first display, confirm existing authentication without changing it.
-    if (r.location && !r.check && !r.busy && !webchatSettingsDraft) await operateWebchatSettings('status');
-  } catch(e) { if ($('#webchat-box') === box && epoch === stateLoadEpoch) { webchatSettingsNotice = webchatError(e.message); syncWebchatSettingsControls(); } }
-}
-async function operateWebchatSettings(action) {
-  if (webchatSettingsPending || state.webchat?.busy) { syncWebchatSettingsControls(); return; }
-  if (action === 'logout' && !confirm(UI.text('このアカウントからログアウトしますか？'))) return;
-  const body = readWebchatSettings();
-  const revision = webchatSettingsRevision;
-  if (action === 'login') webchatSettingsDraft = body;
-  webchatSettingsPending = true; ++stateLoadEpoch;
-  webchatSettingsNotice = action === 'login' ? UI.text('開いたブラウザでログインしてください') : action === 'logout' ? UI.text('ログアウト中…') : action === 'models' ? UI.text('モデル一覧を取得中…') : UI.text('確認中…');
-  syncWebchatSettingsControls();
-  let redraw = false;
-  try {
-    await webchatSaveTail;
-    validateWebchatSettings(action === 'logout' ? state.webchat : body, true);
-    // Login saves edited fields and enables Chat only after verified login.
-    // Logout always targets the saved profile, never an unsaved path.
-    state.webchat = await api('/api/webchat/' + action, action === 'login' ? body : action === 'logout' ? { confirm: true } : {});
-    if (action === 'login' && revision === webchatSettingsRevision) webchatSettingsDraft = null;
-    webchatSettingsNotice = action === 'models' && state.webchat.check?.modelsError ? webchatError(state.webchat.check.modelsError) : '';
-    redraw = true;
-  } catch(e) {
-    webchatSettingsNotice = webchatError(e.message);
-    // Read the saved result after an auth error; never repeat authentication.
-    try { state.webchat = await api('/api/webchat'); } catch {}
-    syncWebchatSettingsControls(); toast(webchatSettingsNotice);
-  } finally { webchatSettingsPending = false; ++stateLoadEpoch; if (redraw) drawWebchatSettings(); else syncWebchatSettingsControls(); }
-}
-document.addEventListener('input', e => {
-  if (!['webchat-enabled', 'webchat-location', 'webchat-model', 'webchat-thinking'].includes(e.target.id) || webchatSettingsPending) return;
-  webchatSettingsDraft = readWebchatSettings(); ++webchatSettingsRevision;
-  if (!webchatSettingsNotice || webchatSettingsNotice === UI.text('設定を保存中…')) webchatSettingsNotice = UI.text('未保存');
-  syncWebchatSettingsControls();
-});
-document.addEventListener('change', async e => {
-  if (!['webchat-enabled', 'webchat-location', 'webchat-model', 'webchat-thinking'].includes(e.target.id)) return;
-  if (e.target.id === 'webchat-location') webchatModelsLocation = '';
-  await saveWebchatSettings();
-});
-document.addEventListener('toggle', e => {
-  rememberDisclosure(e.target);
-}, true);
-document.addEventListener('focusin', async e => {
-  if (!['webchat-model', 'webchat-thinking'].includes(e.target.id)) return;
-  const r = state.webchat;
-  if (!r?.location || r.check?.loggedIn !== true || r.check?.modelsChecked || webchatSettingsDraft || webchatSettingsPending || webchatModelsLocation === r.location) return;
-  webchatModelsLocation = r.location; await operateWebchatSettings('models');
-});
-document.addEventListener('click',async e=>{
-  const button=e.target.closest?.('[data-webchat]');if(!button||button.disabled)return;
-  const action=button.dataset.webchat;
-  if (['login','logout'].includes(action)) { await operateWebchatSettings(action); return; }
-  button.disabled=true;
-  try {
-    if(action==='stop')await api('/api/webchat/stop',{project:button.dataset.p,task:button.dataset.t});
-    else if(action==='retry'){
-      if(!confirm(UI.text('前の送信と子コピーの変更を確認しましたか？ 新しい依頼としてもう一度送ります。')))return;
-      await api('/api/webchat/retry',{project:button.dataset.p,task:button.dataset.t,request:button.dataset.request,confirm:true});
-    }
-    await load();
-  }catch(err){toast(webchatError(err.message));}
-  finally{button.disabled=false;}
-});
+function webchatReady(t){return webchatUI()?.ready(t)||false;}
+function webchatNoticeHtml(t,selected){return webchatUI()?.notice(t,selected)||'';}
+function webchatProgress(p,t){return webchatUI()?.progress(p,t)||'';}
+function syncChatWebchatAvailability(){webchatUI()?.syncAvailability();}
+function syncWebchatSettingsControls(){webchatUI()?.syncControls();}
+function drawWebchatSettings(){webchatUI()?.draw();}
+function loadWebchat(){return webchatUI()?.load();}
+function webchatUIPending(){return webchatUI()?.pending()||false;}
+webchatUI(); // Register private handlers at the same point as the original settings handlers.
+document.addEventListener('toggle',e=>{rememberDisclosure(e.target);},true);
 
 let chatgptLoadEpoch = 0;
 let chatgptWorkPending = null;
@@ -3360,7 +3168,7 @@ function accountSettingsHtml() {
       ${r.id !== 'default' ? UI.template`<details class="more" data-ai-fold="edit-${esc(r.ai)}-${esc(r.id)}"><summary>編集</summary><div class="acts ai-detail-body"><input data-account-name maxlength="60" value="${esc(r.name)}" aria-label="${esc(UI.label(r.name))}の新しい名前"><button class="btn plain sm" type="button" data-account-action="rename" ${accountOperation ? 'disabled' : ''}>名前変更</button><button class="btn plain sm" type="button" data-account-action="delete" ${r.busy || accountOperation ? UI.text('disabled title="終了してから操作してください"') : ''}>削除（ゴミ箱へ）</button></div></details>` : ''}</div>
       <div class="acts">${r.ai === 'grok' && r.status === 'not-installed' ? UI.template`<details class="more" data-ai-fold="grok-install"><summary>導入方法</summary><p class="small ai-detail-body">MacのTerminalで <code>curl -fsSL https://x.ai/cli/install.sh | bash</code> を実行してください。Hubは実行しません。</p></details>` : UI.template`<button class="btn plain sm" type="button" data-account-action="${r.status === 'logged-in' || r.status === 'api' ? 'logout' : 'login'}" ${accountOperation || r.busy && !r.authTerminal ? UI.text('disabled title="終了してから操作してください"') : ''}>${r.status === 'logged-in' || r.status === 'api' ? UI.text('ログアウト') : UI.text('ログイン')}</button>`}</div></div>
       ${r.message && !grokInstallReason(r) ? UI.template`<p class="small ai-account-message" role="status">${esc(UI.message(r.message))}</p>` : ''}${r.ai === 'agy' && agyFailed ? UI.template`<p class="small ai-account-message" role="status">${esc(UI.text(agyReason))}</p>` : ''}</div>`).join('')}
-    <div class="account-row ai-chatgpt-row"><div id="webchat-box" aria-live="polite"></div>
+    <div class="account-row ai-chatgpt-row">${webchatUI()?.slot() || ''}
       <details class="more ai-mcp-detail" data-ai-fold="mcp"><summary>MCP <span id="chatgpt-mcp-status" class="small" role="status">確認中…</span></summary><div class="ai-detail-body"><div id="chatgpt-box" aria-live="polite">確認中…</div>${chatgptConnectionHelpHtml()}</div></details>
       <div id="chatgpt-shell-alert">${shellWarningHtml()}</div></div>
     <details class="more ai-account-manage" data-ai-fold="account-manage"><summary>アカウントを追加・管理</summary><div class="acts ai-detail-body"><select id="account-new-ai" aria-label="追加するAI"><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="grok">Grok</option><option value="agy" disabled>Gemini（Agy CLI）・既定のみ</option></select><input id="account-new-name" maxlength="60" placeholder="名前（例：仕事用）" aria-label="アカウント名"><button type="button" class="btn" data-account-action="add" ${accountOperation ? 'disabled' : ''}>追加</button></div><p class="small">作業ごとに使うアカウントを選べます。今のログインは「既定」です。追加アカウントは別の場所に保存します。別作業で別アカウントを選ぶと同時に使えます。ログインはMacのTerminalで本人が操作します。会話や認証情報はコピーしません。MCPなどの接続設定は追加先で設定してください。Gemini（Agy CLI）はログイン情報をMacのキーチェーンに1件だけ保存するため、既定のみです。ログアウトは開いたTerminalで /logout と入力してください。</p></details></section>`;
@@ -3465,7 +3273,7 @@ document.addEventListener('keydown', e => {
   e.preventDefault(); selectSettingsTab(tabs[next]); document.querySelector(`[data-settings-tab="${tabs[next]}"]`)?.focus();
 });
 function licensePurchaseHtml() {
-  if (state.license?.supported === false || state.license?.edition !== 'public' || state.license.purchased || !state.license?.purchaseUrl) return '';
+  if ((state.license?.supported === false || state.license?.activationAvailable === false) || state.license?.edition !== 'public' || state.license.purchased || !state.license?.purchaseUrl) return '';
   try {
     const url = new URL(state.license.purchaseUrl);
     if (url.protocol !== 'https:' || url.username || url.password) return '';
@@ -3555,10 +3363,10 @@ function renderSettings() {
           <div id="initial-pick">${initialPickHtml()}</div></div>
       </div></section>
       <section class="pref-section" data-tab="basic"><h2 class="pref-caption">利用コード</h2><div class="pref-list">
-        ${state.license?.edition === 'owner' || state.license?.supported === false ? '' : UI.html('<form id="license-form" class="pref-row">')}${state.license?.edition === 'owner' || state.license?.supported === false ? UI.html('<div class="pref-row">') : ''}
+        ${state.license?.edition === 'owner' || (state.license?.supported === false || state.license?.activationAvailable === false) ? '' : UI.html('<form id="license-form" class="pref-row">')}${state.license?.edition === 'owner' || (state.license?.supported === false || state.license?.activationAvailable === false) ? UI.html('<div class="pref-row">') : ''}
           <div class="pref-text"><span class="pref-name" role="status">${esc(state.license?.edition === 'owner' ? '製作者版：鍵不要・全機能・期限なし' : state.license?.reason || '利用権を確認中です')}</span>
           ${state.license?.edition !== 'owner' && state.license?.trial?.expiry ? UI.template`<p data-trial-dates>無料体験：${new Date(state.license.trial.startsAt * 1000).toLocaleString('ja-JP')} 〜 ${new Date(state.license.trial.expiry * 1000).toLocaleString('ja-JP')}（残り ${state.license.trial.remainingDays} 日）</p>` : ''}</div>
-        ${state.license?.edition === 'owner' || state.license?.supported === false ? UI.html('</div>') : UI.html('<div class="pref-control"><label class="pref-sr" for="license-code">お持ちの利用コード</label><input id="license-code" type="password" autocomplete="off" maxlength="256" required placeholder="お持ちの利用コード"><button class="btn" type="submit">登録する</button></div><p id="license-notice" role="status"></p></form>')}
+        ${state.license?.edition === 'owner' || (state.license?.supported === false || state.license?.activationAvailable === false) ? UI.html('</div>') : UI.html('<div class="pref-control"><label class="pref-sr" for="license-code">お持ちの利用コード</label><input id="license-code" type="password" autocomplete="off" maxlength="256" required placeholder="お持ちの利用コード"><button class="btn" type="submit">登録する</button></div><p id="license-notice" role="status"></p></form>')}
         ${purchase ? `<div class="pref-row pref-stack">${purchase}</div>` : ''}
       </div></section>
       <section class="pref-section" data-tab="basic"><h2 class="pref-caption">はじめに・引っ越し</h2><div class="pref-list">
@@ -4494,7 +4302,7 @@ $('#gear').addEventListener('click', () => { view = { ...view, kind: view.kind =
 // 左の木だけすぐ読み直す（AI が始めた・終わった時。丸の色を変えるため）
 async function refreshTree(isCurrent = () => true) {
   const epoch = stateLoadEpoch;
-  try { const next = await fetchState(); if (!isCurrent() || epoch !== stateLoadEpoch || webchatSettingsPending || webchatSettingsSaving || accountSelectionSaving || taskFastSaving || accelerationSaving || initialPickSaving || specialModeSaving || phoneLabelsSaving || !next) return; adoptState(next); syncWebchatSettingsControls(); syncChatPhoneLabels(); syncAccountPickers(); syncChatWebchatAvailability(); refreshKidsDoneBar(); if (treeKey() !== renderedTreeKey) renderTree(); }
+  try { const next = await fetchState(); if (!isCurrent() || epoch !== stateLoadEpoch || webchatUIPending() || accountSelectionSaving || taskFastSaving || accelerationSaving || initialPickSaving || specialModeSaving || phoneLabelsSaving || !next) return; adoptState(next); syncWebchatSettingsControls(); syncChatPhoneLabels(); syncAccountPickers(); syncChatWebchatAvailability(); refreshKidsDoneBar(); if (treeKey() !== renderedTreeKey) renderTree(); }
   catch (e) { /* 次に */ }
 }
 const editing = () => document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
@@ -4505,7 +4313,7 @@ async function pollState() {
   const epoch = stateLoadEpoch;
   try {
     const next = await fetchState();
-    if (epoch !== stateLoadEpoch || webchatSettingsPending || webchatSettingsSaving || accountSelectionSaving || taskFastSaving || accelerationSaving || initialPickSaving || specialModeSaving || phoneLabelsSaving) return; // 保存後などの明示 load() を古い定期取得で上書きしない
+    if (epoch !== stateLoadEpoch || webchatUIPending() || accountSelectionSaving || taskFastSaving || accelerationSaving || initialPickSaving || specialModeSaving || phoneLabelsSaving) return; // 保存後などの明示 load() を古い定期取得で上書きしない
     const previousModels = JSON.stringify([state.modelOrder, state.hiddenModels, state.roles?.models]);
     const previousInitial = JSON.stringify([state.initialPick, state.initialPickError]);
     if (next) adoptState(next);

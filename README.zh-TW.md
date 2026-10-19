@@ -26,7 +26,7 @@ Project Hub 將專案與任務集中管理，並在同一個畫面中執行 Clau
 
 ## 必要條件
 
-- macOS。
+- macOS（也可在 Windows 10／11 執行，見下方「Windows」）。
 - Node.js 22 以上、Git。
 - 安裝要使用的 AI CLI（Claude Code / Codex），並先完成登入。
 - 編譯終端機元件 node-pty 與 Project Hub.app 需要 Apple 開發工具。
@@ -47,6 +47,10 @@ HUB_LANG=zh-TW HUB_APP_DIR=/Applications HUB_ROOT="/Volumes/External/AI-Workspac
 - 透過 npm 安裝 node-pty，並建立 Project Hub.app 與桌面入口。`HUB_APP_DIR` 可指定應用程式安裝位置。
 
 操作方式與更新步驟見 [hub/README.zh-TW.md](hub/README.zh-TW.md)。
+
+### Windows（實驗性支援）
+
+Windows 10／11 的支援仍屬實驗性；先在下載的資料夾執行一次 `hub\setup.bat`，之後用 `hub\start.bat` 啟動（會在瀏覽器開啟 http://127.0.0.1:4545）。需要 Git for Windows（bash）、Node.js 22 以上，以及要使用的 AI CLI。node-pty 已附 Windows 用的預先編譯檔，不需要安裝 Visual Studio。Mac App、自動更新與背景 AI 監看在 Windows 上無法使用。程序所有權確認尚未支援，因此待處理指令自動啟動及停止完成確認仍有限制。修正版尚未在 Windows 實機驗證。
 
 ## 每日自動更新
 

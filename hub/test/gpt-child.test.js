@@ -180,7 +180,11 @@ test('GPT子からの別作業作成を拒否し、子の質問だけを保存�
 test('sandboxは子内だけを書ける。親・本体・台帳・.git・網はOSが拒否する', async t => {
   const f = fixture(t), r = f.request(), child = f.task(r.child);
   const run = command => f.call('hub_run_command', { task: r.child, request: r.request, command });
-  const good = await run('printf hello > local.txt; cat local.txt'); assert.equal(good.code, 0); assert.equal(good.stdout, 'hello');
+  const good = await run('printf hello > local.txt; cat local.txt');
+  if (process.env.HUB_TEST_OS_ISOLATION === 'macos-v1' && good.code === 71 && /sandbox_(apply|init): Operation not permitted/.test(good.stderr)) {
+    t.skip('macOSは試験の隔離内で二重のsandboxを許可しないため、この実OS試験は未確認'); return;
+  }
+  assert.equal(good.code, 0); assert.equal(good.stdout, 'hello');
   for (const dest of [path.join(f.body, 'original.txt'), path.join(f.parentDir, 'parent.txt'), f.store.taskFile('P', r.child), path.join(child.workdir, '.git'), path.join(child.workdir, '.env')]) {
     const before = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : null;
     const bad = await run(`printf bad > '${dest}'`); assert.notEqual(bad.code, 0);

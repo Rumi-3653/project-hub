@@ -59,7 +59,7 @@ function atomic(file, before, out) {
   // A failed directory fsync cannot undo a successful rename. Both roles and
   // journal are already committed, so never report a false partial failure.
   let dir;
-  try { dir = fs.openSync(path.dirname(file), 'r'); fs.fsyncSync(dir); } catch { /* atomic rename remains the authority */ }
+  try { if (process.platform !== 'win32') { dir = fs.openSync(path.dirname(file), 'r'); fs.fsyncSync(dir); } } catch { /* atomic rename remains the authority */ }
   finally { if (dir !== undefined) fs.closeSync(dir); }
 }
 function entry(roles, at, kind, reason, participants = [], before = []) {

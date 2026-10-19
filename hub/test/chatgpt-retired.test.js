@@ -36,7 +36,7 @@ test('旧状態・認可・確認・ログアウトAPIは廃止を返し、認�
 });
 test('古い契約枠の送信・キュー再開はAI起動やコピー作成より前に拒否する',async()=>{
  for(const extra of [{},{mode:'queue'},{fromQueue:'old-request'}]){
-  const res=await request('/api/chat/send',{project:'P',task:'t',ai:'chatgpt',model:'gpt-6-astra',text:'legacy queued',...extra});assert.equal(res.status,409);assert.match((await res.json()).error,/廃止/);
+  const res=await request('/api/chat/send',{project:'P',task:'t',ai:'chatgpt',model:'gpt-6-astra',text:'legacy queued',...extra});const data=await res.json();if(fs.existsSync(path.join(__dirname,'../lib/license/owner-edition.js'))){assert.equal(res.status,409);assert.match(data.error,/廃止/);}else{assert.equal(res.status,403);assert.equal(data.code,'license_held');}
  }
  for(const [file,content]of before)assert.deepEqual(fs.readFileSync(file),content,file);
  assert.equal(fs.existsSync(path.join(root,'Work/P/t')),false);assert.equal(sessions.list().length,0);assert.equal(external,0);

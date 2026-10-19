@@ -203,7 +203,6 @@ class Ideas {
   }
   stale(d, reason) { for (const r of Object.values(d.releases)) if (['ready', 'preparing', 'reviewing'].includes(r.state)) { r.state = 'stale'; r.rev++; r.staleReason = reason; } }
   settings(id, b, apply) { return this.mutate(id, b.opId, b, d => { U.check(d.settings.rev === b.settingsRev, 'settings-revision', '設定が更新されました。表示を読み直してください'); apply(d); d.settings.rev++; return { settings: U.clone(d.settings) }; }); }
-  auto(id, b) { U.check(typeof b.enabled === 'boolean', 'auto', '開始か一時停止を選んでください', 400); return this.settings(id, b, d => { d.settings.auto.enabled = b.enabled; d.settings.manualPaused = !b.enabled; d.settings.auto.generation++; if (!b.enabled) d.settings.stopGeneration++; }); }
   internal(id, op, payload, apply) { return this.mutate(id, op, { internal: true, ...payload }, apply); }
   uploadImage(id,b,bytes) { return images.upload(this,id,b,bytes); }
   image(id,key,preview=false) { U.opId(key); const d=this.read(id), image=d.images?.[key]; U.check(image && image.projectUid===d.projectUid,'image-owner','この台帳の画像が見つかりません',404); return images.verify(this.resolve(id),image,preview); }

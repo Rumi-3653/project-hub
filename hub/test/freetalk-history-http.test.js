@@ -18,7 +18,7 @@ setTimeout(()=>{out({type:'item.completed',item:{type:'agent_message',text:JSON.
 process.env.HUB_ROOT=root; process.env.HUB_FREETALK_HOME=home; process.env.HOME=home;
 const port=39000+Math.floor(Math.random()*2000);
 process.env.HUB_DRY_RUN='1'; process.env.HUB_PORT=String(port); process.env.PATH=bin+path.delimiter+process.env.PATH;
-const { server, taskPrompt }=require('../server'); let base, a, b;
+const { server, taskPrompt, chats }=require('../server'); let base, a, b;
 const store=new Store(root), pdir=path.join(root,'Product/freetalk');
 const post=(route,body={},headers={'X-Hub':'1'})=>fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});
 const state=async()=>await(await fetch(base+'/api/state')).json();
@@ -47,12 +47,23 @@ test('2段目HTTP：現在のAIに要約依頼、稼働中拒否、確認編集�
  const next=await post('/api/chat/send',{project:'freetalk',task:a.id,ai:'codex',model:'GPT-6.1-Sol',effort:'高',text:'次の相談'});assert.equal(next.status,200);assert.equal((await next.json()).resume,false);await idle(a.id);
  const response=JSON.parse(chat.read(pdir,a.id).at(-1).text);assert.match(response.input,/人が確認・編集した旅行計画/);assert.doesNotMatch(response.input,/あ{100}/);
 });
-test('2段目HTTP：待機中拒否・確認済クリア後旧セッション不使用・他話題保持',async()=>{
+test('2段目HTTP：待機中拒否・確認済クリア後旧セッション不使用・他話題保持',async t=>{
  chat.append(pdir,b.id,{role:'user',text:'他の話題の記録'});const other=fs.readFileSync(path.join(pdir,'.ai/chat',b.id+'.jsonl'));
  const send=await post('/api/chat/send',{project:'freetalk',task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'まだ作業中'});assert.equal(send.status,200);
- const q=await post('/api/chat/send',{project:'freetalk',task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'待機中',mode:'queue'});assert.equal(q.status,200);assert.ok((await q.json()).queued);
+ // The waiting guard is free; automatic progression needs both the component and entitlement.
+ const view=await state(),autoQueue=view.extensions.included.includes('queue_auto')&&(!view.license.enforcement||view.license.features.queue_auto.allowed);
+ const beforeQueue=chats.queue('freetalk',a.id).slice();
+ const q=await post('/api/chat/send',{project:'freetalk',task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'待機中',mode:'queue'});
+ if(autoQueue){assert.equal(q.status,200);assert.ok((await q.json()).queued);}
+ else{assert.equal(q.status,403);const denied=await q.json();assert.equal(denied.error,view.license.reason);assert.deepEqual(chats.queue('freetalk',a.id),beforeQueue);
+  // Model an existing, manually held waiting entry without enabling a paid capability.
+  chats.setQueue('freetalk',a.id,[...beforeQueue,{id:'fixture-manual-wait',ai:'codex',model:'GPT-6.1-Sol',text:'待機中',stopHeld:true}]);}
+ t.diagnostic('queue_auto fixture: '+(autoQueue?'included and entitled':'held; existing manual waiting entry'));
  const h=await status(a.id);assert.ok(h.reason);assert.equal((await post('/api/freetalk/rotate',{project:'freetalk',task:a.id,confirm:true,revision:h.revision})).status,409);
- await idle(a.id);const ready=await status(a.id);assert.equal((await post('/api/freetalk/rotate',{project:'freetalk',task:a.id,revision:ready.revision})).status,409);
+ if(!autoQueue){await wait(()=>!chats.busy('freetalk',a.id));assert.match((await status(a.id)).reason,/順番待ち/);assert.ok(!chat.read(pdir,a.id).some(row=>row.text==='待機中'));
+  assert.equal((await post('/api/chat/unqueue',{project:'freetalk',task:a.id,id:'fixture-manual-wait'})).status,200);}
+ await idle(a.id);if(autoQueue)assert.ok(chat.read(pdir,a.id).some(row=>row.role==='user'&&row.text==='待機中'));
+ const ready=await status(a.id);assert.equal((await post('/api/freetalk/rotate',{project:'freetalk',task:a.id,revision:ready.revision})).status,409);
  const clear=await post('/api/freetalk/rotate',{project:'freetalk',task:a.id,confirm:true,revision:ready.revision});assert.equal(clear.status,200);
  assert.deepEqual(chat.read(pdir,a.id),[]);assert.deepEqual(fs.readFileSync(path.join(pdir,'.ai/chat',b.id+'.jsonl')),other);
  const next=await post('/api/chat/send',{project:'freetalk',task:a.id,ai:'codex',model:'GPT-6.1-Sol',text:'空から相談'});assert.equal(next.status,200);assert.equal((await next.json()).resume,false);await idle(a.id);

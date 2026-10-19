@@ -32,7 +32,7 @@ test('文字・画像・ネイティブ原本は話題コピーだけを参照�
  fs.unlinkSync(image.path);fs.symlinkSync(source,image.path);assert.throws(()=>x.preview(a.id,image.id),/リンク/);assert.equal(fs.readFileSync(source,'utf8'),'元資料');
  assert.ok(file.path.startsWith(path.join(ft.dir,'topics',a.id)+path.sep));
 });
-test('PDFKitは本文を抽出、空・破損PDFは参照成功にせず、原本コピーを保持',async t=>{
+test('PDFKitは本文を抽出、空・破損PDFは参照成功にせず、原本コピーを保持',{skip:process.env.HUB_TEST_OS_ISOLATION==='macos-v1'?'試験の認証/UI遮断はPDFKitのosascriptも拒否するため、実PDF読取は未確認':false},async t=>{
  const {a,attachments:x}=fixture(t);
  const good=await x.upload(a.id,'本文.pdf',pdf('Local PDF sentinel'),1);assert.equal(good.status,'ok');assert.match(fs.readFileSync(good.referencePaths[1],'utf8'),/Local PDF sentinel/);
  const empty=await x.upload(a.id,'空.pdf',pdf(),1);assert.equal(empty.status,'unsupported');assert.match(empty.message,/画像のみ/);assert.equal(empty.referencePaths.length,1);

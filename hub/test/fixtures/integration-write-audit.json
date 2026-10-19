@@ -417,7 +417,7 @@
     ]
   },
   "launch.js": {
-    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "reason": "CLI探索・npm shim解析は読取のみ。OS操作はplatformへ委譲。台帳・_hubへの直接書込みなし（統合時、直接Terminalスクリプト作成経路は採用せず）。",
     "sites": [
       "24133e8118fecd85ad64e78b80be4221a1bbe91df2827fed0e1fd9dd63055942"
     ]
@@ -735,13 +735,13 @@
       "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
     ]
   },
-  "webchat-client.js": {
+  "../paid/webchat/webchat-client.js": {
     "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
     "sites": [
       "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
     ]
   },
-  "webchat.js": {
+  "../paid/webchat/webchat.js": {
     "reason": "設定と送信記録は_hubのみ。会話は証拠経由chat.append。製品ファイルと子作業への書込み道具なし。",
     "sites": [
       "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
@@ -777,7 +777,7 @@
       "014324bbec2d4bc8b73dcc11520db88b4c29db9614d844665b3d5c234ea577e3",
       "51b8682e4ad64e998ee7471a26f79bc07d7dfd4e6637584d8b620d810ad3f4bc",
       "5b8061826828de63eea251bf710c16f188c3adcaf8a1ad522c742b5725cb0031",
-      "cbe462b135658ad9a72b8f48ebce0391f10e6e47903c54256e33ca7058e35035"
+      "a52b9569457ab7d7b81b996d83fab2a238dd3c84c5b3672483512fd945302dad"
     ]
   },
   "../paid/discussion/discussion.js": {
@@ -790,45 +790,12 @@
       "e8d52bebb9bba9efb678e14eae82e23b8b43b51d1a3562fda2e83c71c9c105ee"
     ]
   },
-  "idea-dispatch.js": {
-    "reason": "fs importのみ。原物のstrict読取り。台帳更新はIdeasのwriter/限定patch経由。",
-    "sites": [
-      "353813f8638b49d72bfe2b35246ebfa0aebbb05bf7cb35b30ea5d30f3b415134"
-    ]
-  },
-  "idea-lane.js": {
-    "reason": "fs importのみ。実行先の実体を読み、設定保存はIdeas経由。",
-    "sites": [
-      "45e5ef8be1b9102cb66953a80ca1d60be1e726d5723eba0efafce4964a9f82a1"
-    ]
-  },
   "idea-lifecycle.js": {
     "reason": "Git外controlRootのbackup/復元資料と保存先ディレクトリのみ。registry/正本はIdeasのwriterと候補/receipt経由、復元原物はsafe-file経由。既存mdは保全。",
     "sites": [
       "353813f8638b49d72bfe2b35246ebfa0aebbb05bf7cb35b30ea5d30f3b415134",
       "673876e8e0744a8469c5b53b9b2088cc824f738a1a4874ef22ec24e5170ffe70",
       "ce8835384ab7a0a1d2f5ffb5f50e7fb23f3ee70f008101f7f9f483850a42e4f3"
-    ]
-  },
-  "idea-release.js": {
-    "reason": "fs importのみ。Git操作は固定対象の共通Git lock経由、判定はIdeas経由。",
-    "sites": [
-      "7f8887539eae5d0b9757e61711683eb1262c29f303535b7d659f214a9ee8dc40"
-    ]
-  },
-  "idea-review.js": {
-    "reason": "Git外controlDir/reviews配下の不変資料だけ。wx/0400/fsyncで保存。Product台帳の直接変更なし。",
-    "sites": [
-      "8dfbf6a3992573b882a1636aa9d3cfce3322c2369405627552a5c96d4ebf15a6",
-      "f0d7f11655c44451de2bcb261ac3536adaba56ac08171b3ab22d18ace929c726",
-      "dc1bae70ee99a40e715037d020752ba10221ad8363369a96ac36f6f485ec7bcb"
-    ]
-  },
-  "idea-runner.js": {
-    "reason": "Git外controlDir/runsの依頼資料だけ。限定台帳更新はIdeas経由。Product作業frontmatter変更なし。",
-    "sites": [
-      "16db299adec6c110c3f984acbe1bcdf095dc13a259e10bd7686a4697982a3fce",
-      "0d31d6c86c2f0914b9e4b19f06b80195269cf3757ede0bcae17aa317098f0146"
     ]
   },
   "idea-source.js": {
@@ -841,13 +808,6 @@
     "reason": "fs importのみ。strictRead/json/identityは読取、Gitは--no-optional-locksの照合。",
     "sites": [
       "f768a3c0bc9c2696d17b96d972ebe1ed3dbca091aa7c16f87c4e06e6363eba71"
-    ]
-  },
-  "idea-verification.js": {
-    "reason": "Git外controlDir/verification配下の専用stdout/stderrのみ。登録profileと所有leaseを照合。Product台帳更新はIdeas経由。",
-    "sites": [
-      "ce9cb47d2d55d3fbd3a804fa0f769ad986fe8b94025df3548599674445439f6b",
-      "147541ec5676f6ac23647f135166c461328647d0d5640811f47b6c046b73a7bf"
     ]
   },
   "ideas.js": {
@@ -995,6 +955,153 @@
     "reason": "Reads only the fixed private bundle marker and bundled UI at startup; never writes project or workspace files.",
     "sites": [
       "529a330fd159c80e707d2b10c5a58cd044c74aa372875880b3102d2febd2603e"
+    ]
+  },
+  "../paid/idea-automation/idea-lane.js": {
+    "reason": "fs importのみ。実行先の実体を読み、設定保存はIdeas経由。 U5: 自動処理を私有部品へ移設。保存口・宛先・権限は同じ。",
+    "sites": [
+      "88d35bb4aeedff73dd8159ca613ecf395fe1a8ab92a6cfeb7aab8d378d3bd5fa"
+    ]
+  },
+  "../paid/idea-automation/idea-dispatch.js": {
+    "reason": "fs importのみ。原物のstrict読取り。台帳更新はIdeasのwriter/限定patch経由。 U5: 自動処理を私有部品へ移設。保存口・宛先・権限は同じ。",
+    "sites": []
+  },
+  "../paid/idea-automation/idea-runner.js": {
+    "reason": "Git外controlDir/runsの依頼資料だけ。限定台帳更新はIdeas経由。Product作業frontmatter変更なし。 U5: 自動処理を私有部品へ移設。保存口・宛先・権限は同じ。",
+    "sites": [
+      "f0ce61192daba78d37b91690a2aa28a9865d192de10d398c7cf6d998cbb2dd34",
+      "0d31d6c86c2f0914b9e4b19f06b80195269cf3757ede0bcae17aa317098f0146"
+    ]
+  },
+  "../paid/idea-automation/idea-verification.js": {
+    "reason": "Git外controlDir/verification配下の専用stdout/stderrのみ。登録profileと所有leaseを照合。Product台帳更新はIdeas経由。 U5: 自動処理を私有部品へ移設。保存口・宛先・権限は同じ。",
+    "sites": [
+      "ce9cb47d2d55d3fbd3a804fa0f769ad986fe8b94025df3548599674445439f6b",
+      "147541ec5676f6ac23647f135166c461328647d0d5640811f47b6c046b73a7bf"
+    ]
+  },
+  "../paid/idea-automation/idea-review.js": {
+    "reason": "Git外controlDir/reviews配下の不変資料だけ。wx/0400/fsyncで保存。Product台帳の直接変更なし。 U5: 自動処理を私有部品へ移設。保存口・宛先・権限は同じ。",
+    "sites": [
+      "f3dc7a29c68bf5b74b2bde903bea8634eabe893ddb7c5bc899c00a1088414c09",
+      "f0d7f11655c44451de2bcb261ac3536adaba56ac08171b3ab22d18ace929c726",
+      "dc1bae70ee99a40e715037d020752ba10221ad8363369a96ac36f6f485ec7bcb"
+    ]
+  },
+  "../paid/idea-automation/idea-release.js": {
+    "reason": "fs importのみ。Git操作は固定対象の共通Git lock経由、判定はIdeas経由。 U5: 自動処理を私有部品へ移設。保存口・宛先・権限は同じ。",
+    "sites": [
+      "e14fdadf6a2d5fe684104e1b59b1d7287d8be66c9652b6bc48a428f0db1dec3d"
+    ]
+  },
+  "idea-location.js": {
+    "reason": "保存済みlaneとGitの識別を読むだけ。書込みなし。",
+    "sites": [
+      "45e5ef8be1b9102cb66953a80ca1d60be1e726d5723eba0efafce4964a9f82a1"
+    ]
+  },
+  "idea-run-evidence.js": {
+    "reason": "既送信runの所有と保存済みログ/spoolを読むだけ。実行指示の生成なし。",
+    "sites": [
+      "353813f8638b49d72bfe2b35246ebfa0aebbb05bf7cb35b30ea5d30f3b415134"
+    ]
+  },
+  "../paid/idea-automation/index.js": {
+    "reason": "固定のversion-check入力を読むだけ。既存自動処理のホスト配線。",
+    "sites": [
+      "0547102cc9523f3b990cec6a2019b591ab651e1ec75b7ef867eb9842a0ecf99a"
+    ]
+  },
+  "routes/local-files.js": {
+    "reason": "Read-only file preview moved byte-equivalently from server.js: openSync with O_RDONLY|O_NOFOLLOW and createReadStream uses the same O_RDONLY|O_NOFOLLOW verified fd and autoClose. No ledger write or new filesystem mutation.",
+    "sites": [
+      "29fd9505ef4e28a1da05716866837b39e39bc9dafbf2cae87a0123169e0779d8",
+      "3a56c3b2b24ad4adb4a4d8b4e369b9ec58f92389c7fc439f8a19064f39c1543a"
+    ]
+  },
+  "engines/limit-switch.js": {
+    "reason": "Unchanged terminal handoff packet/pending writers moved from server.js at 6c0454c; original handoff directory, atomic pending rename, stop/limit/ownership checks and write order retained. No new filesystem mutation or ledger writer.",
+    "sites": [
+      "667e5adae4b375aef191ee0e0906828563eaf823c44586a4cace7c00a5401dcb",
+      "34c67511f9732396675c07ecafa0374337fb95556c376a9df63d2c0421a01ad6",
+      "0577e8d98c851276b6ca94d41787c2c0d4660f8ce03a662f2658328e7c225c40",
+      "cc139d1c3970ecd60e00647c96c82face3c85e0b184e6e7df705bfa9c38bd0ab"
+    ]
+  },
+  "routes/terminal-start.js": {
+    "reason": "Unchanged terminal handoff packet/pending writers moved from server.js at 6c0454c; original handoff directory, atomic pending rename, stop/limit/ownership checks and write order retained. No new filesystem mutation or ledger writer.",
+    "sites": [
+      "705bffc1e66c76b1499d691f7945d28b068ca7482809476fa79cab39028a964f",
+      "c2d7df3e5f9dcb9c23faef9c9be5fcb99e6bb5a1cd5f56d3636c8a16e144f195"
+    ]
+  },
+  "webchat-client.js": {
+    "reason": "既存の_hub制御状態または読取り用fs importのみ。通常Product台帳への書込みなし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "webchat.js": {
+    "reason": "設定と送信記録は_hubのみ。会話は証拠経由chat.append。製品ファイルと子作業への書込み道具なし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c",
+      "7d29fd16a9858acf51c7f1dbef8ec79a7d8c8daf90c37d491aa9ccf784dad88c",
+      "a774f9879c1fa5444ffd1dc115cc50db0ea6e9fa543adeb5cc6fcc6cc3f3cacd",
+      "bebd86f7bf772092d2ad8fd90592a46a505e17aeab174ad2855e2c59cd3ee0e5",
+      "51b8682e4ad64e998ee7471a26f79bc07d7dfd4e6637584d8b620d810ad3f4bc"
+    ]
+  },
+  "idea-dispatch.js": {
+    "reason": "fs importのみ。原物のstrict読取り。台帳更新はIdeasのwriter/限定patch経由。",
+    "sites": [
+      "353813f8638b49d72bfe2b35246ebfa0aebbb05bf7cb35b30ea5d30f3b415134"
+    ]
+  },
+  "idea-lane.js": {
+    "reason": "fs importのみ。実行先の実体を読み、設定保存はIdeas経由。",
+    "sites": [
+      "45e5ef8be1b9102cb66953a80ca1d60be1e726d5723eba0efafce4964a9f82a1"
+    ]
+  },
+  "idea-release.js": {
+    "reason": "fs importのみ。Git操作は固定対象の共通Git lock経由、判定はIdeas経由。",
+    "sites": [
+      "7f8887539eae5d0b9757e61711683eb1262c29f303535b7d659f214a9ee8dc40"
+    ]
+  },
+  "idea-review.js": {
+    "reason": "Git外controlDir/reviews配下の不変資料だけ。wx/0400/fsyncで保存。Product台帳の直接変更なし。",
+    "sites": [
+      "8dfbf6a3992573b882a1636aa9d3cfce3322c2369405627552a5c96d4ebf15a6",
+      "f0d7f11655c44451de2bcb261ac3536adaba56ac08171b3ab22d18ace929c726",
+      "dc1bae70ee99a40e715037d020752ba10221ad8363369a96ac36f6f485ec7bcb"
+    ]
+  },
+  "idea-runner.js": {
+    "reason": "Git外controlDir/runsの依頼資料だけ。限定台帳更新はIdeas経由。Product作業frontmatter変更なし。",
+    "sites": [
+      "16db299adec6c110c3f984acbe1bcdf095dc13a259e10bd7686a4697982a3fce",
+      "0d31d6c86c2f0914b9e4b19f06b80195269cf3757ede0bcae17aa317098f0146"
+    ]
+  },
+  "idea-verification.js": {
+    "reason": "Git外controlDir/verification配下の専用stdout/stderrのみ。登録profileと所有leaseを照合。Product台帳更新はIdeas経由。",
+    "sites": [
+      "ce9cb47d2d55d3fbd3a804fa0f769ad986fe8b94025df3548599674445439f6b",
+      "147541ec5676f6ac23647f135166c461328647d0d5640811f47b6c046b73a7bf"
+    ]
+  },
+  "platform/win32.js": {
+    "reason": "Windows専用adapterの読取り用fs importのみ。保存は宣言済みnative bridgeのOPEN_EXISTING/FlushFileBuffersへ。Node側で台帳の新規書込み・権限変更なし。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
+    ]
+  },
+  "platform/win32-native.js": {
+    "reason": "Windows専用。実体TEMP配下にこのbridge専用の新規hub-native-*を作り、固定C#を初回のみx64実行形式へコンパイルする。新規cacheだけを現在SIDのACLに限定し、Nodeは毎回ファイル種別とSHA256を検査する。正常終了時は自分が作ったcacheだけを削除。台帳・既存データ・認証設定・アカウント権限へ書かない。保存/停止nativeの判定は不変、故障と未確認応答は失敗。",
+    "sites": [
+      "6434bcc1a8b94a9f8acca2dc199fbb37a35584544ec32e15cf93d0e41e74d08c"
     ]
   }
 }
