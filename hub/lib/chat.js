@@ -500,11 +500,12 @@ class ChatRunner {
     if(this.stopControl)o={...o,stopSafety:{dir:this.stopControl.dir,ticket:o.stopTicket}};
     const { project, task, pdir, dir, ai, model, effort, env, onEnd, account = 'default' } = o;
     const cliEnv = launch.childEnv(ai, launch.accountEnv(ai, account, { ...process.env, ...(env || {}) }));
+    const cli = require('./platform').resolveCommand(turn.command, turn.args, cliEnv.PATH), runTurn = { ...turn, command: cli.file, args: cli.args };
     if (!o.started) o.started=Date.now();
     if(!adopted)this.assertQueueStart(o);
     if(!adopted&&!this.spoolRoot)require('./owned-processes').assertLaunchOwnership();
     this.startGate?.(o,{adoption:Boolean(adopted)});
-    let child;try{child = adopted || (this.spoolRoot ? require('./cli-spool').start(this.spoolRoot,this.serverId,o,turn,meta,rows,cliEnv) : spawn(turn.command, turn.args, { cwd: dir, env: cliEnv, stdio: ['pipe', 'pipe', 'pipe'] }));}catch(e){this.endGate?.(o);throw e;}
+    let child;try{child = adopted || (this.spoolRoot ? require('./cli-spool').start(this.spoolRoot,this.serverId,o,runTurn,meta,rows,cliEnv) : spawn(runTurn.command, runTurn.args, { cwd: dir, env: cliEnv, stdio: ['pipe', 'pipe', 'pipe'] }));}catch(e){this.endGate?.(o);throw e;}
     if (!o.started) o.started = Date.now(); // 思考の指定をやり直しても、最初に送った時から数える
     const run = { child, automation:o.automation, options:o, ai, account, model, effort, userRow: o.userRow, texts: [], err: '', done: null, sid: null, stopped: false, started: o.started, limitSwitch: o.limitSwitch, last: '', stopVersion: this.stops.get(this.key(project, task)) || 0 };
     run.supervised=Boolean(child.dir);if(run.supervised){this.spoolRuns.add(child);child.run=run;Object.assign(run,require('./cli-spool').read(child.dir,'control.json',{}));if(adopted)this.stops.set(this.key(project,task),run.stopVersion);}

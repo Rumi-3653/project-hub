@@ -63,7 +63,7 @@ function excluded(name) {
   return false;
 }
 function selected(name, isPublic) {
-  return isPublic ? publicFiles.has(name) || name.startsWith('.github/ISSUE_TEMPLATE/')
+  return isPublic ? publicFiles.has(name) || name === '.gitattributes' || name.startsWith('.github/ISSUE_TEMPLATE/')
     || name === '.github/pull_request_template.md' || name.startsWith('.github/PULL_REQUEST_TEMPLATE/')
     || name === '.github/workflows/macos-app.yml'
     : name.startsWith('hub/') || name.startsWith('docs/project-hub/templates/') || packAsset(name)

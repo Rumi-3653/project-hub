@@ -7,6 +7,7 @@ const path = require('path');
 const { execFile, spawn } = require('child_process');
 
 const { AIS, AI_LABEL, childEnv, agyAccountError } = require('./launch');
+const platform = require('./platform');
 const { models: grokModels } = require('./grok');
 const { agyModels } = require('./agy-models');
 const { latestVersion, newer } = require('./update-check');
@@ -28,7 +29,8 @@ function toolError(status, stage, reason) {
 
 function runFile(file, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: opts.timeout || 30000, maxBuffer: MAX_OUTPUT, env: childEnv(['agy', 'grok'].includes(path.basename(file)) ? path.basename(file) : '', opts.env || process.env) }, (err, stdout, stderr) => {
+    const cli = platform.resolveCommand(file, args, opts.env?.PATH);
+    execFile(cli.file, cli.args, { timeout: opts.timeout || 30000, maxBuffer: MAX_OUTPUT, env: childEnv(['agy', 'grok'].includes(path.basename(file)) ? path.basename(file) : '', opts.env || process.env) }, (err, stdout, stderr) => {
       if (err) return reject(err); // stdout/stderr には認証情報が入り得るので外へ出さない
       resolve(String(stdout || ''));
     });
@@ -45,12 +47,7 @@ const foundAt = new Map();
 function executable(name) {
   const hit = foundAt.get(name);
   if (hit && Date.now() - hit.at < 30000) return hit.file;
-  let file = '';
-  for (const dir of [...String(process.env.PATH || '').split(path.delimiter), ...(name === 'grok' ? [path.join(process.env.HUB_AI_HOME || os.homedir(), '.grok', 'bin')] : [])]) {
-    if (!dir) continue;
-    const f = path.join(dir, name);
-    try { fs.accessSync(f, fs.constants.X_OK); file = f; break; } catch (e) { /* 次へ */ }
-  }
+  const file = platform.findExecutable(name, [process.env.PATH, ...(name === 'grok' ? [path.join(process.env.HUB_AI_HOME || os.homedir(), '.grok', 'bin')] : [])].join(path.delimiter)) || '';
   foundAt.set(name, { file, at: Date.now() });
   return file;
 }
@@ -129,7 +126,8 @@ function claudeInitialize(file, timeoutMs = 12000, env = process.env) {
     '--safe-mode', '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--tools', '', '--model', 'claude-fable-5-1'];
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
+    const cli = platform.resolveCommand(file, args, env.PATH);
+    const child = spawn(cli.file, cli.args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     let done = false, success = false, timedOut = false, buf = '', bytes = 0, modelIds = [], pendingError = null;
     let killTimer;
     const stopChild = () => {

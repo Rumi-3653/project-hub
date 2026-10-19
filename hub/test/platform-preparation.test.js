@@ -62,7 +62,7 @@ test('Darwin and existing Linux ownership retain numeric UID and process-group i
   const root = { ...row, uid: 0 }, p = { processOwner: r => r?.uid, currentProcessOwner: () => 0 };
   assert.equal(P.capture(root.pid, [root], p), root);
   assert.throws(() => platforms.createDarwin({ name: 'win32' }).currentProcessOwner(), { code: 'platform_unsupported' });
-  assert.deepEqual(platforms.supervisorFiles, ['index.js', 'darwin.js', 'persistence.js']); assert.equal(Object.isFrozen(platforms.supervisorFiles), true);
+  assert.deepEqual(platforms.supervisorFiles, ['index.js', 'darwin.js', 'persistence.js', ...(process.platform === 'win32' ? ['win32.js'] : [])]); assert.equal(Object.isFrozen(platforms.supervisorFiles), true);
 });
 
 test('unavailable Windows licensing blocks paid operations without reading keys, writing or sending', async () => {

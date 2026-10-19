@@ -349,7 +349,7 @@ return { name, openTerminal, focusTerminal, openPath, revealPath, openUrl, pickF
   listProcesses, processCwd, processSnapshot, processOwner, currentProcessOwner, processBirth, killTree, isExternalTerminal,
   supervisorFiles: Object.freeze(['darwin.js', 'persistence.js']),
   persistence: require('./persistence').create(name, fs),
-  shellCandidates, findExecutable, fixPtyHelper, trashDir, trashRootFor, volumeRoot, existingParent,
+  shellCandidates, findExecutable, resolveCommand: (file, args) => ({ file, args }), fixPtyHelper, trashDir, trashRootFor, volumeRoot, existingParent,
   commandSandbox, secretStore: options => new MacSecretStore(options), MacSecretStore, machineHint,
   readPdfText, PDF_SCRIPT, imageInfo, convertImage, convertDocument, readArchive, tailscaleCandidates, appUpdater,
   parsePs, parseLstart, parseLsof, psArgs };

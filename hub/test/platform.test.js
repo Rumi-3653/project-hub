@@ -100,9 +100,9 @@ test('sessions resolve the executable through their injected platform', () => {
   let lookup, spawn;
   const proc = { pid: -1, onData() {}, onExit() {} };
   const { Sessions } = require('../lib/sessions');
-  const s = new Sessions({ platform: { findExecutable: (...args) => { lookup = args; return '/fixture/cli'; } }, pty: { spawn: (...args) => { spawn = args; return proc; } } });
+  const s = new Sessions({ platform: { findExecutable: (...args) => { lookup = args; return '/fixture/cli'; }, resolveCommand: (file, args) => ({ file: file + '-resolved', args: ['--from-shim', ...args] }) }, pty: { spawn: (...args) => { spawn = args; return proc; } } });
   const result = s.start({ project: 'p', task: 't', ai: 'claude', dir: fs.realpathSync(os.tmpdir()), command: 'fixture-cli', args: ['arg'] });
-  assert.equal(lookup[0], 'fixture-cli'); assert.equal(spawn[0], '/fixture/cli'); assert.deepEqual(spawn[1], ['arg']);
+  assert.equal(lookup[0], 'fixture-cli'); assert.equal(spawn[0], '/fixture/cli-resolved'); assert.deepEqual(spawn[1], ['--from-shim', 'arg']);
   assert.equal(result.proc, proc);
 });
 

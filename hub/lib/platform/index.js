@@ -19,6 +19,7 @@
  * @property {function(object, string|number=, object=): *} killTree
  * @property {function(): string[]} shellCandidates
  * @property {function(string, string): ?string} findExecutable
+ * @property {function(string, string[], string=): {file: string, args: string[]}} resolveCommand Launchable program and arguments for a CLI name or path; no shell.
  * @property {function(string=): string} trashDir
  * @property {function(string, string=, object=): string} trashRootFor
  * @property {object} commandSandbox available(), profile(root, readFiles), spawn().
@@ -49,11 +50,12 @@ const darwin = require('./darwin');
 const adapters = new Map([['darwin', darwin]]);
 function forPlatform(value = process.platform) {
   if (value && typeof value === 'object') return value;
-  if (!adapters.has(value)) adapters.set(value, darwin.create({ name: value }));
+  // Required only on Windows, so other systems' supervisors never need win32.js.
+  if (!adapters.has(value)) adapters.set(value, value === 'win32' ? require('./win32') : darwin.create({ name: value }));
   return adapters.get(value);
 }
 // The pre-existing Linux process/trash helpers are retained by the factory;
-// other systems have no native implementation. No Windows backend is shipped.
+// Windows has its own adapter (win32.js); other systems have no native implementation.
 const selected = forPlatform();
 const supervisorFiles = Object.freeze([...new Set(['index.js', 'darwin.js', 'persistence.js', ...selected.supervisorFiles])]);
 module.exports = { ...selected, supervisorFiles, forPlatform, createDarwin: options => darwin.create(options) };

@@ -65,7 +65,8 @@ class Sessions {
     let proc;
     const gateOptions={project,task,ai,dir};this.startGate?.(gateOptions);
     try {
-      proc = this.pty.spawn(exe, args, { name: 'xterm-256color', cols: cols || 100, rows: rows || 30, cwd: dir, env: fullEnv });
+      const cli = this.platform.resolveCommand(exe, args, fullEnv.PATH);
+      proc = this.pty.spawn(cli.file, cli.args, { name: 'xterm-256color', cols: cols || 100, rows: rows || 30, cwd: dir, env: fullEnv });
     } catch (e) {
       this.endGate?.(gateOptions);
       throw new Error(lt`作業画面を開けませんでした（${e.message}）`);
