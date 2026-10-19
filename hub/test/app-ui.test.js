@@ -57,7 +57,11 @@ function app(userAgent = '', sessionStorage) {
     confirm: () => true,
   });
   context.window.HubChatHistory = require('../public/chat-history');
+  const reviewUI=path.join(__dirname, '..', 'public', 'paid', 'role-review.js');
+  if(fs.existsSync(reviewUI)) vm.runInContext(fs.readFileSync(reviewUI,'utf8'),context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'role-settings.js'), 'utf8'), context);
+  const paidUI=path.join(__dirname,'../public/paid/discussion.js');
+  if(fs.existsSync(paidUI))vm.runInContext(fs.readFileSync(paidUI,'utf8'),context);
   vm.runInContext(source, context);
   return { context, document, elements, element, events, documentListeners, timers, timeouts, details, stream: () => stream };
 }
@@ -174,7 +178,7 @@ test('引っ越し設定: 基本欄の説明と保存操作、バックアップ
   const a = app(); vm.runInContext('state=' + JSON.stringify(snapshot()) + ';view={kind:"settings"}', a.context);
   a.element('#ai-use-settings').contains = () => false; // Complete the DOM fixture for this settings render.
   a.context.renderSettings(); const html = a.element('#main').innerHTML;
-  assert.match(html, /<h2>引っ越し<\/h2>/); assert.match(html, /ProjectHub-Move/);
+  assert.match(html, /<h3>引っ越し<\/h3>/); assert.match(html, /ProjectHub-Move/);
   assert.match(html, /AIのログイン情報と利用コードは移しません/);
   const calls = []; let mode = 'none';
   a.context.api = async (url, body, headers) => { calls.push({url,body,headers}); if (url.endsWith('/export')) mode = 'exporting'; return { mode, progress: 12 }; };
@@ -224,6 +228,59 @@ test('candidate trial dates show local start/end and remaining days; pending and
   assert.doesNotMatch(a.element('#main').innerHTML, /data-trial-dates/);
 });
 
+test('91: license purchase link is hidden without configuration and shown only for HTTPS, including expired trials', () => {
+  const a=app(),s=snapshot();a.element('#ai-use-settings').contains=()=>false;
+  s.license={edition:'public',reason:'無料体験は終わりました',trial:{state:'expired'},purchaseUrl:''};
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"settings"}',a.context);a.context.renderSettings();
+  assert.doesNotMatch(a.element('#main').innerHTML,/data-license-purchase/);
+  for(const url of ['https://buy.stripe.com/fixture?x=%22','javascript:bad()','http://unsafe.invalid','https://user:pass'+'@unsafe.invalid']) {
+    vm.runInContext('state.license.purchaseUrl='+JSON.stringify(url),a.context);a.context.renderSettings();
+    const html=a.element('#main').innerHTML;
+    if(url.startsWith('https://buy.stripe.com/')){assert.match(html,/data-license-purchase/);assert.match(html,/data-url="https:\/\/buy.stripe.com\/fixture/);assert.match(html,/購入する（4,900円・税込）/);assert.doesNotMatch(html,/data-license-intro|1,100円/);}
+    else assert.doesNotMatch(html,/data-license-purchase/);
+  }
+  vm.runInContext('state.license={edition:"owner",purchaseUrl:"https://buy.stripe.com/fixture"}',a.context);a.context.renderSettings();
+  assert.doesNotMatch(a.element('#main').innerHTML,/data-license-purchase/);
+  assert.equal(require('../lib/license/policy').purchaseUrl,'https://project-hub-license.kieiyellow.workers.dev/buy');
+});
+
+test('113: purchase shows one eligible price and intro clicks coalesce without exposing the Checkout URL', async () => {
+  const a=app(),s=snapshot();a.element('#ai-use-settings').contains=()=>false;
+  s.license={edition:'public',reason:'trial',trial:{state:'active'},purchaseUrl:'https://issuer.invalid/buy',introAvailable:true};
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"settings"}',a.context);a.context.renderSettings();
+  const html=a.element('#main').innerHTML;
+  assert.match(html,/data-license-intro/);assert.match(html,/体験中の特別価格で購入/);
+  assert.match(html,/1,100円・税込/);
+  assert.doesNotMatch(html,/data-license-purchase(?=[\s=>])|4,900円/);
+  assert.match(html,/利用コードをコピー/);assert.match(html,/再購入せずコードを登録/);
+  assert.doesNotMatch(html,/checkout\.stripe\.com|session_id|nonce|sig=/);
+  for(const patch of [{introAvailable:false,trial:{state:'expired'}},{purchaseUrl:''},{edition:'owner'}]){
+    vm.runInContext('state.license='+JSON.stringify({...s.license,...patch}),a.context);a.context.renderSettings();
+    const rendered=a.element('#main').innerHTML;assert.doesNotMatch(rendered,/data-license-intro/);
+    assert.equal(/data-license-purchase(?=[\s=>])/.test(rendered),patch.introAvailable===false);
+    if(patch.introAvailable===false){assert.match(rendered,/4,900円・税込/);assert.match(rendered,/data-url="https:\/\/issuer.invalid\/buy"/);assert.doesNotMatch(rendered,/1,100円/);}
+  }
+  const click=a.documentListeners.find(x=>x.name==='click'&&x.cb.toString().includes('[data-license-intro]')).cb;
+  const calls=[],button={disabled:false};let release;
+  a.context.fetch=(url,options)=>{calls.push({url,options});return new Promise(resolve=>release=()=>resolve({ok:true,json:async()=>({ok:true})}));};
+  const event={target:{closest:s=>s==='[data-license-intro]'?button:null},preventDefault(){}};
+  const first=click(event);await click(event);assert.equal(calls.length,1);assert.equal(button.disabled,true);
+  assert.equal(calls[0].url,'/api/license/intro-checkout');assert.equal(calls[0].options.body,'{}');
+  release();await first;assert.equal(button.disabled,false);
+  a.context.fetch=async()=>({ok:false,json:async()=>({error:'https://checkout.stripe.com/c/pay/private-bearer'})});
+  await click(event);assert.equal(button.disabled,false);assert.doesNotMatch(a.element('#toast').textContent,/checkout|private-bearer/);
+});
+
+test('purchased public edition hides both purchase buttons while keeping code registration available', () => {
+  const a=app(),s=snapshot();
+  s.license={edition:'public',purchased:true,reason:'購入した版の全機能を期限なしで使えます',purchaseUrl:'https://issuer.invalid/buy',introAvailable:true};
+  vm.runInContext('state='+JSON.stringify(s)+';view={kind:"settings"}',a.context);a.context.renderSettings();
+  const html=a.element('#main').innerHTML;
+  assert.match(html,/購入した版の全機能を期限なしで使えます/);
+  assert.doesNotMatch(html,/data-license-intro|data-license-purchase|1,100円|4,900円/);
+  assert.match(html,/id="license-form"/);
+});
+
 test('License activation clears input before transport, coalesces submits and permits a safe retry', async () => {
   const a = app(), input = { value: 'TEST_ONLY_CODE' }, button = { disabled: false }, notice = { textContent: '' };
   const form = { id: 'license-form', querySelector: selector => ({ '#license-code': input, '#license-notice': notice, button })[selector] };
@@ -239,92 +296,6 @@ test('License activation clears input before transport, coalesces submits and pe
   input.value = 'TEST_ONLY_NEW_CODE'; a.context.api = async () => { throw Error('通信できません'); };
   await listener.cb(event); assert.equal(input.value, ''); assert.equal(button.disabled, false);
   assert.equal(notice.textContent, '通信できません');
-});
-
-function discussionView(status = null) {
-  return { candidates: [], previous: null, session: status && { id: 'discussion-test', status, reasons: [],
-    slots: [{kind:'initial',round:0,ai:'codex',label:'Test',status:'done',text:'保存した意見'}],
-    progress: {total:5,completed:status==='done'?5:1,percent:status==='done'?100:20,current:null} } };
-}
-function discussionUI(status = null) {
-  const a = app(), data = snapshot(), calls = [];
-  vm.runInContext('state='+JSON.stringify(data), a.context);
-  const panel = a.element('#discussion-settings'); panel.hidden = true;
-  panel.querySelector = selector => ({ value: selector === '[data-discussion-rounds]' ? '1' : 'codex|test' });
-  const history = a.element('#discussion-history'), saved = a.element('[data-discussion-history]');
-  history.querySelector = () => saved;
-  saved.querySelector = () => ({ value: 'codex|test', options: [] });
-  let response = discussionView(status);
-  a.context.api = async (route, body) => { calls.push({route,body}); return response; };
-  const bind = () => a.context.bindDiscussion(data.projects[0], data.projects[0].tasks[0]);
-  return {...a, calls, panel, bind, update:bind(), response:value=>{response=value;},
-    polls:()=>{const timer=a.timers.get(vm.runInContext('discussionPollTimer',a.context)); return timer?[timer]:[];},
-    flush:()=>new Promise(resolve=>setImmediate(resolve)),
-    action:kind=>(kind==='stop'?a.element('#discussion-progress'):panel).handlers.click({target:{closest:selector=>selector===(kind==='stop'?'[data-discussion-stop]':'[data-discussion-summary]')?{dataset:{discussionSummary:'discussion-test'}}:null}}),
-  };
-}
-test('discussion polls only waiting/running, resumes on events and stops for every terminal state', async () => {
-  const a = discussionUI(); await a.flush();
-  assert.equal(a.calls.length,1); assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true);
-  for (const status of ['waiting','running']) {
-    a.response(discussionView(status)); a.update(discussionView(status));
-    assert.equal(a.polls().length,1); assert.equal(a.element('#discussion-progress').hidden,false); const before=a.calls.length;
-    await a.polls()[0].cb(); await a.flush(); assert.equal(a.calls.length,before+1);
-  }
-  for (const status of ['done','stopped','failed',null]) {
-    a.update(discussionView('running')); assert.equal(a.polls().length,1);
-    a.update(discussionView(status)); assert.equal(a.polls().length,0);
-    assert.equal(a.element('#discussion-progress').hidden,true); assert.equal(a.element('#discussion-progress').innerHTML,'');
-    assert.equal(a.element('#chat-send').disabled,false); assert.equal(a.element('#discussion-toggle').disabled,false);
-    assert.equal(a.panel.hidden,true);
-  }
-});
-test('discussion start/manual summary resume polling immediately and stop refresh cancels it without events', async () => {
-  const a=discussionUI(); await a.flush(); a.response(discussionView('waiting'));
-  await a.panel.handlers.click({target:{id:'discussion-start'}});
-  assert.equal(a.calls.at(-1).route,'/api/discussion/start'); assert.equal(a.polls().length,1); assert.equal(a.panel.hidden,true);
-  a.response(discussionView('stopped')); await a.action('stop');
-  assert.equal(a.calls.at(-2).route,'/api/chat/stop'); assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true);
-  await a.element('#discussion-toggle').handlers.click();
-  assert.equal(a.panel.hidden,false); assert.equal(a.element('#discussion-progress').hidden,true);
-  assert.match(a.element('[data-discussion-history]').innerHTML,/停止[\s\S]*この意見をまとめる/);
-  a.response(discussionView('waiting')); await a.action('summary');
-  assert.equal(a.calls.at(-2).route,'/api/discussion/summary'); assert.equal(a.polls().length,1); assert.equal(a.panel.hidden,true);
-  a.response(discussionView('done')); await a.polls()[0].cb(); await a.flush(); assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true);
-});
-test('discussion reads fresh state on opening/reopening and old requests cannot undo newer events or navigation', async () => {
-  const a=discussionUI(); await a.flush();
-  a.response(discussionView('failed')); await a.element('#discussion-toggle').handlers.click();
-  assert.equal(a.calls.length,2); assert.equal(a.element('#discussion-progress').hidden,true); assert.match(a.element('[data-discussion-history]').innerHTML,/失敗/);
-  a.response(discussionView('running')); a.update=a.bind(); await a.flush(); assert.equal(a.polls().length,1);
-  let finish; a.context.api=()=>new Promise(resolve=>{finish=resolve;});
-  a.polls()[0].cb(); a.update(discussionView('done')); finish(discussionView('running')); await a.flush();
-  assert.equal(a.polls().length,0); assert.equal(a.element('#discussion-progress').hidden,true); assert.match(a.element('[data-discussion-history]').innerHTML,/100%/);
-  const oldUpdate=a.bind(); a.context.closePanes(); a.elements.delete('#discussion-progress');
-  a.context.api=async()=>discussionView('waiting'); a.bind(); await a.flush();
-  oldUpdate(discussionView('stopped')); finish(discussionView('failed')); await a.flush();
-  assert.equal(a.polls().length,1); assert.match(a.element('#discussion-progress').innerHTML,/待ち/);
-  a.context.closePanes(); assert.equal(a.polls().length,0);
-});
-test('discussion stream events control polling even when a chat opened without a discussion', async () => {
-  const a=conversationApp(), stream=a.stream();
-  const polling=()=>a.timers.has(vm.runInContext('discussionPollTimer',a.context));
-  assert.equal(polling(),false);
-  stream.onmessage({data:JSON.stringify({type:'discussion',...discussionView('running')})});
-  assert.equal(polling(),true);
-  stream.onmessage({data:JSON.stringify({type:'discussion',...discussionView('done')})});
-  assert.equal(polling(),false);
-  assert.equal(a.element('#discussion-progress').hidden,true); assert.equal(a.element('#discussion-progress').innerHTML,'');
-});
-test('discussion start ignores a read that began before submission even when events are unavailable', async () => {
-  const a=discussionUI(); await a.flush();
-  let finishRead, finishStart;
-  a.context.api=(route)=>new Promise(resolve=>{if(route==='/api/discussion/start')finishStart=resolve;else finishRead=resolve;});
-  const update=a.bind();
-  const starting=a.panel.handlers.click({target:{id:'discussion-start'}});
-  finishRead(discussionView()); await a.flush(); finishStart(discussionView('waiting')); await starting;
-  assert.equal(a.polls().length,1); assert.match(a.element('#discussion-progress').innerHTML,/待ち/);
-  update(discussionView('done')); assert.equal(a.polls().length,0);
 });
 
 for (const locale of ['ja','zh-TW']) test('Agy real model choices remain selectable after default removal, keep missing selection and escape metadata: '+locale, () => {
@@ -408,8 +379,9 @@ for (const locale of ['ja', 'zh-TW']) test('Skills settings distinguish detected
   a.context.renderSettings();
   await new Promise(resolve => setImmediate(resolve)); // VMとホスト間の初回読み込みを終えてから再確認する。
   const html = a.element('#main').innerHTML;
-  assert.match(html, /data-tab="ai"><h2>(スキル|技能)<\/h2>/);
-  const card = html.slice(html.indexOf('<h2>' + (locale === 'ja' ? 'スキル' : '技能') + '</h2>'), html.indexOf('id="skills-check"'));
+  assert.match(html, /data-tab="ai"><h2 class="pref-caption">(スキル|技能)<\/h2>/);
+  const skillsStart = html.indexOf('<h2 class="pref-caption">' + (locale === 'ja' ? 'スキル' : '技能') + '</h2>');
+  const card = html.slice(skillsStart, html.indexOf('</section>', skillsStart));
   assert.match(card, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(card, /&lt;img src=x onerror=bad\(\)&gt;/);
   assert.doesNotMatch(card, /<script>|<img/);
@@ -1278,8 +1250,8 @@ test('設定にAIアカウントとCodex加速の操作・注意を同時に表�
   vm.runInContext('state = ' + JSON.stringify(snapshot()) + '; view = {kind:"settings",project:"p"}', a.context);
   a.context.renderSettings();
   const html = a.element('#main').innerHTML;
-  assert.match(html, /<h2>AIの利用設定<\/h2><div id="ai-accounts"/);
-  assert.match(html, /<h2>Codex の加速（Fast）<\/h2>/);
+  assert.match(html, /<h2 class="pref-caption">AIの利用設定<\/h2><div class="pref-list">\s*<div class="pref-row pref-stack"><div id="ai-accounts"/);
+  assert.match(html, /<h2 class="pref-caption">Codex の加速（Fast）<\/h2>/);
   assert.match(html, /class="danger"><strong>速度約1\.5倍・利用枠の消耗2\.5倍/);
   assert.match(a.element('#ai-accounts').innerHTML, /data-account-action="add"/);
 });
@@ -2125,7 +2097,7 @@ test('送信待ちで会話を描き直しても二重送信せず、成功後�
   const a = conversationApp(); let finish, calls = 0;
   a.element('#chat-in').value = '送る本文';
   a.context.chatImages('p','t').push(attached());
-  a.context.api = async route => { if(route.startsWith('/api/discussion?'))return discussionView(); calls++; return new Promise(resolve=>finish=resolve); };
+  a.context.api = async route => { if(route.startsWith('/api/discussion?'))return {session:null,candidates:[],previous:null}; calls++; return new Promise(resolve=>finish=resolve); };
   a.element('#composer').handlers.submit({preventDefault(){}});
   a.context.closePanes();
   a.elements.delete('#chat-in'); a.element('#chat-in').value = vm.runInContext('chatDraft[chatAttachmentKey("p","t")]', a.context);
@@ -2820,7 +2792,7 @@ test('settings keeps connections separate from ChatGPT login', () => {
   a.context.renderSettings(); const html = a.element('#main').innerHTML;
   assert.ok(html.indexOf('id="remote-box"') < html.indexOf('id="github-box"'));
   assert.doesNotMatch(html, /<h2>ChatGPT<\/h2>/);
-  assert.match(html, /data-tab="ai"[^>]*><h2>AIの利用設定<\/h2>/);
+  assert.match(html, /data-tab="ai"[^>]*><h2 class="pref-caption">AIの利用設定<\/h2>/);
   assert.match(a.element('#ai-accounts').innerHTML, /id="chatgpt-box"/);
 });
 const languageFixture = () => ({ active: 'ja', saved: 'ja', restartNeeded: false, fallback: false, version: '4.108.0', packs: [
@@ -2835,7 +2807,7 @@ function languageApp() {
 }
 test('language card shows Japanese standard, installed packs, version mismatch and escaped names', () => {
   const a = languageApp(), html = a.element('#main').innerHTML;
-  assert.match(html, /<h2>言語<\/h2>/); assert.match(html, /value="ja" selected>日本語（標準）/);
+  assert.match(html, /<h3>言語<\/h3>/); assert.match(html, /value="ja" selected>日本語（標準）/);
   assert.match(html, /繁體中文 &lt;img&gt;/); assert.doesNotMatch(html, /繁體中文 <img>/);
   assert.match(html, /v4.107.1 で確認/); assert.match(html, /一部が日本語/);
   assert.match(html, /data-language="remove" data-pack-id="fr-FR"/);
@@ -2990,8 +2962,8 @@ test('初期AI設定カードの即保存・失敗戻し・入力優先・利用
   a.context.api = async (route, body) => { calls.push({ route, body: JSON.parse(JSON.stringify(body)) }); return { initialPick: body }; };
   a.context.renderSettings();
   const html = a.element('#main').innerHTML;
-  assert.match(html, /data-tab="basic"><h2>新しく始めるときのAI/);
-  assert.match(html, /data-tab="ai"><h2>選ぶ欄に出すモデル/);
+  assert.match(html, /<section class="pref-section" data-tab="basic">(?:(?!<\/section>)[\s\S])*<h3>新しく始めるときのAI<\/h3>/);
+  assert.match(html, /data-tab="ai"><h2 class="pref-caption">選ぶ欄に出すモデル/);
   const card = a.context.initialPickHtml();
   assert.doesNotMatch(card, /Agy|ChatGPT|discord/);
   const fresh = a.context.quickDraft(data.projects[0]); assert.equal(fresh.ai, 'codex');
@@ -3458,7 +3430,7 @@ test('旧Dot選択を残した画面からは送信せず、入力を保持す�
   vm.runInContext('state='+JSON.stringify(s)+';view={kind:"work",project:"p",task:"t"}',a.context);
   a.element('#chat-ai').value='dot|inbox';a.element('#chat-in').value='残す依頼';a.element('#chat-effort').value='高';
   let send,calls=0;a.context.bindAskAnswers=(_box,cb)=>{send=cb;};a.context.toast=()=>{};
-  a.context.api=async route=>{if(route.startsWith('/api/discussion?'))return discussionView();calls++;throw Error('must not send');};
+  a.context.api=async route=>{if(route.startsWith('/api/discussion?'))return {session:null,candidates:[],previous:null};calls++;throw Error('must not send');};
   a.context.openChat(p,t);assert.equal(await send(),false);assert.equal(calls,0);assert.equal(a.element('#chat-in').value,'残す依頼');
 });
 
@@ -4385,7 +4357,7 @@ test('省スペース：通常会話とfreetalkの設定を直接使え、AI別�
    t.freetalk=freetalk;t.owner=ai;t.model=ai==='chatgpt'?'auto':'';vm.runInContext('state='+JSON.stringify(s),a.context);
    const html=a.context.chatHtml(p,t),settings=html.match(/<div class="composer-settings">([\s\S]*?)<\/div>/)[1];
    assert.doesNotMatch(html,/chat-settings-summary|composer-settings-panel|data-work-fold="settings"/);
-   assert.match(settings,/id="chat-account-box"/);assert.match(settings,/id="chat-fast-box"/);assert.match(settings,/id="discussion-toggle"[^>]*type="button"/);
+   assert.match(settings,/id="chat-account-box"/);assert.match(settings,/id="chat-fast-box"/);if(fs.existsSync(path.join(__dirname,'../public/paid/discussion.js')))assert.match(settings,/id="discussion-toggle"[^>]*type="button"/);else assert.doesNotMatch(settings,/id="discussion-toggle"/);
    assert.equal(settings.includes('data-task-fast'),ai==='codex');
    if(ai==='codex'){assert.match(settings,/value="work" selected/);assert.match(settings,/data-task-fast[^>]*checked/);}
  }
@@ -4428,4 +4400,25 @@ test('終了保存の未解決表示は当該会話と復旧可能段階だけ�
  await cb({target:{closest:()=>button}});assert.equal(calls.length,0);
  button.dataset.token='fresh';await cb({target:{closest:()=>button}});assert.equal(calls.length,1);assert.equal(calls[0].route,'/api/chat/handoff/recover');assert.deepEqual(JSON.parse(JSON.stringify(calls[0].body)),{project:'p',task:'t',run:'run',token:'fresh'});assert.equal(button.disabled,false);
  button.disabled=true;await cb({target:{closest:()=>button}});assert.equal(calls.length,1);
+});
+
+
+test('missing discussion bundle removes its settings/actions and preserves the ordinary chat composer',()=>{
+ const a=app(),s=snapshot();delete a.context.window.HubPaidDiscussion;s.extensions={version:1,included:[],missing:['discussion'],notice:'有料部品が見つかりません：discussion'};
+ vm.runInContext('state='+JSON.stringify(s),a.context);
+ const html=a.context.chatHtml(s.projects[0],s.projects[0].tasks[0]);
+ assert.match(html,/id="chat-in"/);assert.match(html,/有料部品が見つかりません/);assert.doesNotMatch(html,/id="discussion-(?:toggle|progress|start|settings)"/);
+});
+
+
+test('missing role-review UI preserves free role settings, history and defaults and ignores forged paid actions',async()=>{
+ const a=app(),s=snapshot();delete a.context.window.HubPaidRoleReview;
+ s.extensions={version:1,included:[],missing:[],notice:''};s.roles.management={revision:'fixture',defaultSavedAt:'2026-10-10T00:00:00Z',review:null};
+ vm.runInContext('state='+JSON.stringify(s),a.context);
+ const html=a.context.roleSettingsHtml();assert.match(html,/data-role-setting="history"/);assert.match(html,/data-role-setting="save-default"/);assert.match(html,/data-role-setting="default"/);
+ assert.doesNotMatch(html,/data-role-setting="(?:review|cancel|topic)"|手動見直し|Opus 5.5|最終見直し日時/);
+ const calls=[];a.context.api=async(...args)=>calls.push(args);
+ const cb=a.documentListeners.find(x=>x.name==='click'&&String(x.cb).includes('[data-role-setting]')).cb;
+ for(const action of ['review','cancel','topic'])await cb({target:{closest:()=>({dataset:{roleSetting:action,task:'forged'}})}});
+ assert.equal(calls.length,0);
 });

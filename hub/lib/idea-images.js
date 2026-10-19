@@ -1,6 +1,6 @@
 'use strict';
 // Immutable, ledger-owned originals. Upload is independent of conversation/terminal intake.
-const fs = require('node:fs'), path = require('node:path'), { execFileSync } = require('node:child_process');
+const fs = require('node:fs'), path = require('node:path'), platform = require('./platform');
 const U = require('./idea-utils'), { noLinks } = require('./remove');
 const MAX = 20 * 1024 * 1024, COUNT = 10, TOTAL = 50 * 1024 * 1024;
 function format(bytes, name) {
@@ -46,12 +46,12 @@ function upload(ideas, project, b, bytes) {
     const staging = path.join(s.controlDir, 'image-staging', b.opId); noLinks(staging); fs.mkdirSync(staging, { recursive: true });
     let decoded, output;
     try {
-      const info = execFileSync('/usr/bin/sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', file], { encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+      const info = platform.imageInfo(file);
       const w = Number(info.match(/pixelWidth:\s*(\d+)/)?.[1]), h = Number(info.match(/pixelHeight:\s*(\d+)/)?.[1]);
       U.check(w > 0 && h > 0, 'image-decode', '画像を読み取れませんでした', 400);
       U.check(w * h <= 40000000, 'image-dimensions', '画像は4000万画素までです', 413);
       output = path.join(staging, U.uuid() + '.png');
-      execFileSync('/usr/bin/sips', ['-s', 'format', 'png', file, '--out', output], { timeout: 15000, maxBuffer: 65536, stdio: 'pipe' });
+      platform.convertImage(file, output, { timeout: 15000, maxBuffer: 65536, stdio: 'pipe' });
       decoded = safeRead(output, 160 * 1024 * 1024);
       U.check(decoded.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')), 'image-decode', '画像を読み取れませんでした', 400);
     } catch (e) { if (e.code === 'image-dimensions') throw e; throw U.fail('image-decode', '画像を読み取れません。PNGかJPEGに書き出し直して追加してください。', 400); }

@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { randomUUID } = require('crypto');
-const { execFileSync } = require('child_process');
+const platform = require('./platform');
 const IMAGE = /\.(png|jpe?g|webp|gif|heic)$/i;
 const MAX = 50 * 1024 * 1024;
 const dirOf = p => path.join(p.dir, '.ai', 'work', 'start-images');
@@ -26,7 +26,7 @@ function imageFile(p, id, preview = false) {
   return path.join(dirOf(p), preview && !/\.(png|jpe?g)$/i.test(id) ? id + '.png' : id);
 }
 function convertImage(file, output) {
-  execFileSync('/usr/bin/sips', ['-s', 'format', 'png', file, '--out', output], { timeout: 15000, stdio: 'pipe' });
+  return platform.convertImage(file, output);
 }
 function saveImage(p, name, data) {
   if (!IMAGE.test(name)) throw Error(lt('画像は png／jpg／jpeg／webp／gif／heic に対応しています'));
@@ -47,7 +47,7 @@ function saveImage(p, name, data) {
 }
 function imageFromPath(p, raw) {
   const file = fs.realpathSync(String(raw));
-  const allowed = [os.homedir(), os.tmpdir(), '/private/tmp'].filter(x => fs.existsSync(x)).map(x => fs.realpathSync(x));
+  const allowed = [os.homedir(), os.tmpdir(), '/private/tmp'].map(x => fs.realpathSync(x));
   if (!allowed.some(x => file.startsWith(x + path.sep)) || !IMAGE.test(file)) throw Error(lt('この場所の画像は追加できません'));
   const stat = fs.statSync(file);
   if (!stat.isFile() || stat.size > MAX) throw Error(lt('画像は1枚50MBまでです'));

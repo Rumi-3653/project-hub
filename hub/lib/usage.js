@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const os = require('node:os');
 const { executable } = require('./ai-tools');
 const { ResetTickets, checkTicket, validId, outcomes } = require('./reset-tickets');
+const { relevant } = require('./model-limits');
 
 const TTL = 5 * 60 * 1000;
 const COOLDOWN = 30 * 1000;
@@ -116,7 +117,7 @@ function readCli(ai, file, options = {}) {
     ['app-server','--listen','stdio://','-c','analytics.enabled=false', ...require('./launch').accountArgs(ai, options.account || 'default')];
   return new Promise((resolve, reject) => {
     let child;
-    try { const x = require('./launch').exeArgv(file, args); child = start(x.file, x.args, { stdio:['pipe','pipe','pipe'], cwd: os.tmpdir(), env: require('./launch').accountEnv(ai, options.account || 'default', options.env || process.env) }); }
+    try { child = start(file, args, { stdio:['pipe','pipe','pipe'], cwd: os.tmpdir(), env: require('./launch').accountEnv(ai, options.account || 'default', options.env || process.env) }); }
     catch { reject(error('start')); return; }
     let bytes = 0, buf = '', stopped = false, settled = false, value, failure, killTimer, consumeSent = false;
     const finish = () => {
@@ -211,6 +212,7 @@ class Usage {
     this.resetBusy = new Set();
     this.visible = new Map(); this.authCache = new Map(); this.authInflight = new Map(); this.revisions = new Map(); this.authBusy = new Map();
     this.cache = {}; this.inflight = new Map(); this.lastAttempt = new Map(); this.creditRequested = new Set();
+    this.subscriptionWindows = new Map();
   }
   key(ai, account = 'default') { return account === 'default' ? ai : ai + ':' + account; }
   revision(key) { return this.revisions.get(key) || 0; }
@@ -244,7 +246,7 @@ class Usage {
       if (revision !== this.revision(key)) return null;
       if (!['logged-in','unknown'].includes(status)) {
         if (this.cache[key] || this.inflight.has(key) || this.visible.has(key)) this.revisions.set(key, revision + 1);
-        delete this.cache[key]; this.lastAttempt.delete(key); this.visible.delete(key); return null;
+        delete this.cache[key]; this.subscriptionWindows.delete(key); this.lastAttempt.delete(key); this.visible.delete(key); return null;
       }
       const target = { ai, account, accountName: label(r.name, '既定'), file: files[ai], revision };
       this.visible.set(key, target); return target;
@@ -271,7 +273,8 @@ class Usage {
           const file = installed || this.find(ai); if (!file) throw error('missing');
           if (revision !== this.revision(key)) return;
           const data = await this.read(ai, file, { account });
-          const windows = (ai === 'codex' ? codexWindows(data) : claudeWindows(data)).filter(w => w.usedPercent !== null || w.resetsAt !== null);
+          const allWindows = ai === 'codex' ? codexWindows(data) : claudeWindows(data);
+          const windows = allWindows.filter(w => w.usedPercent !== null || w.resetsAt !== null);
           if (!windows.length) throw error('unavailable');
           const plan = providerPlan(ai, data);
           if (revision === this.revision(key)) {
@@ -280,9 +283,16 @@ class Usage {
             const creditCheck = this.creditRequested.has(key) ? creditStatus(ai, data) : null;
             this.cache[key] = { account, status: 'ok', windows, ...(plan ? { plan } : {}), ...extras,
               ...(creditCheck ? { creditCheck } : {}), fetchedAt: new Date(this.now()).toISOString(), attemptedAt, message: '' };
+            // Keep unknown windows privately: hiding an empty display row must
+            // not turn incomplete quota information into positive evidence.
+            if (ai === 'codex') this.subscriptionWindows.set(key, { cache: this.cache[key], windows: allWindows,
+              complete: !data.rateLimitsByLimitId || Object.keys(data.rateLimitsByLimitId).length <= 20 });
           }
         } catch (e) {
-          if (revision === this.revision(key)) this.cache[key] = { account, status: 'unavailable', windows: [], fetchedAt: null, attemptedAt, message: messages[e.usageCode] || messages.response };
+          if (revision === this.revision(key)) {
+            this.subscriptionWindows.delete(key);
+            this.cache[key] = { account, status: 'unavailable', windows: [], fetchedAt: null, attemptedAt, message: messages[e.usageCode] || messages.response };
+          }
         }
       })().finally(() => this.inflight.delete(key));
       this.inflight.set(key, attempt); return attempt;
@@ -308,9 +318,26 @@ class Usage {
     }
     return { availability: 'unknown', checkedAt: null, reason: cached?.status === 'ok' ? 'not-fresh' : 'unavailable' };
   }
+  subscriptionAvailable(models, account = 'default') {
+    const key = this.key('codex', account), cached = this.cache[key], proof = this.subscriptionWindows.get(key), now = this.now();
+    const fetched = Date.parse(cached?.fetchedAt), attempted = Date.parse(cached?.attemptedAt);
+    // Only fresh, unrounded contract windows for this account count as positive
+    // remaining quota. Credits/context tokens and a missing hold prove nothing.
+    if (!Array.isArray(models) || !models.length || this.inflight.has(key) || this.resetBusy.has(key) ||
+        this.accounts && !this.visible.has(key) || cached?.status !== 'ok' || cached.account !== account ||
+        proof?.cache !== cached || proof.complete !== true ||
+        !(attempted <= fetched && fetched <= now && now - attempted < TTL)) return false;
+    return models.every(model => {
+      if (typeof model !== 'string' || !model) return false;
+      const windows = proof.windows.filter(w => relevant('codex', model, w));
+      return windows.length > 0 && windows.every(w => typeof w.usedPercent === 'number' &&
+        Number.isFinite(w.usedPercent) && w.usedPercent >= 0 && w.usedPercent < 100 &&
+        (w.resetsAt === null || Date.parse(w.resetsAt) > now));
+    });
+  }
   invalidate(ai, account = 'default') {
     const k = this.key(ai, account); this.revisions.set(k, this.revision(k) + 1);
-    delete this.cache[k]; this.lastAttempt.delete(k); this.authCache.delete(k); this.authInflight.delete(k); this.visible.delete(k);
+    delete this.cache[k]; this.subscriptionWindows.delete(k); this.lastAttempt.delete(k); this.authCache.delete(k); this.authInflight.delete(k); this.visible.delete(k);
     if (ai === 'codex') this.tickets.discard(account);
   }
   async useReset(account, token, { confirmed, retry, selection = {} } = {}) {
@@ -348,7 +375,7 @@ class Usage {
       message = messages[unknown ? 'uncertain' : e.usageCode] || messages.response;
     } finally {
       this.resetBusy.delete(key);
-      if (revision === this.revision(key)) { delete this.cache[key]; this.lastAttempt.delete(key); }
+      if (revision === this.revision(key)) { delete this.cache[key]; this.subscriptionWindows.delete(key); this.lastAttempt.delete(key); }
     }
     // 確認の取得だけ。使用要求を自動で再送しない。
     const snapshot = await this.status(true, selection);

@@ -39,6 +39,11 @@ for (const spec of cases) {
       assert.ok([...text].length <= 500, `${file}: ${[...text].length} characters`);
       assert.match(text, spec.permissions);
       assert.match(text, spec.approval);
+      if (spec.language === 'ja') {
+        assert.match(text, /最新の再開要約・手順・成果/);
+        assert.match(text, /state・question・workdir は Hub が管理/);
+        assert.match(text, /分けたい時は人に提案する/);
+      }
       for (const ref of ['.ai/rules.md', 'PROJECT.md', '.ai/tasks/']) assert.ok(text.includes(ref), ref);
       for (const ref of ['.ai/rules.md', 'PROJECT.md', '.ai/tasks/_template.md']) assert.ok(fs.existsSync(path.join(project, ref)), ref);
       bodies.push(body.join('\n'));
@@ -59,6 +64,12 @@ for (const spec of cases) {
     }
     const rules = read(path.join(dir, '.ai/rules.md'));
     assert.match(rules, spec.ruleApproval);
+    if (spec.language === 'ja') {
+      assert.match(rules, /作業・会話・コピーは残る/);
+      assert.match(rules, /管理するので書き換えない/);
+      assert.match(rules, /委任の受付・確認結果・作業の経過は「## 成果」に書かず「## やったこと」に書く/);
+      assert.doesNotMatch(rules, /権限（最大・確認なし）|state を「返事待ち」にする/);
+    }
     assert.ok(rules.includes(spec.artifactHeading));
     assert.ok(rules.includes(spec.artifactFormat));
     const policy = rules.slice(rules.indexOf(spec.artifactHeading), rules.indexOf(spec.artifactFormat));

@@ -1,5 +1,5 @@
 'use strict';
-require('./lib/win-compat'); // Windows：ディレクトリの fsync（EPERM）を飛ばす。他のOSでは何もしない
+const platform = require('./lib/platform');
 const { lt, locale, config:localeConfig, configScript, activePack } = require('./lib/locale');
 const langpacks = require('./lib/langpack');
 const { loadPack } = langpacks;
@@ -25,9 +25,10 @@ langpacks.setRoot(ROOT);
 const launch = require('./lib/launch');
 const roles = require('./lib/roles');
 const roleHistory = require('./lib/role-history');
-const roleReviewRuntime = require('./lib/role-review-runtime');
 let roleReview;
-const discussionRuntime = require('./lib/discussion-runtime');
+const extensions = require('./lib/extensions').loadExtensions();
+const discussionRuntime = extensions.definition('discussion');
+const roleReviewRuntime = extensions.definition('role_review');
 let discussion;
 const specialMode = require('./public/special-mode');
 const { Sessions } = require('./lib/sessions');
@@ -72,6 +73,11 @@ const usage = new Usage({ dry: DRY, accounts, resetFile:path.join(ROOT, '_hub', 
   beforeRead: (ai, account) => accounts.available(ai, account), observe: snapshot => {
   try { limitEvidence.observe(snapshot); } catch { /* 保存失敗では直前の保持状態を維持 */ }
 } });
+// Private role-review requests cannot use paid-credit overrides. Without that
+// optional hook, ordinary conversations retain their existing limit policy.
+function roleReviewLimit(request) {
+  return roleReviewRuntime.heldLimit ? roleReviewRuntime.heldLimit(request, limitEvidence) : limitEvidence.forRequest(request);
+}
 async function refreshLimitEvidence(request) {
   verifyIntegrationAssignmentSend(request);
   if (discussionRuntime.isRequest(request.request)) { discussion.verify(request); return; }
@@ -82,16 +88,17 @@ async function refreshLimitEvidence(request) {
     return;
   }
   if (!limitRoutingEnabled()) return;
-  const target = roleReviewRuntime.heldLimit(request, limitEvidence) ? limitBackup(request) : request;
+  const target = roleReviewLimit(request) ? limitBackup(request) : request;
   if (!target || !['claude', 'codex'].includes(target.ai)) return;
   // 元担当が保持中でも、確認ONの交代先は起動前に既存クレジットを判定する。
   if (target !== request && rolesData().checkCredits[target.ai]) await usage.checkCredits(target.ai, target.account || 'default');
-  if (roleReviewRuntime.heldLimit({ ...request, ...target }, limitEvidence)) return;
+  if (roleReviewLimit({ ...request, ...target })) return;
   // 状態だけ読む（prompt/turnは送らない）。TTL/アカウント隔離はUsageの共通経路。
   await usage.status(false, { [target.ai]: target.account || 'default' });
 }
 const PUBLIC = path.join(__dirname, 'public');
-const bootModules=require('./lib/runtime-generation').preload(__filename,{optional:[path.join(__dirname,'lib/license/owner-edition')]});
+const bootModules=require('./lib/runtime-generation').preload(__filename,{optional:[path.join(__dirname,'lib/license/owner-edition'),path.join(__dirname,'paid')]});
+const extensionUI = extensions.uiSource(), extensionCSS = extensions.uiSource('style');
 const staticFiles=new StaticFiles({root:PUBLIC,live:process.env.HUB_STATIC_LIVE==='1'});
 const ROLES_FILE = path.join(ROOT, '_hub', 'roles.yaml');
 const store = new Store(ROOT);
@@ -127,7 +134,7 @@ const chats = new chat.ChatRunner({stopControl,queueGuard:o=>queueRetreat?.guard
   delegates: (p, t) => [...readLog(5000), ...readLog(5000, LOG_FILE.replace(/\.jsonl$/, '.old.jsonl'))].filter(r => r.project === p && r.task === t),
   permFor: permCmd,
   limitBackup: limitBackup,
-  capacityBackup: o => limitBackup(o, 'capacity'),
+  capacityBackup,
   limitIdentity: o => limitIdentity(rolesData(), o),
   accountFor, fastFor: codexFastFor,
   onSettled: async (o,row) => { if(o.automation){await ideaRunner.settled(o,row);return;} if(discussionRuntime.isRequest(o.request)) { await discussion?.settled(o,row); return; } if(roleReviewRuntime.isRequest(o.request)) { await roleReview?.settled(o,row); return; } integrateAuto.settled(o,row);setImmediate(()=>{
@@ -136,9 +143,9 @@ const chats = new chat.ChatRunner({stopControl,queueGuard:o=>queueRetreat?.guard
     void integrateAuto.tick();if(!o.isolatedReview)void resultsGate.trigger(o.project,o.task,{row,organized:Boolean(o.resultsOrganize)}).catch(e=>record('results-organize-error',{project:o.project,task:o.task},{error:e.message}));
   }); },
   limitHold: o => Boolean(discussionRuntime.isRequest(o.request) || integrationPolicyRequest(o)),
-  limitPreflight: o => discussionRuntime.isRequest(o.request) ? limitEvidence.active(o.account || 'default',launch.flagFor(o.ai,o.model),true) : integrationPolicyRequest(o) ? limitEvidence.active(o.account || 'default',launch.flagFor(o.ai,o.model)) : limitRoutingEnabled() || roleReviewRuntime.isRequest(o.request) ? roleReviewRuntime.heldLimit(o, limitEvidence) : null,
-  limitTarget: o => roleReviewRuntime.heldLimit(o, limitEvidence),
-  beforeQueued: async o => { void license.prepare(); return refreshLimitEvidence(o); },
+  limitPreflight: o => discussionRuntime.isRequest(o.request) ? limitEvidence.active(o.account || 'default',launch.flagFor(o.ai,o.model),true) : integrationPolicyRequest(o) ? limitEvidence.active(o.account || 'default',launch.flagFor(o.ai,o.model)) : limitRoutingEnabled() || roleReviewRuntime.isRequest(o.request) ? roleReviewLimit(o) : null,
+  limitTarget: o => roleReviewLimit(o),
+  beforeQueued: async o => { void license.prepare(); await refreshLimitEvidence(o); assertCapacityHandoff(o); },
   startBarrier:o=>{stopControl.assert(o,o.stopTicket);executionGate.assert({dir:o.dir||store.readProject(o.project)?.dir,owner:'chat:'+o.project+':'+o.task});if(o.automation&&o.automation.kind!=='idea')throw Error('不明な自動実行は開始しません');},
   beforeSend:o=>o.automation?ideaDispatch.verify(o):verifyIntegrationReviewSend(o),
   beforeAdopt:o=>{if(o.automation)ideaDispatch.verify(o,{adoption:true});},
@@ -383,19 +390,46 @@ function delegateTerminalError(project, task) {
   return lt`この作業のターミナルで AI（${names}）が動いているため、委任できません。人に「この作業の作業画面で［ターミナル］に切り替え、${names}の欄の［停止］を押してから、会話でもう一度頼んでください」と案内してください。会話画面の［停止］は押させない（待っている指示も取り消されます）。裏で別の CLI を起動したり、この依頼を繰り返し送ったりしないでください。`;
 }
 
+function capacityOptions() {
+  return { models: aiTools.catalog().codex?.models || [], available: (models, account) =>
+    usage.subscriptionAvailable(models, account) && !models.some(model => limitEvidence.active(account, model, true)) };
+}
+async function capacityBackup(o) {
+  const account = o.account || 'default';
+  if (accountFor(o.project, o.task, 'codex') !== account ||
+      !capacityRoute(rolesData(), o, { ...capacityOptions(), available: () => true })) return null;
+  // Fixed contract-status request only, after the failed CLI has exited. A long
+  // turn's old cache must not be mistaken for remaining subscription quota.
+  await usage.status(true, { codex: account }, { only: { ai: 'codex', account } });
+  return limitBackup(o, 'capacity');
+}
+function assertCapacityHandoff(o) {
+  const link = o.limitSwitch;
+  if (link?.reason !== 'capacity') return;
+  const account = o.account || 'default';
+  const source = { ...o, ai: link.sourceAI, model: link.sourceModel, effort: link.sourceEffort, limitSwitch: null };
+  const options = capacityOptions(), target = capacityRoute(rolesData(), source, options);
+  const current = launch.flagFor(o.ai, o.model), row = options.models.find(m => m.id === current);
+  if (o.ai !== 'codex' || account !== (link.sourceAccount || 'default') ||
+      accountFor(o.project, o.task, 'codex') !== account || target?.requiredModel !== current ||
+      o.requiredModel !== current || Array.isArray(row?.efforts) && !row.efforts.includes(o.effort)) {
+    throw Error('モデル混雑の自動再開条件（契約枠の残量・同じアカウント・最新のSol／Astra候補）を確認できないため、待機します');
+  }
+}
 function limitBackup(o, reason) {
   try { license.require(['limit_switch']); } catch (e) { if (e.code === 'license_held') return null; throw e; }
   if(discussionRuntime.isRequest(o.request)||integrationPolicyRequest(o))return null;
   const p = o.project && store.readProject(o.project), t = p?.tasks.find(t => t.id === o.task);
   const role = o.role || t?.role || '';
   if (!['claude', 'codex'].includes(o.ai)) return null;
-  const backup = (reason === 'capacity' ? capacityRoute : limitRoute)(rolesData(), { ...o, role });
+  if (reason === 'capacity' && accountFor(o.project, o.task, 'codex') !== (o.account || 'default')) return null;
+  const backup = reason === 'capacity' ? capacityRoute(rolesData(), { ...o, role }, capacityOptions()) : limitRoute(rolesData(), { ...o, role });
   if (modelView.special().enabled && backup?.ai !== o.ai) return null;
   return backup && { ...backup, account: accountFor(o.project, o.task, backup.ai), perm: permCmd(backup.ai) };
 }
 // ChatGPT アプリ・Codex の設定ファイル（~/.codex/config.toml）に、Hub の MCP が登録されているか
 const CODEX_CONFIG = () => path.join(process.env.HUB_AI_HOME || os.homedir(), '.codex', 'config.toml');
-const MCP_BLOCK = () => lt`\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js').split(path.sep).join('/')}"]\n`;
+const MCP_BLOCK = () => lt`\n# Project Hub の道具（作業を読む・結果を書き戻す）。Hub を起動しておくこと\n[mcp_servers.project-hub]\ncommand = "node"\nargs = ["${path.join(__dirname, 'mcp.js')}"]\n`;
 function codexMcpStatus() {
   let text = '';
   try { text = fs.readFileSync(CODEX_CONFIG(), 'utf8'); } catch (e) { return { registered: false, configFile: CODEX_CONFIG(), configExists: false }; }
@@ -884,7 +918,7 @@ let tsCache = { at: 0, url: '' };
 function tailscaleUrl() {
   if (Date.now() - tsCache.at < 60000) return Promise.resolve(tsCache.url);
   const { execFile } = require('child_process');
-  const bins = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale', path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Tailscale', 'tailscale.exe')];
+  const bins = platform.tailscaleCandidates();
   const tryAt = i => new Promise(done => {
     if (i >= bins.length) return done('');
     execFile(bins[i], ['status', '--json'], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
@@ -1450,18 +1484,7 @@ function documentHtml(fd, info, size) {
     if (!n) throw Error('document changed');
     read += n;
   }
-  return new Promise((resolve, reject) => {
-    const child = require('child_process').execFile('/usr/bin/textutil',
-      ['-convert', 'html', '-noload', '-nostore', '-stdout', '-encoding', 'UTF-8', '-format', info.ext.slice(1), '-stdin'],
-      { timeout: 15000, maxBuffer: 5 * 1024 * 1024 }, (error, html) => {
-        // textutilは壊れた入力でも終了0で空出力になる場合がある。
-        if (error) reject(error);
-        else if (!/<html(?:\s|>)/i.test(html)) reject(Error('invalid document output'));
-        else resolve(html);
-      });
-    child.stdin.on('error', () => {}); // 終了/時間切れ時のEPIPEは上のcallbackで扱う。
-    child.stdin.end(input);
-  });
+  return platform.convertDocument(input, info.ext.slice(1));
 }
 
 const stateOffers = new (require('./lib/state-offers').StateOffers)({transfer:taskTransfer,removal,baseOf});
@@ -1564,7 +1587,7 @@ async function apiRequest(req, res, url) {
     return send(res,200,{...roleHistory.summary(current),history:current.journal.history,defaults:current.journal.defaults});
   }
   if (req.method === 'GET' && url.pathname === '/api/task/integrate/wait') return send(res,200,{waiting:integrateAuto.waiting(Object.fromEntries(url.searchParams))});
-  if (req.method === 'GET' && url.pathname === '/api/discussion') { const project=url.searchParams.get('project'), task=url.searchParams.get('task'); return send(res,200,discussion.view(project,task)); }
+  if (req.method === 'GET' && url.pathname === '/api/discussion') return extensions.route('discussion',req,res,url,null,send);
   if (req.method === 'GET' && url.pathname === '/api/state') {
     const t0 = Date.now();
     res.on('finish', () => { const ms = Date.now() - t0; if (ms > 2000) console.log(lt`[遅い] 一覧を作るのに ${ms}ms かかりました（台帳のファイルの読み込みが遅い可能性）`); });
@@ -1579,7 +1602,7 @@ async function apiRequest(req, res, url) {
     // and still validate current receipts before sending, starting or restarting.
     const handoffErrors = chats.handoffErrors({display:true}), restartWaiting = restartBlockers(handoffErrors);
     return {
-      stopControl:stopControl.view(), root: ROOT, hubInstance: HUB_INSTANCE, roles: roleData, version: VERSION, latest: readVersion(), runtime:{version:VERSION,bootHead:BOOT_HEAD}, saved:{version:readVersion(),mainHead:null}, license: license.status(), appUpdate: appUpdate.status(), appShell: appShell.status(req.headers['user-agent']), freetalk: freetalkStatus(),
+      extensions:extensions.state(), stopControl:stopControl.view(), root: ROOT, hubInstance: HUB_INSTANCE, roles: roleData, version: VERSION, latest: readVersion(), runtime:{version:VERSION,bootHead:BOOT_HEAD}, saved:{version:readVersion(),mainHead:null}, license: license.status(), appUpdate: appUpdate.status(), appShell: appShell.status(req.headers['user-agent']), freetalk: freetalkStatus(),
       onboarding: onboarding.state(),
       aiCliUpdate: { available: Object.values(aiUpdates.status().tools).some(t => t.eligible && t.installed && t.updateCheck?.ok && t.updateCheck.available === true && t.updateCheck.applicable === true), busyCount: aiTools.busy() },
       updateBlocked: Boolean(updateBusy(handoffErrors)), restart: restartControl.status(restartWaiting), restartBusy:restartWaiting.length>0, restartWaiting, chatHandoffErrors:handoffErrors,
@@ -2112,6 +2135,13 @@ async function apiRequest(req, res, url) {
     record('remote', {}, { enabled: remote.enabled(), passcode: b.passcode !== undefined });
     return send(res, 200, remote.status());
   }
+  if (url.pathname === '/api/license/intro-checkout') {
+    try {
+      const checkout = await license.introCheckout();
+      await launch.openUrl(checkout.url, DRY);
+      return send(res, 200, { ok: true }); // Do not expose/log the bearer Checkout URL.
+    } catch { return send(res, 400, { error: lt('体験価格の購入画面を開けません。支払い状況を確認してください'), code: 'intro_checkout' }); }
+  }
   if (url.pathname === '/api/license/activate') {
     try { return send(res, 200, await license.activate(b.code)); }
     catch (e) { return send(res, e.status || 400, { error: e.message, code: e.code || 'license_activation' }); }
@@ -2125,8 +2155,6 @@ async function apiRequest(req, res, url) {
       if (url.pathname === '/api/accounts') { result.account = accounts.add(ai, b.name); usage.invalidate(ai, result.account.id); }
       else if (url.pathname === '/api/accounts/terminal') {
         if (!['login', 'logout'].includes(b.action)) return send(res, 400, { error: 'invalid action' });
-        // Windows：tty で窓を探せないので、開いている bash の窓で操作してもらう
-        if (process.platform === 'win32' && !DRY) return send(res, 409, { error: lt('Windows では認証用の窓を前に出せません。開いている bash の窓で操作してください') });
         const pid = accounts.authTerminalPid(ai, id);
         if (!pid) return send(res, 409, { error: lt('認証用Terminalが見つかりません。［状態を確認］を押してください') });
         result = await launch.focusAuthTerminal(pid, DRY);
@@ -2963,14 +2991,11 @@ async function apiRequest(req, res, url) {
     if (queueActions.has(chats.key(b.project, b.task))) return send(res, 409, { error: lt('待ち指示を送信中です。終わってから操作してください') });
     try{queueRetreat.guard({project:b.project,task:b.task,id:b.id,action:'change'});}catch(e){return send(res,409,{error:e.message});}
     const pending = fs.existsSync(ROLES_FILE) ? roleHistory.load(ROLES_FILE).journal.review : null;
-    if (pending?.project === b.project && pending.task === b.task && [pending.request, `limit-${pending.request}`].includes(b.id) && b.id) roleReview.cancel();
+    if (pending?.project === b.project && pending.task === b.task && [pending.request, `limit-${pending.request}`].includes(b.id) && b.id) roleReview.cancel?.();
     if (fromRemote()) record('chatunqueue', b);
     return send(res, 200, { ok: true, queue: chats.unqueue(b.project, b.task, String(b.id || '')) });
   }
-  if (url.pathname === '/api/discussion/start' || url.pathname === '/api/discussion/summary') {
-    try { license.require(['discussion']); return send(res,200,url.pathname.endsWith('/start')?discussion.start(b):discussion.manual(b)); }
-    catch(e) { return send(res,e.status || 409,{error:e.message}); }
-  }
+  if (url.pathname === '/api/discussion/start' || url.pathname === '/api/discussion/summary') return extensions.route('discussion',req,res,url,b,send);
 
 
   // 新しい版にする：本体を起動し直す（動いている AI があれば断る。止まってしまうため）
@@ -3006,18 +3031,7 @@ async function apiRequest(req, res, url) {
   // Mac のフォルダ選択の窓を出して、選んだ場所を返す
   if (url.pathname === '/api/pick-folder') {
     if (DRY) return send(res, 200, { path: '' });
-    const { execFile } = require('child_process');
-    if (process.platform === 'win32') {
-      // Windows はフォルダ選択の窓（.NET）を PowerShell から出す。出力は UTF-8 にそろえる
-      const prompt = String(b.prompt || lt('フォルダを選んでください')).replace(/[\r\n'"`$]/g, '');
-      const script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = '${prompt}'; $d.ShowNewFolderButton = $true; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }`;
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script], { timeout: 10 * 60 * 1000, windowsHide: true }, (err, out) => send(res, 200, { path: err ? '' : String(out).trim() }));
-      return undefined;
-    }
-    execFile('osascript', ['-e', `POSIX path of (choose folder with prompt "${String(b.prompt || lt('フォルダを選んでください')).replace(/["\\]/g, '')}")`], (err, out) => {
-      if (err) return send(res, 200, { path: '' }); // 取り消した時
-      return send(res, 200, { path: String(out).trim().replace(/\/$/, '') });
-    });
+    platform.pickFolder(b.prompt, selected => send(res, 200, { path: selected }));
     return undefined;
   }
   // アプリの窓に落としたファイル（場所が分かる物）を渡す：作業ファイルに記録し、AI の入力欄に場所を入れる
@@ -3173,19 +3187,7 @@ async function apiRequest(req, res, url) {
     const r = roles.write(ROLES_FILE, b.roles, b.checkCredits, false, b.preferCredits, { expectedRevision: b.expectedRevision });
     return r.ok ? send(res, 200, r.data) : send(res, r.status || 400, { error: r.errors.join(' / ') });
   }
-  if (url.pathname === '/api/roles/review') {
-    try { license.require(['role_review']); } catch(e) { return send(res,e.status || 403,{error:e.message}); }
-    return send(res, 200, roleReview.start(b));
-  }
-  if (url.pathname === '/api/roles/review/cancel') {
-    const pending = roleHistory.load(ROLES_FILE).journal.review;
-    const out = roleReview.cancel();
-    if (pending) {
-      const run = chats.busy(pending.project,pending.task), request = run?.userRow?.request || run?.request;
-      if ([pending.request, `limit-${pending.request}`].includes(request) && request) chats.stop(pending.project,pending.task);
-    }
-    return send(res, 200, out);
-  }
+  if (url.pathname === '/api/roles/review' || url.pathname === '/api/roles/review/cancel') return extensions.route('role_review', req, res, url, b, send);
   if (url.pathname === '/api/roles/default') {
     const r = roles.saveDefault(ROLES_FILE, b.roles, b.expectedRevision);
     return r.ok ? send(res, 200, r.data) : send(res, r.status || 400, { error: r.errors.join(' / ') });
@@ -3207,6 +3209,8 @@ async function apiRequest(req, res, url) {
 
 
 function serveStatic(req, res, pathname) {
+  if(pathname==='/extensions-ui.css')return send(res,200,extensionCSS,TYPES['.css']);
+  if(pathname==='/extensions-ui.js')return send(res,200,extensionUI,TYPES['.js']);
   if(pathname==='/locale-config.js')return send(res,200,configScript(),TYPES['.js']);
   const rel = pathname === '/' ? 'index.html' : pathname.slice(1);
   const file = path.normalize(path.join(PUBLIC, rel));
@@ -3318,7 +3322,7 @@ const server = http.createServer(async (req, res) => {
         await readBody(req);
         const target = move.status().path;
         if (!target || path.dirname(target) !== move.inbox || !fs.existsSync(target)) return send(res, 409, { error: '作成済みの引っ越しデータがありません' });
-        if (process.platform === 'darwin' && !DRY) require('node:child_process').execFile('/usr/bin/open', ['-R', target], () => {});
+        if (platform.name === 'darwin' && !DRY) platform.revealPath(target, false, { absolute: true }).catch(() => {});
         return send(res, 200, { ok: true });
       }
       if (req.method === 'POST' && url.pathname === '/api/move/trash') return send(res, 200, await move.trash(await readBody(req)));
@@ -3350,7 +3354,7 @@ const emergencyStop=new (require('./lib/emergency-stop').EmergencyStop)({control
   const attempt=fn=>{try{fn();}catch(e){errors.push(e.message);}};
   const scopes=scope?[scope]:[...new Map([...emergencyStop.targets(),...store.listProjects().flatMap(p=>(p.tasks||[]).map(t=>({project:p.id,task:t.id})))].map(o=>[JSON.stringify([o.project,o.task]),o])).values()];
   for(const o of scopes){attempt(()=>holdStoppedQueue(o.project,o.task));attempt(()=>chats.onStop?.(o.project,o.task));attempt(()=>discussion.stop(o.project,o.task));attempt(()=>integrateAuto.stop(o.project,o.task));}
-  attempt(()=>{const p=fs.existsSync(ROLES_FILE)?roleHistory.load(ROLES_FILE).journal.review:null;if(p&&(!scope||p.project===scope.project&&p.task===scope.task))roleReview.cancel();});
+  attempt(()=>{const p=fs.existsSync(ROLES_FILE)?roleHistory.load(ROLES_FILE).journal.review:null;if(p&&(!scope||p.project===scope.project&&p.task===scope.task))roleReview.cancel?.();});
 }});
 
 emergencyRestart=new (require('./lib/emergency-restart').EmergencyRestart)({control:stopControl,stop:()=>emergencyStop.stop(),restart:restartControl,boot:HUB_INSTANCE,
@@ -3367,7 +3371,7 @@ function safeShutdown(){
 }
 function shutdown() { try{if(safeShutdown())stopControl.cleanExit();}catch{/* Uncertain ownership/save keeps the boot barrier armed. */}webchat.shutdown(); aiUpdates.stop(); appUpdate.stop(); procwatch.stop(); sessions.stopAll(); chats.stopAll(); server.close(); process.exit(0); }
 
-roleReview = roleReviewRuntime.createReview({ file:ROLES_FILE, store, chats, tools:aiTools, accounts, usage, limits:limitEvidence, accountFor,
+roleReview = extensions.create('role_review', { license:Object.freeze({require:features=>license.require(features)}), file:ROLES_FILE, store, chats, tools:aiTools, accounts, usage, limits:limitEvidence, accountFor,
   createTopic:()=>freetalk.createTopic(specialMode.pick(modelView.special(), rolesData(), '司令塔') || modelView.initial(), {title:lt('役割分担の見直し')}),
   applyCatalog:applyModelCatalog, migrated:task=>freetalkHistory.state(task).migrated,
   workDir:isolatedReviewDir, ended:chatEnded,
@@ -3375,7 +3379,7 @@ roleReview = roleReviewRuntime.createReview({ file:ROLES_FILE, store, chats, too
   notice:(message,last)=>record('role-review',{}, {message,status:last?.status}) });
 if(fs.existsSync(ROLES_FILE)) roleReview.recover();
 const roleReviewTimer=setInterval(()=>{if(fs.existsSync(ROLES_FILE))void roleReview.tick().catch(e=>record('role-review-error',{}, {error:e.message}));},1500);roleReviewTimer.unref();
-discussion = discussionRuntime.createDiscussion({ file:path.join(ROOT,'_hub','discussions.json'), store, chats, tools:aiTools, accounts, usage, limits:limitEvidence, accountFor, modelError,
+discussion = extensions.create('discussion', { license:Object.freeze({require:features=>license.require(features)}), file:path.join(ROOT,'_hub','discussions.json'), store, chats, tools:aiTools, accounts, usage, limits:limitEvidence, accountFor, modelError,
   notice:message=>record('discussion-error',{}, {error:message}),
   migrated:(p,t)=>p.kind==='freetalk'&&freetalkHistory.state(t.id).migrated, workDir:isolatedReviewDir, ended:chatEnded,
   blocked:p=>Boolean(stopControl.held(p)||restartControl?.committed||appUpdate.applying()||delegateTerminalError(p.project,p.task)||webchatActive(p.project,p.task)) });
@@ -3388,6 +3392,22 @@ ideaRunner=new (require('./lib/idea-runner').IdeaRunner)({ideas,lane:ideaLane,ga
 Object.assign(ideaAPI,{runner:ideaRunner,lane:ideaLane,release:ideaRelease,available:()=>true,wake:p=>{if(!DRY)ideaRunner.wake(p);},authorizeRecord:(req,b)=>ideaDispatch.authorizeRecord(req,b)||[...chats.running.values()].some(x=>x.options?.project===b.project&&x.options?.ideaRecord?.token===req.headers['x-idea-record'])});
 ideaRunner.restore();
 for(const e of queueRetreat.restore())record('queue-retreat-recovery',e,{error:e.error});
+// Recover only unavailable features, before adoption can resume saved work.
+// Keep the existing journal/queue writers: an unconfirmed cleanup aborts boot.
+const includedExtensions=extensions.state().included;
+if(!includedExtensions.includes('role_review')&&fs.existsSync(ROLES_FILE)){
+  const pending=roleHistory.load(ROLES_FILE).journal.review;
+  if(pending){
+    if(pending.task)for(const q of chats.queue(pending.project,pending.task))if([pending.request,`limit-${pending.request}`].includes(q.id))chats.unqueue(pending.project,pending.task,q.id,true);
+    const message=lt('Hubの再起動で見直しを中断しました。設定と最終見直し日時は維持しています');
+    roleHistory.updateReview(ROLES_FILE,pending.id,j=>{j.lastReview={project:j.review.project,task:j.review.task,at:new Date().toISOString(),status:'failed',message};j.review=null;});
+    record('role-review',{}, {message,status:'failed'});
+  }
+}
+if(!includedExtensions.includes('discussion'))for(const p of store.listProjects())for(const t of p.tasks){
+  const queue=chats.queue(p.id,t.id),remaining=queue.filter(q=>!/^(?:limit-)*discussion-/.test(q.id));
+  if(remaining.length!==queue.length)chats.setQueue(p.id,t.id,remaining,true);
+}
 chats.adopt();
 const finishedAdoptions=[...chats.running.values()].filter(r=>r.child?.dir&&require('./lib/cli-spool').strictRead(r.child.dir,'exit.json')).map(r=>r.settledP);
 const restoreReady=Promise.all(finishedAdoptions).then(()=>{ideaRunner.restored();chats.resumeDeferred();for(const p of store.listProjects())for(const t of p.tasks)try{chats.recoverContinuations(p,t);}catch(e){record('chat-continuation-error',{project:p.id,task:t.id},{error:e.message});}if(!DRY)ideaRunner.start();updateRestoreReady=true;});

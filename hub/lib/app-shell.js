@@ -3,15 +3,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { execFile, execFileSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
+const platforms = require('./platform');
 const { lt } = require('./locale');
 
 class AppShell {
-  constructor({ hub, env = process.env, dry = false, readPlist, run } = {}) {
+  constructor({ hub, env = process.env, dry = false, readPlist, run, platform = platforms } = {}) {
+    this.platform = platform;
     this.hub = hub; this.env = env; this.dry = dry; this.rebuilding = false;
     this.app = env.HUB_UPDATE_APP || path.join(os.homedir(), 'Applications', 'Project Hub.app');
     try { this.hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(hub, 'app/window.swift'))).digest('hex'); } catch { this.hash = ''; }
-    this.readPlist = readPlist || (file => JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', file], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })));
+    this.readPlist = readPlist || (file => this.platform.appUpdater.readPlist(file));
     this.run = run || ((file, args, options) => new Promise((resolve, reject) => execFile(file, args, options, error => error ? reject(Error(lt('アプリを作り直せませんでした。今のアプリは保持しています'))) : resolve())));
   }
   status(userAgent = '') {
@@ -32,7 +34,7 @@ class AppShell {
     this.rebuilding = true;
     try {
       const bundled = this.hub === path.join(this.app, 'Contents/Resources/runtime/hub');
-      await this.run('/bin/bash', [path.join(this.hub, 'app/build-app.sh')], { cwd: this.hub, env: { ...this.env, HUB_APP_DIR: path.dirname(this.app), HUB_NO_DESKTOP_LINK: '1', ...(bundled ? { HUB_BUNDLE_RUNTIME: '1' } : {}) }, timeout: 600000, maxBuffer: 1024 * 1024 });
+      await this.platform.appUpdater.buildShell(this.hub, { cwd: this.hub, env: { ...this.env, HUB_APP_DIR: path.dirname(this.app), HUB_NO_DESKTOP_LINK: '1', ...(bundled ? { HUB_BUNDLE_RUNTIME: '1' } : {}) }, timeout: 600000, maxBuffer: 1024 * 1024 }, this.run.bind(this));
       this.plistKey = null;
       if (this.status().stale) throw Error(lt('作り直したアプリを確認できませんでした'));
       return { ok: true, message: lt('アプリを終了して開き直してください') };

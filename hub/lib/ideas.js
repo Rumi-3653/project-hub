@@ -1,6 +1,6 @@
 'use strict';
+const platform = require('./platform');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
-const { execFileSync } = require('node:child_process');
 const safe = require('./safe-file'), scope = require('./resource-scope');
 const U = require('./idea-utils'), projection = require('./idea-projection'), images = require('./idea-images');
 const order = require('./idea-order');
@@ -9,7 +9,7 @@ const CATEGORIES = ['note', 'bug', 'improve', 'feature', 'research'];
 function canUnbuild(d, i) { return ['queued', 'blocked'].includes(i.status) && !i.implementation && !Object.values(d.runs).some(r => !r.closed && !['not-sent', 'cancelled'].includes(r.delivery) && r.targets?.some(t => t.itemId === i.id)); }
 function category(value) { if (value === 'uncategorized') return 'note'; U.check(CATEGORIES.includes(value), 'category', '種類を選び直してください', 400); return value; }
 const itemCategory = i => category(i.category || 'note');
-function birth(pid) { try { return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' }).trim(); } catch { return ''; } }
+const birth = pid => platform.processBirth(pid);
 function initial(uid) {
   return { schema: 2, projectUid: uid, rev: 0, settings: { rev: 1, lane: null, auto: { enabled: false, generation: 1 }, manualPaused: false, stopGeneration: 1, grant: { develop: true, localVerify: true, merge: false, restart: false, network: false }, retryPolicy: { maxRepairRuns: 3, sameFailureNoProgress: 2 }, reviewPolicy: { maxUnreviewedItems: 5 }, testProfile: null }, items: {}, runs: {}, reviews: {}, releases: {}, receipts: {}, evidence: {}, observed: { state: 'idle' } };
 }
@@ -48,7 +48,7 @@ class Ideas {
   }
   unlock(file) { if (!this.locks.has(file)) return; const o = U.json(file, this.io); if (o?.generation === this.owner.generation) { this.io.unlinkSync(file); this.atomicDirectory(file); } this.locks.delete(file); }
   close() { for (const f of [...this.locks.keys()]) this.unlock(f); }
-  atomicDirectory(file) { const fd = this.io.openSync(path.dirname(file), 'r'); try { this.io.fsyncSync(fd); } finally { this.io.closeSync(fd); } }
+  atomicDirectory(file) { platform.persistence.syncDirectory(path.dirname(file), this.io); }
   readRegistry() {
     try { const r = U.json(this.registryFile, this.io); if (!r) return { schema: 1, projects: {} }; U.check(r.schema === 1 && r.projects && !Array.isArray(r.projects), 'registry', '台帳の保存先を照合中です', 503); return r; }
     catch (e) { throw U.fail('registry', '台帳の保存先を復旧する必要があります：' + e.message, 503, 'unknown'); }
@@ -85,7 +85,7 @@ class Ideas {
     this.atomic.recoverAtomic(file, candidate); this.syncFile(file); this.atomicDirectory(file);
     U.check(U.hash(this.io.readFileSync(file)) === pending.newHash, 'save-recovery', '保存結果の再照合が必要です', 503);
   }
-  syncFile(file) { const fd = this.io.openSync(file, 'r'); try { this.io.fsyncSync(fd); } finally { this.io.closeSync(fd); } }
+  syncFile(file) { platform.persistence.syncFile(file, this.io); }
   writeFile(file, value, op) {
     this.outside(path.dirname(file)); this.io.mkdirSync(path.dirname(file), { recursive: true });
     this.recoverFile(file);

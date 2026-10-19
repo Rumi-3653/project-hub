@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 // An opt-in local workflow: public source only, isolated translation, verified PR.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,8 +22,8 @@ function run(file, args, options = {}) {
     const stop = () => {
       if (stopped) return;
       stopped = true;
-      try { process.platform === 'win32' ? child.kill('SIGTERM') : process.kill(-child.pid, 'SIGTERM'); } catch {}
-      killTimer = setTimeout(() => { try { process.platform === 'win32' ? child.kill('SIGKILL') : process.kill(-child.pid, 'SIGKILL'); } catch {} }, 1000);
+      try { platform.killTree(child, 'SIGTERM', { fallback: false }); } catch {}
+      killTimer = setTimeout(() => { try { platform.killTree(child, 'SIGKILL', { fallback: false }); } catch {} }, 1000);
     };
     const timer = setTimeout(stop, options.timeout || 120000);
     const collect = (kind, chunk) => {

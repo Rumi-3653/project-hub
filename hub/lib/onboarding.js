@@ -4,7 +4,7 @@ const { lt } = require('./locale');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
-const { AIS, childEnv, exeArgv } = require('./launch');
+const { AIS, childEnv } = require('./launch');
 const STEPS = ['ai', 'cli', 'check', 'first'];
 const STATUSES = ['in-progress', 'skipped', 'done'];
 function invalid() { return Object.assign(Error(lt('はじめの設定の指定が正しくありません')), { status: 400 }); }
@@ -18,8 +18,7 @@ function validate(body) {
 }
 function runStatus(file, args, timeout) {
   return new Promise(resolve => {
-    const x = exeArgv(file, args);
-    execFile(x.file, x.args, { timeout, maxBuffer: 64 * 1024, env: childEnv(path.basename(file) === 'grok' ? 'grok' : '', process.env) }, (error, stdout, stderr) => {
+    execFile(file, args, { timeout, maxBuffer: 64 * 1024, env: childEnv(path.basename(file) === 'grok' ? 'grok' : '', process.env) }, (error, stdout, stderr) => {
       resolve({ code: error ? error.code : 0, failed: Boolean(error && (error.killed || typeof error.code !== 'number')),
         text: String(stdout || '') + '\n' + String(stderr || ''), stdout: String(stdout || '') });
     });

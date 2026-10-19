@@ -1,7 +1,7 @@
 'use strict';
+const platform = require('./platform');
 // Portable data only. Never load a module, hook, account or device credential from a bundle.
 const fs = require('node:fs');
-require('./win-compat');
 const fsp = fs.promises;
 const path = require('node:path');
 const os = require('node:os');
@@ -60,8 +60,7 @@ async function atomic(file, value) {
   const h = await fsp.open(tmp, 'wx', 0o600);
   try { await h.writeFile(JSON.stringify(value, null, 2) + '\n'); await h.sync(); } finally { await h.close(); }
   await fsp.rename(tmp, file);
-  // Windows はディレクトリを fsync できない（EPERM）。NTFS が作成・改名を保持する
-  if (process.platform !== 'win32') { const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); } }
+  const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); }
 }
 async function copyFile(from, to, expected) {
   const input = await fsp.open(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -346,7 +345,7 @@ class Move {
         check(fs.statSync(parent).dev === fs.statSync(stage).dev, '移す先が別のディスクです。場所を確認してください');
         if (exists(map.to)) {
           check(['workspace', 'freetalk'].includes(map.id), '読み込み先にデータが増えました');
-          const backup = seed ? path.join(this.home, '.Trash', path.basename(map.to) + '-' + id) : map.to + '-退避-' + id;
+          const backup = seed ? path.join(platform.trashDir(this.home), path.basename(map.to) + '-' + id) : map.to + '-退避-' + id;
           safeParents(path.dirname(backup), this.home); ops.push({ from: map.to, to: backup, kind: 'backup', done: false });
         }
         ops.push({ from: path.join(stage, map.id), to: map.to, kind: 'install', done: false });
@@ -422,7 +421,7 @@ class Move {
     check(j.format === FORMAT && /^[a-f0-9-]{36}$/.test(j.id) && j.stage === path.join(this.home, 'Documents/.ProjectHub-move-' + j.id) && /^[^/\\]+\.hubmove$/.test(j.bundle) && Array.isArray(j.maps) && Array.isArray(j.ops), '復旧記録が不正です');
     for (const m of j.maps) check(/^(workspace|freetalk|ext-[1-9][0-9]*)$/.test(m.id) && portableRoot(this.home, m.to) && (m.id !== 'workspace' || m.to === this.root) && (m.id !== 'freetalk' || m.to === this.freetalk), '復旧先が不正です');
     for (const op of j.ops) {
-      check(op.kind === 'local-license' ? op.from === path.join(this.root, '_hub/license') && op.to === path.join(j.stage, 'workspace/_hub/license') : j.maps.some(m => op.kind === 'install' ? op.from === path.join(j.stage, m.id) && op.to === m.to : op.kind === 'backup' && ['workspace', 'freetalk'].includes(m.id) && op.from === m.to && (op.to === m.to + '-退避-' + j.id || op.to === path.join(this.home, '.Trash', path.basename(m.to) + '-' + j.id))), '復旧の操作が不正です');
+      check(op.kind === 'local-license' ? op.from === path.join(this.root, '_hub/license') && op.to === path.join(j.stage, 'workspace/_hub/license') : j.maps.some(m => op.kind === 'install' ? op.from === path.join(j.stage, m.id) && op.to === m.to : op.kind === 'backup' && ['workspace', 'freetalk'].includes(m.id) && op.from === m.to && (op.to === m.to + '-退避-' + j.id || op.to === path.join(platform.trashDir(this.home), path.basename(m.to) + '-' + j.id))), '復旧の操作が不正です');
       safeParents(path.dirname(op.from), this.home); safeParents(path.dirname(op.to), this.home);
     }
   }
@@ -452,7 +451,7 @@ class Move {
     check(!this.running && !this.busy() && confirm === true && /^[^/\\]+\.hubmove$/.test(bundle), '読み込み済みのデータを確認してください');
     const from = path.join(this.inbox, bundle);
     safeParents(from, this.home); check(regular(path.join(from, 'imported.json')), '読み込み済みのデータではありません');
-    const to = path.join(this.home, '.Trash', bundle + '-' + randomUUID()); safeParents(path.dirname(to), this.home);
+    const to = path.join(platform.trashDir(this.home), bundle + '-' + randomUUID()); safeParents(path.dirname(to), this.home);
     await fsp.mkdir(path.dirname(to), { recursive: true, mode: 0o700 }); await fsp.rename(from, to);
     this.state = { mode: 'none', notice: '引っ越し用フォルダをゴミ箱へ移しました' }; return this.status();
   }

@@ -1,10 +1,10 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 // 中身の無い作業・子プロジェクトを探して、ゴミ箱へまとめて移す（AI が勝手に作った物の片付け）
 // 中身が無い＝Hub の会話が空・作業用コピーが無い・動いていない。やったことに記録がある物は候補に出すが、最初は選ばない
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const chat = require('./chat');
 
 const talked = (pdir, task) => chat.read(pdir, task).some(r => (r.role === 'user' || r.role === 'assistant') && r.text);
@@ -28,7 +28,7 @@ function scan(store, busy) {
 }
 
 // items: [{project, task}]（task 無し＝子プロジェクトごと）。もう一度確かめてから移す
-function trash(store, busy, items, bin = process.env.HUB_TRASH || path.join(os.homedir(), '.Trash')) {
+function trash(store, busy, items, bin = process.env.HUB_TRASH || platform.trashDir()) {
   const now = scan(store, busy);
   const dest = path.join(bin, lt`ProjectHub 片付け ${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`);
   const move = (src, project) => { if (!fs.existsSync(src)) return; const d = path.join(dest, project); fs.mkdirSync(d, { recursive: true }); let to = path.join(d, path.basename(src)); if (fs.existsSync(to)) to += '-' + Date.now(); fs.renameSync(src, to); };
@@ -47,7 +47,7 @@ function trash(store, busy, items, bin = process.env.HUB_TRASH || path.join(os.h
 }
 
 // 作業1つ（作業ファイルと会話）をゴミ箱へ。子作業を親に取り込んだ後の片付けに使う
-function trashTask(store, projectId, taskId, bin = process.env.HUB_TRASH || path.join(os.homedir(), '.Trash')) {
+function trashTask(store, projectId, taskId, bin = process.env.HUB_TRASH || platform.trashDir()) {
   const p = store.readProject(projectId); if (!p) return '';
   if (p.kind === 'freetalk') throw Error(require('./freetalk').PROTECTED);
   const dest = path.join(bin, lt`ProjectHub 片付け ${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`, p.id);

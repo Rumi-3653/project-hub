@@ -1,10 +1,10 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 // Git の出し入れ：作業ごとの作業用コピー（worktree）を作る・本体に取り込む・片付ける
 // Git の無いフォルダは、最初に保存を始める（作業用コピーは作らない）
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { createHash } = require('node:crypto');
 const { execFileSync, execFile } = require('child_process');
 
@@ -216,7 +216,7 @@ function toTrash(dir, trash) {
   return dest;
 }
 function trashPath(dir, trash) {
-  const bin = trash || process.env.HUB_TRASH || path.join(os.homedir(), '.Trash');
+  const bin = trash || process.env.HUB_TRASH || platform.trashDir();
   fs.mkdirSync(bin, { recursive: true });
   let dest = path.join(bin, path.basename(dir));
   if (fs.existsSync(dest)) dest += ' ' + new Date().toISOString().replace(/[:.]/g, '-');

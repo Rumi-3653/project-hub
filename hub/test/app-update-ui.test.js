@@ -101,3 +101,11 @@ test('U20 completed App apply asks about drafts, serializes writes, preserves er
   f.run('rolesDirty=()=>true;'); assert.equal(f.context.appUpdateMayRestart(), false);
   f.run('rolesDirty=()=>false; restartDraftMaps=()=>({drafts:new Map([["task","draft"]])});'); assert.equal(f.context.appUpdateMayRestart(), false);
 });
+
+test('Windows update refusal is visible and disables both settings and manual checking', async () => {
+  const f = fixture(); f.context.api = async () => ({ ...snapshot, supported: false, unsupportedReason: 'windows', reason: 'Windowsでは未対応：アプリの自動更新はまだ使えません' });
+  await f.context.loadAppUpdate();
+  const html = f.element('#app-update-box').innerHTML;
+  assert.match(html, /Windowsでは未対応/); assert.match(html, /id="app-auto-update"[^>]*disabled/); assert.match(html, /id="app-update-check"[^>]*disabled/);
+  f.context.api = () => assert.fail('disabled update must not send'); await f.context.changeAppUpdate(true); await f.context.checkAppUpdate(); await f.context.applyAppUpdate();
+});

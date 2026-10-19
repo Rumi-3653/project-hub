@@ -225,7 +225,7 @@ test('上限：特殊モードはAI跨ぎを拒否し、OFFで設定の交代先
   assert.ok(start >= 0 && end > start, 'limitBackup extraction boundaries');
   const fn = source.slice(start, end);
   let enabled = true, allowed = true, backup = { ai: 'claude', model: 'Opus 5.5' };
-  const context = vm.createContext({ discussionRuntime: require('../lib/discussion-runtime'), license: { require: features => { assert.deepEqual([...features], ['limit_switch']); if (!allowed) throw Object.assign(Error('trial ended'), { code: 'license_held' }); } }, integrationPolicyRequest: () => false, store: { readProject: () => ({ tasks: [{ id: 't', role: 'コーディング' }] }) }, rolesData: () => data, modelView: { special: () => ({ enabled }) }, limitRoute: () => backup, accountFor: () => 'default', permCmd: () => 'fixture' }); vm.runInContext(fn, context);
+  const context = vm.createContext({ discussionRuntime: {isRequest:request=>/^discussion-/.test(String(request||''))}, license: { require: features => { assert.deepEqual([...features], ['limit_switch']); if (!allowed) throw Object.assign(Error('trial ended'), { code: 'license_held' }); } }, integrationPolicyRequest: () => false, store: { readProject: () => ({ tasks: [{ id: 't', role: 'コーディング' }] }) }, rolesData: () => data, modelView: { special: () => ({ enabled }) }, limitRoute: () => backup, accountFor: () => 'default', permCmd: () => 'fixture' }); vm.runInContext(fn, context);
   const request = { ai: 'codex', project: 'p', task: 't' }; assert.equal(context.limitBackup(request), null);
   enabled = false; assert.equal(context.limitBackup(request).ai, 'claude'); enabled = true;
   backup = { ai: 'codex', model: 'GPT-6-Luna' }; assert.equal(context.limitBackup(request).model, 'GPT-6-Luna');

@@ -1,4 +1,5 @@
 'use strict';
+const persistence = require('./platform').persistence;
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const key=(o={})=>JSON.stringify([o.project,o.task]);
 const blocked=()=>Object.assign(Error('AIは停止・保留中です。設定の［復旧］で再開を選んでください'),{code:'ai-paused'});
@@ -6,7 +7,7 @@ function validState(d){return d?.version===1&&Number.isSafeInteger(d.epoch)&&d.e
 // Durable start barrier, independent of any project/idea ledger. An unclean Hub
 // exit also pauses new starts, including when a stop could not be persisted.
 class StopControl{
-  constructor({dir,write,boot=true}={}){this.dir=dir;this.file=path.join(dir,'state.json');this.write=write||((f,d)=>{fs.mkdirSync(dir,{recursive:true,mode:0o700});const tmp=f+'.'+crypto.randomUUID(),fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(d));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,f);const dd=fs.openSync(dir,'r');try{fs.fsyncSync(dd);}finally{fs.closeSync(dd);}});this.data={version:1,epoch:0,all:false,tasks:{}};this.error='';this.results=[];this.active=false;
+  constructor({dir,write,boot=true}={}){this.dir=dir;this.file=path.join(dir,'state.json');this.write=write||((f,d)=>{fs.mkdirSync(dir,{recursive:true,mode:0o700});const tmp=f+'.'+crypto.randomUUID(),fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(d));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,f);persistence.syncDirectory(dir);});this.data={version:1,epoch:0,all:false,tasks:{}};this.error='';this.results=[];this.active=false;
     try{const d=JSON.parse(fs.readFileSync(this.file,'utf8'));if(!validState(d))throw Error('停止記録の形式を確認できません');this.data=d;this.results=d.results||[];}catch(e){if(e.code!=='ENOENT'){this.error=e.message;this.data.all=true;}}
     if(boot){try{if(!fs.existsSync(this.file))this.persist();if(fs.existsSync(path.join(dir,'armed'))||fs.existsSync(path.join(dir,'intent.json'))){this.data.all=true;this.data.epoch++;this.persist();}fs.mkdirSync(dir,{recursive:true,mode:0o700});this.write(path.join(dir,'armed'),{at:Date.now()});}catch(e){this.error=e.message;this.data.all=true;}}
   }

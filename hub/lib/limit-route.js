@@ -20,16 +20,44 @@ function limitRoute(data, o) {
   if (!launch.AIS.includes(ai) || !model || ai === o.ai && model === launch.flagFor(o.ai, o.model)) return null;
   return { ai, model: launch.modelLabel(ai, model), requiredModel: model, requireModel: true, role: row.name, limitSlot, effort: slot.effort || '高' };
 }
-// Model capacity is not a subscription limit. Reuse only the explicitly saved
-// role destination, without recording a limit or changing the default role.
-function capacityRoute(data, o) {
-  if (o.ai !== 'codex' || o.limitSwitch || o.automation || o.discussionTurn || o.discussion ||
+// Only Sol -> Astra may return once. The returned Sol cannot start another
+// capacity handoff, so a busy pair never loops or consumes waiting instructions.
+function capacityModel(model) {
+  const id = launch.flagFor('codex', model), match = /^gpt-(\d+(?:\.\d+)*)-(sol|astra)$/.exec(id);
+  return match ? { id, version: match[1].split('.').map(Number), family: match[2] } : null;
+}
+function capacityReturnAllowed(o) {
+  return o.limitSwitch?.reason === 'capacity' && o.ai === 'codex' &&
+    capacityModel(o.model)?.family === 'astra' && o.limitSwitch.sourceAI === 'codex' &&
+    capacityModel(o.limitSwitch.sourceModel)?.family === 'sol';
+}
+function newer(a, b) {
+  for (let i = 0; i < Math.max(a.version.length, b.version.length); i++) {
+    const diff = (b.version[i] || 0) - (a.version[i] || 0);
+    if (diff) return diff;
+  }
+  return a.id.localeCompare(b.id);
+}
+// Capacity is separate from quota routing: only the current, discovered Codex
+// Sol/Astra pair with positive subscription evidence may be used. Never guess IDs
+// or use known-but-removed models, paid credits, or absence of a quota hold.
+function capacityRoute(data, o, { models = [], available = () => false } = {}) {
+  if (data.switch?.auto !== true || o.ai !== 'codex' || o.limitSwitch && !capacityReturnAllowed(o) || o.automation || o.discussionTurn || o.discussion ||
       o.readOnly || o.freshContext || o.isolatedReview || o.selectionOnly || o.integrationReviewRequest ||
       o.integrationAssignment || o.limitPolicy || o.resultsOrganize || o.resultsRecoveryHash ||
       /\[(?:integration-auto|idea-run):/.test(o.text || '')) return null;
-  const target = limitRoute(data, o);
-  const flag = target && launch.flagFor(target.ai, target.model);
-  return target && (target.ai === 'claude' && flag === 'claude-opus-5-5' ||
-    target.ai === 'codex' && flag === 'gpt-6-astra') ? target : null;
+  const source = capacityModel(o.model);
+  if (!source) return null;
+  const candidates = models.map(row => ({ ...capacityModel(row.id), row }))
+    .filter(m => m.id && m.id === m.row.id && m.family !== source.family).sort(newer);
+  const target = candidates[0];
+  if (!target || available([source.id, target.id], o.account || 'default') !== true) return null;
+  const row = (data.roles || []).find(r => r.name === o.role);
+  const limitSlot = ['main', 'backup'].find(key => row?.[key]?.ai === 'codex' &&
+    capacityModel(row[key].model)?.family === target.family);
+  const effort = row?.[limitSlot]?.effort || o.effort || '高';
+  if (Array.isArray(target.row.efforts) && !target.row.efforts.includes(effort)) return null;
+  return { ai: 'codex', model: launch.modelLabel('codex', target.id), requiredModel: target.id,
+    requireModel: true, role: o.role, ...(limitSlot ? { limitSlot } : {}), effort };
 }
-module.exports = { limitRoute, limitIdentity, capacityRoute };
+module.exports = { limitRoute, limitIdentity, capacityRoute, capacityReturnAllowed };

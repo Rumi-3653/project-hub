@@ -2,6 +2,31 @@
 process.env.HUB_LANG='ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os');
 const {Store}=require('../lib/store'),{TextBudget,count,hash,taskView,summaryView,sections,LIMITS}=require('../lib/text-budget');
+for(const n of [11999,12000,12001,50000])test('成果は両端のUnicodeを見せ、省略表示込み12000字 '+n,()=>{
+ const first='先頭の最新成果😀',last='末尾の最新成果🧵',body=first+'😀'.repeat(n-count(first)-count(last))+last;
+ const raw='## 最新の再開要約\n未済：原文を保持\n## 手順\n- [ ] 実機で確認\n## 成果\n'+body;
+ const view=taskView(raw,''),shown=view.split('\n## 成果\n')[1].split('\n## メモ\n')[0];
+ assert.ok(shown.startsWith(first));assert.ok(shown.endsWith(last));assert.equal(count(shown),Math.min(n,12000));
+ assert.equal(shown.includes('（中略。全文は原文検索で確認）'),n>12000);
+ assert.equal(Buffer.from(shown,'utf8').toString('utf8'),shown);assert.ok(count(view)<=LIMITS.total);
+ if(n<=12000)assert.equal(shown,body);else assert.match(view,/表示不足：成果/);
+ assert.equal(sections(raw).find(s=>s.name==='成果').body,body);
+});
+for(const order of ['先頭','末尾'])test('新しい成果を'+order+'へ足す並びでも取得できる',()=>{
+ const latest='- ファイル：new.txt（今回の成果）',history='- ファイル：old.txt（以前の成果）\n'.repeat(1000);
+ const body=order==='先頭'?latest+'\n'+history:history+latest;
+ const view=taskView('## 成果\n'+body,'');assert.ok(view.includes(latest));assert.match(view,/hub_search_archive/);
+});
+test('表示のUnicode境界は孤立サロゲートも原文どおりに数え、次の更新を取り違えない',()=>{
+ const marker='\n（中略。全文は原文検索で確認）\n',room=12000-count(marker),head=Math.ceil(room/2);
+ for(const unit of ['a\uD800b','a\uDC00b','a😀b\uD800\uD800\uDC00']){
+   const body=unit.repeat(9000),points=Array.from(body);
+   const shown=taskView('## 成果\n'+body,'').split('\n## 成果\n')[1].split('\n## メモ\n')[0];
+   assert.equal(shown,points.slice(0,head).join('')+marker+points.slice(-(room-head)).join(''));
+ }
+ assert.ok(taskView('## 成果\n古い成果','').includes('古い成果'));
+ const updated=taskView('## 成果\n更新後の成果','');assert.ok(updated.includes('更新後の成果'));assert.ok(!updated.includes('古い成果'));
+});
 function fixture(t){const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'text-budget-')),store=new Store(root),p=store.createProject({name:'Fixture'}).project,task=store.createTask(p.id,{title:'本作業',steps:['未済の実機確認']}),file=store.taskFile(p.id,task.id),other=store.createTask(p.id,{title:'他作業'});t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const budget=new TextBudget({store});return {root,store,p,task,file,other,budget,index:path.join(p.dir,'.ai/memory/INDEX.md'),project:path.join(p.dir,'PROJECT.md')};}
 function raw(f,body){fs.writeFileSync(f.file,'---\r\nid: '+f.task.id+'\r\nstate: 実行中\r\nquestion: 保持\r\nworkdir: 保持\r\n---\r\n'+body);}
 function apply(f){const v=f.budget.preview(f.p.id,f.task.id);return f.budget.apply({...v,confirm:true});}

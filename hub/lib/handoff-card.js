@@ -8,9 +8,9 @@ function git(dir, args) {
 }
 function snapshot(dir) { if (!dir) return { head: null, status: null }; return { head: git(dir, ['rev-parse', 'HEAD']), status: git(dir, ['status', '--short']) }; }
 function clip(value, max) { const text = String(value || ''); return text.length > max ? text.slice(0, max - 1) + '…' : text; }
-function buildHandoffCard({ original, user, rows, dir, pdir, task, queue = [], delegates = [], direct = false, evidence, reason, from = 'Fable 5.1', to = 'Codex・GPT-6-Astra' }) {
+function buildHandoffCard({ original, user, sourceTurns = [], rows, dir, pdir, task, queue = [], delegates = [], direct = false, evidence, reason, from = 'Fable 5.1', to = 'Codex・GPT-6-Astra' }) {
   const intro = reason === 'capacity'
-    ? lt`【${from} のモデル混雑による自動の引き継ぎ】${from} はモデルの混雑で終了した。利用上限とは別の障害で、上限の保持や既定の担当は変更していない。Hubの設定どおり ${to} で一回だけ続ける。すでに済んだ部分と委任は繰り返さず、実物を確かめて残りを続ける。`
+    ? lt`【${from} のモデル混雑による自動の引き継ぎ】${from} はモデルの混雑で終了した。利用上限とは別の障害で、上限の保持や既定の担当は変更していない。許可された交代先 ${to} で一回だけ続ける。すでに済んだ部分と委任は繰り返さず、実物を確かめて残りを続ける。`
     : lt`【${from} の利用上限による自動の引き継ぎ】${from} は利用上限で止まった。担当は起動設定どおり ${to}。すでに済んだ部分は繰り返さず、残りを続ける。`;
   if (direct) return lt`【${from} の利用上限による自動の引き継ぎ】${from} 上限保持中（記録${evidence?.at || lt('確認済み')}・解除${evidence?.validUntil || lt('手動解除まで')}）。最初から ${to} で開始。担当は起動設定どおり ${to}。すでに済んだ部分は繰り返さず、残りを続ける。\n前の番は無い（保持中の開始）。\n\n元の依頼：\n${original}`;
   const index = rows.findIndex(r => r.role === 'user' && r.at === user?.at && r.text === user?.text);
@@ -19,7 +19,8 @@ function buildHandoffCard({ original, user, rows, dir, pdir, task, queue = [], d
   const safeHead = /^[a-f0-9]{40,64}$/i.test(user?.head || '');
   const changes = safeHead && now.head && user.head !== now.head ? git(dir, ['log', '--oneline', `${user.head}..HEAD`]) : '';
   // 新しい番は送り元IDで判定。旧記録だけは時刻で判定し、受信requestを除く。
-  const outgoing = r => !(r.id && r.id === user?.request) && (Object.hasOwn(r, 'sourceTurn') ? Boolean(user?.turn && r.sourceTurn === user.turn) : !user?.turn && r.at >= (user?.startedAt || user?.at || ''));
+  const turns = new Set([user?.turn, ...sourceTurns].filter(Boolean));
+  const outgoing = r => !(r.id && r.id === user?.request) && (Object.hasOwn(r, 'sourceTurn') ? turns.has(r.sourceTurn) : !user?.turn && r.at >= (user?.startedAt || user?.at || ''));
   const pending = queue.filter(r => outgoing(r) && !r.limitSwitch);
   const sent = delegates.filter(r => r.action === 'delegate' && outgoing(r));
   const unique = [...new Map([...pending, ...sent].map(r => [r.id || `${r.ai}:${r.model}:${r.title}`, r])).values()];

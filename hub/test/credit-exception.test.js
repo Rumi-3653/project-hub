@@ -46,37 +46,3 @@ test('weekly reset, manual ending and formal CLI rejection retain normal routing
  const g=fixture(t);g.start();g.state.endCreditException({ai:'codex',account:'default',confirm:true},g.snapshot());assert.equal(g.state.creditException().endReason,'manual');assert.ok(g.state.active('default','gpt-6.1-sol'));
  const h=fixture(t);h.start();h.state.record({ai:'codex',model:'GPT-6.1-Sol',limitError:"You've hit your usage limit."});h.tick();h.state.observe(h.snapshot());assert.equal(h.state.creditException().endReason,'cli-limit');assert.equal(h.state.active('default','gpt-6.1-sol').source,'cli-limit');
 });
-test('discussion explicitly observes latest models and exact fresh100 without spending or changing the normal credit exception',t=>{
- const f=fixture(t);f.start();const exception=f.state.creditException(),models={claude:[],codex:['gpt-6.1-sol','gpt-6-astra','gpt-6-luna']};f.tick();
- f.state.observe(f.snapshot('62500',{windows:[{id:'codex:primary',usedPercent:99.99,resetsAt:null}]}),models,true);assert.equal(f.state.active('default','gpt-6-luna',true),null);
- f.state.observe(f.snapshot('62500',{attemptedAt:new Date(f.now()-MAX_AGE-1).toISOString()}),models,true);assert.equal(f.state.active('default','gpt-6-luna',true),null);
- f.state.observe(f.snapshot(),models,true);assert.ok(f.state.active('default','gpt-6-luna',true));assert.ok(f.state.active('default','gpt-6.1-sol',true));assert.deepEqual(f.state.creditException(),exception);
- assert.equal(f.state.active('default','gpt-6.1-sol'),null);assert.equal(f.state.active('default','gpt-6-luna'),null);
- f.tick();f.state.observe(f.snapshot());assert.equal(f.state.active('default','gpt-6.1-sol'),null);assert.ok(f.state.active('default','gpt-6-luna',true));
- const restored=new ModelLimits(f.state.file,{now:f.now});assert.ok(restored.active('default','gpt-6.1-sol',true));assert.equal(restored.active('default','gpt-6.1-sol'),null);
- f.state.clear('default','gpt-6-luna',models);assert.equal(f.state.active('default','gpt-6-luna',true),null);
- f.state.clearAccount('codex');assert.equal(f.state.active('default','gpt-6.1-sol',true),null);
-});
-
-test('話し合いの契約枠100%・正式CLI拒否は通常の例外・両側上限判定に干渉しない',async t=>{
- const f=fixture(t);f.start();f.state.record({ai:'claude',model:'Opus 5.5',limitError:"You've reached your session limit"});
- f.tick();f.state.observe(f.snapshot());const before=structuredClone(f.state.data),exception=f.state.creditException();
- const models={claude:['claude-opus-5-5'],codex:['gpt-6.1-sol','gpt-6-astra']};
- const {createDiscussion}=require('../lib/discussion-runtime');let reads=0;
- const usage={status:async()=>{reads++;const s=f.snapshot();f.state.observe(s);return s;}};
- const d=createDiscussion({limits:f.state,usage,tools:{catalog:()=>({codex:{models:models.codex.map(id=>({id,label:id}))}})},store:{},accounts:{},chats:{}});
- await d.refreshUsage({ai:'codex',account:'default'});
- assert.equal(f.state.active('default','gpt-6.1-sol'),null);assert.ok(f.state.active('default','gpt-6.1-sol',true));
- assert.ok(f.state.active('default','claude-opus-5-5'));assert.deepEqual(f.state.creditException(),exception);
- for(const [k,v] of Object.entries(before))assert.deepEqual(f.state.data[k],v);
- const vm=require('node:vm'),source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8');
- const refresh=source.slice(source.indexOf('async function refreshLimitEvidence('),source.indexOf('\nconst PUBLIC ='));
- const ctx=vm.createContext({verifyIntegrationAssignmentSend(){},discussionRuntime:require('../lib/discussion-runtime'),rolesData:()=>({checkCredits:{}}),integrationPolicyRequest:()=>false,limitRoutingEnabled:()=>true,roleReviewRuntime:require('../lib/role-review-runtime'),limitEvidence:f.state,limitBackup:()=>({ai:'claude',model:'Opus 5.5'}),usage});
- vm.runInContext(refresh,ctx);const count=reads;
- await ctx.refreshLimitEvidence({ai:'codex',model:'GPT-6.1-Sol',account:'default',request:'normal'});assert.equal(reads,count+1);
- f.state.record({ai:'codex',model:'GPT-6.1-Sol',account:'default',limitError:"You've hit your usage limit."},models,true);
- assert.equal(f.state.active('default','gpt-6.1-sol'),null);assert.equal(f.state.active('default','gpt-6.1-sol',true).source,'cli-limit');assert.deepEqual(f.state.creditException(),exception);
- const runner=new ChatRunner({limitPreflight:o=>f.state.forRequest(o),limitBackup:()=>({ai:'claude',model:'Opus 5.5',requiredModel:'claude-opus-5-5'}),limitTarget:o=>f.state.forRequest(o)});let captured;
- runner.run=o=>(captured=o,{startedP:Promise.resolve(true)});
- runner.send({project:'fixture',task:'normal',pdir:path.dirname(f.state.file),ai:'codex',model:'GPT-6.1-Sol',text:'next'});assert.equal(captured.ai,'codex');
-});

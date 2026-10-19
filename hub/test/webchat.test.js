@@ -433,6 +433,7 @@ test('booted Webchat client uses its captured Hub guard after the on-disk guard 
  try{
   fs.mkdirSync(path.join(root,'dist'));fs.writeFileSync(path.join(root,'dist/WebChatMCP.js'),'');
   fs.copyFileSync(require.resolve('../lib/webchat-client'),path.join(root,'client.cjs'));
+  fs.writeFileSync(path.join(root,'platform.js'),'module.exports=require('+JSON.stringify(require.resolve('../lib/platform'))+');\n');
   const guard=path.join(root,'webchat-guard.mjs');fs.writeFileSync(guard,'console.log("captured guard")');
   const Client=require(path.join(root,'client.cjs')).WebchatClient;
   fs.writeFileSync(guard,'throw Error("mixed generation")');

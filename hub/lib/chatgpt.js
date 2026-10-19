@@ -1,4 +1,5 @@
 'use strict';
+const platform = require('./platform');
 const { lt } = require('./locale');
 // ChatGPT との連携（版1）：ChatGPT が MCP（hub/mcp.js）を通って Hub の作業を読み、結果を書き戻す
 // 道具の中身はここ（Hub 本体の中）で動かす。mcp.js は Hub に聞くだけ（書くのは Hub だけ）
@@ -13,9 +14,7 @@ const READ_MAX = 200 * 1024, OUT_MAX = 64 * 1024, CMD_MAX_SEC = 120;
 const WORK_OFF = lt('設定で「実作業もできる」をオンにしてください');
 // 秘密が入りがちなファイル（OpenAI に送らない）
 const SECRET = /^(mcp-events\.(json|auth\.json)|\.env(\..*)?|.*\.(pem|key|p12|pfx)|id_(rsa|ed25519|ecdsa|dsa)(\.pub)?|\.netrc|\.npmrc|\.pypirc)$/i;
-const WIN = process.platform === 'win32';
-// Windows は Git for Windows の bash を使う（実行時に探す）
-const SHELL = WIN ? '' : ['/bin/zsh', '/bin/bash', '/bin/sh'].find(f => fs.existsSync(f)) || 'sh';
+const SHELL = platform.shellCandidates().find(f => fs.existsSync(f)) || 'sh';
 
 const S = (props, required) => ({ type: 'object', properties: props, required, additionalProperties: false });
 const str = description => ({ type: 'string', description });
@@ -219,12 +218,10 @@ class Chatgpt {
 function run(command, cwd, sec) {
   return new Promise(resolve => {
     const out = { stdout: '', stderr: '' }; let size = 0, truncated = false, timedOut = false;
-    const shell = SHELL || require('./launch').gitBash();
-    if (!shell) { resolve({ code: -1, ...out, stderr: lt('Git for Windows の bash.exe が見つかりません'), truncated, timedOut }); return; }
-    const child = spawn(shell, ['-lc', command], { cwd, detached: !WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(SHELL, ['-lc', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const take = k => c => { if (size >= OUT_MAX) { truncated = true; return; } const s = c.toString('utf8').slice(0, OUT_MAX - size); size += s.length; out[k] += s; if (s.length < c.length) truncated = true; };
     child.stdout.on('data', take('stdout')); child.stderr.on('data', take('stderr'));
-    const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { child.kill('SIGKILL'); } }, sec * 1000);
+    const timer = setTimeout(() => { timedOut = true; try { platform.killTree(child, 'SIGKILL', { fallback: false }); } catch (e) { child.kill('SIGKILL'); } }, sec * 1000);
     child.on('error', e => { clearTimeout(timer); resolve({ code: -1, ...out, stderr: out.stderr + String(e.message), truncated, timedOut }); });
     child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, ...out, truncated, timedOut }); });
   });

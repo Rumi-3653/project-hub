@@ -5,7 +5,8 @@ const { lt } = require('./locale');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { childEnv, accountEnv, agyAccountError, findExe, exeArgv } = require('./launch');
+const platforms = require('./platform');
+const { childEnv, accountEnv, agyAccountError } = require('./launch');
 
 let pty = null;
 try { pty = require('node-pty'); } catch (e) { pty = null; }
@@ -13,27 +14,17 @@ try { pty = require('node-pty'); } catch (e) { pty = null; }
 // node-pty の配布物は spawn-helper に実行の許可が付いていないことがある（Mac で posix_spawnp failed になる）
 function fixHelper() {
   let base;
-  try { base = path.dirname(require.resolve('node-pty/package.json')); } catch (e) { return; }
-  for (const sub of ['prebuilds', 'build/Release', 'build/Debug']) {
-    const dir = path.join(base, sub);
-    let names = [];
-    try { names = fs.readdirSync(dir); } catch (e) { continue; }
-    for (const n of names) {
-      const f = n === 'spawn-helper' ? path.join(dir, n) : path.join(dir, n, 'spawn-helper');
-      try { if (fs.existsSync(f)) fs.chmodSync(f, 0o755); } catch (e) { /* 無視 */ }
-    }
-  }
+  try { base = path.dirname(require.resolve('node-pty/package.json')); } catch { return; }
+  platforms.fixPtyHelper(base);
 }
 if (pty) fixHelper();
-
-// コマンドが PATH のどこにあるか探す（見つからなければ null）。Windows は .exe / .cmd も探す
-function which(cmd, envPath) { return findExe(cmd, envPath) || null; }
 
 const MAX_SCROLLBACK = 200000; // 画面を開き直した時に見せる分（文字数）
 
 class Sessions {
   constructor(options = {}) {
     this.pty = options.pty || pty;
+    this.platform = options.platformApi || platforms.forPlatform(options.platform);
     this.map = new Map(); // key: project/task/ai → { proc, buf, watchers, ai, dir, started, exited }
     this.stopControl=options.stopControl;
     this.onExit = null; // 終わった時に呼ぶ（project, task, ai, s）。未読の印に使う
@@ -67,14 +58,14 @@ class Sessions {
     const blocked=this.canStart?.(ai,{project,task,dir});if(blocked)throw Error(blocked);
     const fullEnv = childEnv(ai, accountEnv(ai, account, { ...process.env, ...env, TERM: 'xterm-256color', LANG: process.env.LANG || 'ja_JP.UTF-8', HOME: os.homedir() }));
     if (!dir || !fs.existsSync(dir)) throw new Error(lt`作業の場所が見つかりません: ${dir}`);
-    const exe = which(command, fullEnv.PATH);
+    const exe = this.platform.findExecutable(command, fullEnv.PATH);
     if (!exe) throw new Error(lt`「${command}」が見つかりません。ターミナルで ${command} が動くか確かめてください`);
+    require('./owned-processes').assertLaunchOwnership(this.platform);
     const limitWatch = this.prepare?.({ ai, account, dir, limitMarker });
     let proc;
     const gateOptions={project,task,ai,dir};this.startGate?.(gateOptions);
     try {
-      const argv = exeArgv(exe, args); // Windows の npm シム（.cmd）は本体に展開する
-      proc = this.pty.spawn(argv.file, argv.args, { name: 'xterm-256color', cols: cols || 100, rows: rows || 30, cwd: dir, env: fullEnv });
+      proc = this.pty.spawn(exe, args, { name: 'xterm-256color', cols: cols || 100, rows: rows || 30, cwd: dir, env: fullEnv });
     } catch (e) {
       this.endGate?.(gateOptions);
       throw new Error(lt`作業画面を開けませんでした（${e.message}）`);
