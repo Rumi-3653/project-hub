@@ -108,9 +108,9 @@ document.addEventListener('change',e=>{
     updateMaintenanceSelection();
   } else if(e.target.dataset.maintCandidate!==undefined)updateMaintenanceSelection();
 });
-// 一覧が描き直される前に、押した項目の所属を確認する。
+// 画面が描き直される前に外側のタップで閉じる。開くボタンとパネル内は除く。
 document.addEventListener('click',e=>{
-  const go=e.target.closest('#list [data-go][data-p]');
-  if(go && go.dataset.p!==maintenanceProject)$('#maintenance-drawer').hidden=true;
+  const drawer=$('#maintenance-drawer');
+  if(!drawer.hidden && !e.target.closest('#maintenance-drawer, [data-maintenance]'))drawer.hidden=true;
 },true);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')$('#maintenance-drawer').hidden=true;});

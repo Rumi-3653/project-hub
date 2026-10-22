@@ -1,6 +1,6 @@
 'use strict';
 // CLIのチケットIDはサーバー内だけに保持。未確定の使用要求は再起動しても同じ受付番号を使う。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const validId = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 512;

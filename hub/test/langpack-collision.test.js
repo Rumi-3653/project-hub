@@ -91,6 +91,7 @@ test('Native and Node agree on date aliases and reserved headings through every 
   if (spawnSync('swiftc', ['--version'], { encoding: 'utf8' }).status !== 0) { t.skip('Swift is unavailable'); return; }
   const f = fixture(t), repo = path.join(f.temp, 'repository'), libs = path.join(repo, 'hub/lib'); fs.mkdirSync(libs, { recursive: true });
   for (const file of ['langpack.js', 'locale.js']) fs.copyFileSync(path.join(hub, 'lib', file), path.join(libs, file));
+  fs.cpSync(path.join(hub, 'lib/platform'), path.join(libs, 'platform'), { recursive: true });
   const swift = fs.readFileSync(path.join(hub, 'app/window.swift'), 'utf8');
   const globals = swift.slice(swift.indexOf('let home ='), swift.indexOf('\nlet port ='))
     .replace(/^let hubLocation = .*$/m, 'let hubLocation = ' + JSON.stringify(path.join(repo, 'hub')))

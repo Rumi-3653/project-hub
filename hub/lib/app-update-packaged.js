@@ -1,7 +1,7 @@
 'use strict';
 const platforms = require('./platform');
 // Completed-App updates. No Git, npm, downloaded scripts, AI or elevated access.
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
@@ -57,7 +57,7 @@ function base64url(text, max) {
   if (typeof text !== 'string' || !/^[\w-]+$/.test(text) || text.length > max) fail('encoding');
   const buf = Buffer.from(text, 'base64url'); if (buf.toString('base64url') !== text) fail('encoding'); return buf;
 }
-function verifyManifest(envelope, trust, { now = Date.now(), version, maxSeq = 0, allowAccepted = false } = {}) {
+function verifyManifest(envelope, trust, { now = Date.now(), version, maxSeq = 0, allowAccepted = false, installed = false } = {}) {
   if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) || !Object.keys(envelope).every(k => ['kid', 'payload', 'sig'].includes(k))) fail('envelope');
   const key = Object.hasOwn(trust.keys || {}, envelope.kid) ? trust.keys[envelope.kid] : null;
   if (!key || trust.revokedKids.includes(envelope.kid) || !key.purposes?.includes('app-update')) fail('key');
@@ -66,16 +66,24 @@ function verifyManifest(envelope, trust, { now = Date.now(), version, maxSeq = 0
   try { pub = crypto.createPublicKey({ key: Buffer.from(key.spkiB64, 'base64'), format: 'der', type: 'spki' }); } catch { fail('key'); }
   if (pub.asymmetricKeyType !== 'ed25519' || sig.length !== 64 || !crypto.verify(null, bytes, pub, sig)) fail('signature');
   let m; try { m = JSON.parse(bytes.toString('utf8')); } catch { fail('format'); }
-  if (m?.v !== 1 || m.typ !== 'hub-app-update' || m.product !== 'project-hub' || m.edition !== 'public' || m.lang !== 'ja' || !SEMVER.test(m.version || '') || !['feature', 'bugfix'].includes(m.kind)) fail('format');
+  // A trial feed cannot authorize a stable application, or the reverse. These
+  // expectations come from committed release constants, never the envelope.
+  const trial = trust.channel === 'purchase-test', runtime = trust.runtimeProtocol === 1;
+  if (trust.runtimeProtocol !== undefined && (!runtime || trial)) fail('format');
+  if (m?.v !== 1 || m.typ !== 'hub-app-update' || m.product !== (trial ? 'project-hub-purchase-test' : 'project-hub') || (trial ? m.channel !== 'purchase-test' : m.channel !== undefined) || m.edition !== 'public' || m.lang !== 'ja' || !SEMVER.test(m.version || '') || !['feature', 'bugfix'].includes(m.kind)) fail('format');
   if (!Number.isSafeInteger(m.seq) || m.seq < 1 || (allowAccepted ? m.seq < maxSeq : m.seq <= maxSeq)) fail('sequence');
   const seconds = Math.floor(now / 1000);
-  if (![m.issuedAt, m.expiresAt].every(Number.isSafeInteger) || m.issuedAt > seconds + 300 || m.expiresAt <= seconds || m.expiresAt <= m.issuedAt || m.expiresAt - m.issuedAt > 365 * 86400) fail('expiry');
+  if (![m.issuedAt, m.expiresAt].every(Number.isSafeInteger) || m.issuedAt > seconds + 300 || (!installed && m.expiresAt <= seconds) || m.expiresAt <= m.issuedAt || m.expiresAt - m.issuedAt > 365 * 86400) fail('expiry');
   if (version && !newer(m.version, version)) fail('version');
   if (typeof m.product_line !== 'string' || !m.product_line || m.product_line.length > 128 || !Array.isArray(m.bugfixOf) || m.bugfixOf.length > 100 || !m.bugfixOf.every(x => typeof x === 'string' && x.length > 0 && x.length <= 128)) fail('format');
-  if (!m.requires || m.requires.os !== 'darwin' || m.requires.arch !== 'arm64' || !/^\d+\.\d+(?:\.\d+)?$/.test(m.requires.minMacOS || '') || m.requires.node !== '>=22') fail('requirements');
+  const windows = m.requires?.os === 'win32';
+  if (!m.requires || m.requires.node !== '>=22' || (windows ? m.requires.arch !== 'x64' || !/^\d+\.\d+\.\d+$/.test(m.requires.minWindows || '') : m.requires.os !== 'darwin' || m.requires.arch !== 'arm64' || !/^\d+\.\d+(?:\.\d+)?$/.test(m.requires.minMacOS || ''))) fail('requirements');
   const a = m.asset, app = m.app;
-  if (!a || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.dmg$/.test(a.name || '') || !Number.isSafeInteger(a.size) || a.size < 1 || a.size > MAX_ASSET || !SHA.test(a.sha256 || '') || a.url !== trust.assetPrefix + 'v' + m.version + '/' + a.name) fail('asset');
-  if (!app || app.bundleId !== 'local.projecthub' || app.shortVersion !== m.version || !SHA.test(app.treeSha256 || '') || !Number.isSafeInteger(app.entries) || app.entries < 1 || app.entries > 10000) fail('app');
+  if (!a || !((windows || trial || runtime) ? /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.zip$/ : /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.dmg$/).test(a.name || '') || !Number.isSafeInteger(a.size) || a.size < 1 || a.size > MAX_ASSET || !SHA.test(a.sha256 || '') || a.url !== trust.assetPrefix + 'v' + m.version + (trial ? '-purchase-test.update/' : '/') + a.name) fail('asset');
+  if (!runtime && app?.format === 'release-runtime-v1') fail('app');
+  if (runtime && (m.issuedAt < 0 || m.kind !== 'bugfix' || m.product_line !== 'project-hub-4.123' || JSON.stringify(m.bugfixOf) !== '["project-hub-4.123"]' || app?.format !== 'release-runtime-v1' || app.shellProtocol !== 1 || app.runtime !== 'hub' || a.name !== `Project-Hub-${m.version}-Runtime-${windows ? 'Windows-x64' : 'Apple-Silicon'}.zip`)) fail('app');
+  if (trial ? app?.format !== 'purchase-runtime-v1' || app?.shellProtocol !== 1 || app?.runtime !== 'hub' : !runtime && windows && (app?.format !== 'windows-zip-v1' || app?.runtime !== 'hub')) fail('app');
+  if (!app || app.bundleId !== (trial ? 'local.projecthub.purchase-test' : 'local.projecthub') || app.shortVersion !== m.version || !SHA.test(app.treeSha256 || '') || !Number.isSafeInteger(app.entries) || app.entries < 1 || app.entries > 10000) fail('app');
   if (!m.notes || typeof m.notes.ja !== 'string' || m.notes.ja.length > 4000) fail('notes');
   return m;
 }
@@ -108,7 +116,7 @@ function treeHash(dir) {
 }
 function compatible(m, { platform, arch, macOS, node }) {
   const pad = x => x.split('.').concat(['0', '0']).slice(0, 3).join('.');
-  return m.requires.os === platform && m.requires.arch === arch && !newer(pad(m.requires.minMacOS), pad(macOS)) && Number(node.split('.')[0]) >= 22;
+  return m.requires.os === platform && m.requires.arch === arch && !newer(pad(m.requires.os === 'win32' ? m.requires.minWindows : m.requires.minMacOS), pad(macOS)) && Number(node.split('.')[0]) >= 22;
 }
 function eligibility(m, status = {}, build = {}) {
   if (status.enforcement === false) return 'install';
@@ -184,6 +192,7 @@ class PackagedUpdate {
   busyMessage() { return 'アプリの更新を適用中です。少し待ってください'; }
   idleMessage() { return 'AI・順番待ち・整理が終わるまで更新を待ちます'; }
   nextHub() { return path.join(this.appPath, 'Contents/Resources/runtime/hub'); }
+  secure(file) { securePath(file, this.root); }
   persist() { if (this.stateError) fail('state'); writeJSON(this.stateFile, this.data, this.root); }
   phase(phase, extra = {}) { Object.assign(this.data, { phase }, extra); this.persist(); }
   lock(action) {
@@ -233,7 +242,7 @@ class PackagedUpdate {
         this.data.maxSeq = m.seq; this.data.manifest = m; this.data.envelope = envelope;
         this.data.eligibility = compatible(m, { platform: this.platform, arch: this.arch, macOS: await this.macOS(), node: this.node }) ? eligibility(m, this.license?.status(), this.license?.config?.build) : 'requirements';
         this.persist();
-        if (this.data.eligibility !== 'install') { this.phase('idle', { reason: this.data.eligibility === 'purchase-scope' ? '新しい版があります（購入した版の対象外）' : 'このMacのOS・CPU・Node.jsでは使えない版です' }); return this.status(); }
+        if (this.data.eligibility !== 'install') { this.phase('idle', { reason: this.data.eligibility === 'purchase-scope' ? '新しい版があります（購入した版の対象外）' : (this.platform === 'win32' ? 'このWindowsのOS・CPU・Node.jsでは使えない版です' : 'このMacのOS・CPU・Node.jsでは使えない版です') }); return this.status(); }
         await this.prepare(m);
         if (this.enabled) await this.install();
       } catch (e) { this.failed(e, m); }
@@ -272,7 +281,7 @@ class PackagedUpdate {
       }
       if (!res || res.status !== 200 || Number(res.headers.get('content-length')) > limit) { await res?.body?.cancel(); fail('download'); }
       const hash = crypto.createHash('sha256'), chunks = []; let size = 0;
-      if (file) { securePath(file, this.root); fd = fs.openSync(file, 'wx', 0o600); }
+      if (file) { this.secure(file); fd = fs.openSync(file, 'wx', 0o600); }
       for await (const chunk of res.body) {
         size += chunk.length; if (size > limit) { abort.abort(); fail('size'); } hash.update(chunk);
         if (file) { let offset = 0; while (offset < chunk.length) offset += fs.writeSync(fd, chunk, offset); } else chunks.push(chunk);
@@ -282,7 +291,7 @@ class PackagedUpdate {
       ok = true; return file || Buffer.concat(chunks);
     } finally {
       clearTimeout(timer); if (fd !== undefined) fs.closeSync(fd);
-      if (!ok && file) { securePath(file, this.root); fs.rmSync(file, { force: true }); }
+      if (!ok && file) { this.secure(file); fs.rmSync(file, { force: true }); }
     }
   }
   siblingValid(sibling) {

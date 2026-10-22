@@ -1,7 +1,7 @@
 'use strict';
 const platform = require('./platform');
 // Portable data only. Never load a module, hook, account or device credential from a bundle.
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const fsp = fs.promises;
 const path = require('node:path');
 const os = require('node:os');
@@ -30,7 +30,7 @@ function portableRoot(home, p) {
 }
 function excluded(rel, backups) {
   const a = rel.split('/');
-  return a.some(s => ['node_modules', '.DS_Store', '.Trash', '.hub-accounts', '.claude', '.codex', '.gemini', '.grok', 'owner-edition.js'].includes(s)) ||
+  return a.some(s => ['node_modules', '.DS_Store', '.Trash', '.project-hub-use', '.hub-accounts', '.claude', '.codex', '.gemini', '.grok', 'owner-edition.js'].includes(s)) ||
     a[0] === 'Work' || (!backups && a[0] === 'Backups') ||
     /(^|\/)ProjectHub-Move(\/|$)/.test(rel) ||
     /^_hub\/(?:license|updates|cli-runs|move|account-processes)(?:\/|$)/.test(rel) ||
@@ -60,8 +60,8 @@ async function atomic(file, value) {
   const h = await fsp.open(tmp, 'wx', 0o600);
   try { await h.writeFile(JSON.stringify(value, null, 2) + '\n'); await h.sync(); } finally { await h.close(); }
   await fsp.rename(tmp, file);
-  // Windows はディレクトリの fsync に非対応。上の書き込みハンドルの同期失敗は隠さない
-  if (process.platform !== 'win32') { const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); } }
+  if (process.platform === 'win32') platform.persistence.syncDirectory(path.dirname(file));
+  else { const d = await fsp.open(path.dirname(file), 'r'); try { await d.sync(); } finally { await d.close(); } }
 }
 async function copyFile(from, to, expected) {
   const input = await fsp.open(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);

@@ -2,7 +2,7 @@
 const platforms = require('./platform');
 const { lt } = require('./locale');
 
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
@@ -54,6 +54,7 @@ function run(file, args, options = {}) {
 
 class AppUpdate {
   constructor(options) {
+    if ((options.platform || process.platform) === 'win32' && options.hubPath) return new (require('./app-update-windows').WindowsPackagedUpdate)(options);
     if (options.hubPath && !options.ownerEdition && !(path.isAbsolute(options.source || '') && fs.existsSync(path.join(options.source, '.git')))) return new (require('./app-update-packaged').PackagedUpdate)(options);
     this.currentVersion = options.version || '';
     this.root = options.root;

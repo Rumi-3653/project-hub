@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // AIには読む道具だけを渡す。判定の保存と削除候補への反映はHubが行う。
-const fs=require('node:fs'),path=require('node:path'),{randomUUID}=require('node:crypto');
+const fs=require('./platform/file-io'),path=require('node:path'),{randomUUID}=require('node:crypto');
 const {noLinks,exists}=require('./remove');
 class RemovalReview {
  constructor({store,removal,start,busy,rows,queued=()=>false,pick=()=>null}){Object.assign(this,{store,removal,start,busy,rows,queued,pick});this.starting=new Set();}

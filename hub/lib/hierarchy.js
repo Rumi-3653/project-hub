@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // 表示名と関係だけを変更し、場所・作業IDは保つ。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const {hash}=require('./completion');
 const {randomUUID} = require('node:crypto');

@@ -14,6 +14,7 @@ function fixture(mode='ok'){
  record.auto.scope=structuredClone(record.items.map(({project,task,source})=>({project,task,source})));
  const events=[],issues=[];let receipts=0,mains=0,held=false;
  const integrate={read:()=>structuredClone(record),save:r=>record=structuredClone(r),pending:()=>record.auto.main?.state==='done'?[]:[{project:'p',task:'t'}],store:{readProject:()=>({id:'p',dir:'fixture'})},ancestor:()=>({t:{},target:'copy',p:{id:'p',dir:'fixture'}}),resumePreview:()=>({blockers:[],recover:null}),gitw:{inspect:()=>({head,status:''}),merging:()=>false,isAncestor:()=>head==='resolved'},run:r=>{receipts++;r.complete=true;r.items[0].state='保持受領済み';integrate.save(r);}};
+ integrate.store.listProjects=()=>[];integrate.dir=path.join(dir,'task-integrations');integrate.file=(p,t)=>path.join(integrate.dir,p+'-'+t+'.json');integrate.records=()=>[integrate.read()];
  let runner;
  const auto=new IntegrateAuto({integrate,busy:()=>!!runner.busy('p','t')||runner.queue('p','t').some(q=>!q.error),dispatch:async request=>{issues.push(request);const out=runner.send({...options('review',request.text),request:request.requestKey,isolatedReview:request.isolatedReview,integrationReviewRequest:request.requestKey});await out.started;return {delivery:{state:'accepted'}};},mergeMain:async()=>{mains++;return{ok:true,retained:true};}});
  const backup={ai:'codex',model:'gpt-6.1-sol',requireModel:true,requiredModel:'gpt-6.1-sol',perm:mode==='spawn-fail'?'./missing.cjs':'./backup.cjs'};

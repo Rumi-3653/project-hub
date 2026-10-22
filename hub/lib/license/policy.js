@@ -19,8 +19,9 @@ const policy = Object.freeze({
   }),
   build: Object.freeze({ channel: 'release', buildId: 'project-hub-4.125.0-mac-arm64', product: SERIES_PRODUCT, bugfixOf: Object.freeze([]) }),
 });
-// Windows candidate is not registered with the production issuer yet. Keep its
-// endpoints closed; native acceptance uses an isolated in-memory issuer only.
-const windowsPolicy = Object.freeze({ ...policy, endpoint: '', purchaseUrl: '',
-  build: Object.freeze({ ...policy.build, buildId: 'project-hub-4.124.2-windows-x64' }) });
+// The Windows release candidate uses the same issuer as Mac. Live deployment
+// and build registration still require separate production acceptance.
+const WINDOWS_ISSUER_ENABLED = true; // Approved candidate setting, not proof of live acceptance.
+const windowsPolicy = Object.freeze({ ...policy, endpoint: WINDOWS_ISSUER_ENABLED ? policy.endpoint : '', purchaseUrl: WINDOWS_ISSUER_ENABLED ? policy.purchaseUrl : '',
+  build: Object.freeze({ ...policy.build, buildId: 'project-hub-4.125.0-windows-x64' }) });
 module.exports = Object.freeze({ ...policy, forPlatform: name => name === 'win32' ? windowsPolicy : policy });

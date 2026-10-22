@@ -2,7 +2,7 @@
 const platform = require('./platform');
 const { lt } = require('./locale');
 // 選択式の整理、ゴミ箱への退避・復元、ローカル検証。
-const fs=require('node:fs'), path=require('node:path');
+const fs=require('./platform/file-io'), path=require('node:path');
 const {createHash,randomUUID}=require('node:crypto');
 const {execFileSync,spawn}=require('node:child_process');
 const {StringDecoder}=require('node:string_decoder');
@@ -50,13 +50,17 @@ class Maintenance {
   for(const base of this.bases(p))for(const d of ['一時','過去版','履歴','tmp','temp','versions','backups','archive'])out.push({dir:path.join(base,'作業',d),label:lt('過去版・一時ファイル'),days:30});
   return out;
  }
- preview(id) {
+ async preview(id) {
   const p=this.project(id), candidates=[], excluded=[], ownBases=this.bases(p),all=this.store.listProjects();
   const shared=all.filter(q=>this.bases(q).some(b=>ownBases.some(d=>b.normalize('NFC')===d.normalize('NFC'))) || require('./work-context').family(p,all).some(x=>x.id===q.id)).map(q=>q.dir);
   const roots=[...new Set([...ownBases,...shared])], refs=[], tracked=[], prepared=[];
-  const limits=this.referenceLimits,started=performance.now(),visited=new Set(),gitRoots=new Set(),snapshots=[];
+  const limits={...this.referenceLimits},visited=new Set(),gitRoots=new Set(),snapshots=[];
+  let started=performance.now(),batchBytes=0,batches=1;
   let scanned=0,readBytes=0,scanPath='',scanSize=0;
   const budget=()=>{if(performance.now()-started>limits.ms)throw Error(lt('参照確認の時間上限を超えたため、整理候補を出していません'));};
+  // 総量は制限せず、1回の読取量と連続処理時間を区切る。全件終了までtokenは発行しない。
+  const yieldDue=()=>batchBytes>=limits.bytes || performance.now()-started>=Math.min(25,limits.ms/2);
+  const nextBatch=async()=>{await new Promise(resolve=>setImmediate(resolve));started=performance.now();batchBytes=0;batches++;};
   const signature=st=>[st.dev,st.ino,st.mode,st.size,st.mtimeMs,st.ctimeMs].join(':');
   const remember=(file,st)=>{snapshots.push([file,st?signature(st):null]);};
   const maybeStat=file=>{try{return fs.lstatSync(file);}catch(e){if(e.code==='ENOENT')return null;throw e;}};
@@ -64,6 +68,7 @@ class Maintenance {
   // 除外範囲は維持。参照の本文は保持せず、候補を棚卸ししてから分割照合する。
   try {
    for(const base of roots) {
+    if(yieldDue())await nextBatch();
     scanPath=base;scanSize=0;noLinks(base);budget();
     let top='';try {top=execFileSync('git',['-C',base,'rev-parse','--show-toplevel'],{encoding:'utf8',timeout:Math.max(1,Math.ceil(limits.ms-(performance.now()-started))),stdio:['ignore','pipe','pipe']}).trim();}catch(e){if(e.status!==128 || !/not a git repository/i.test(String(e.stderr)))throw Error(lt('Gitの参照確認ができません：')+(e.code||e.message));}
     if(top && !gitRoots.has(top)) {
@@ -75,12 +80,14 @@ class Maintenance {
     }
     const pending=[[base,0]];
     while(pending.length) {
+     if(yieldDue())await nextBatch();
      const [d,depth]=pending.pop();scanPath=d;scanSize=0;budget();
      const st=fs.lstatSync(d);if(!st.isDirectory() || st.isSymbolicLink())throw Error(lt('参照の場所が変わりました'));remember(d,st);
      const key=st.dev+':'+st.ino;if(visited.has(key))continue;visited.add(key);
      if(depth>limits.depth)throw Error(lt('参照の深さ上限を超えたため、整理候補を出していません'));
      const entries=fs.opendirSync(d);
      try {let ent;while((ent=entries.readSync())) {
+      if(yieldDue())await nextBatch();
       const f=path.join(d,ent.name);scanPath=f;scanSize=0;budget();
       if(++scanned>limits.items)throw Error(lt('参照が多すぎるため、整理候補を出していません'));
       if(['.git','node_modules','資料','成果物','.ai/work','vendor','dist','build'].includes(ent.name) || ent.isSymbolicLink())continue;
@@ -88,7 +95,6 @@ class Maintenance {
       if(ent.isDirectory())pending.push([f,depth+1]);
       else if(/\.(md|json|ya?ml|[cm]?js|tsx?|py|html|css|sh|txt)$/i.test(ent.name)) {
        const st=fs.lstatSync(f);scanSize=st.size;if(!st.isFile() || st.isSymbolicLink())throw Error(lt('参照のファイルが変わりました'));
-       if(st.size>limits.bytes-readBytes)throw Error(lt('参照の総読量上限を超えたため、整理候補を出していません'));
        readBytes+=st.size;remember(f,st);refs.push([f,signature(st)]);
       }
      }} finally {entries.closeSync();}
@@ -107,9 +113,10 @@ class Maintenance {
   };
   for(const target of this.targets(p)) {
    if(!fs.existsSync(target.dir))continue;
-   try {noLinks(target.dir);for(const name of fs.readdirSync(target.dir))add([path.join(target.dir,name)],target.label,target.days);} catch(e) {excluded.push({path:target.dir,reason:e.message});}
+   try {noLinks(target.dir);for(const name of fs.readdirSync(target.dir)) {if(yieldDue())await nextBatch();add([path.join(target.dir,name)],target.label,target.days);}} catch(e) {excluded.push({path:target.dir,reason:e.message});}
   }
   for(const task of p.tasks.filter(t=>t.state==='完了')) {
+   if(yieldDue())await nextBatch();
    const dir=path.join(p.dir,'.ai/chat'), names=[task.id+'.jsonl',task.id+'.json',task.id+'.queue.json'],files=names.map(n=>path.join(dir,n)).filter(f=>fs.existsSync(f));
    if(!files.length)continue;
    const q=path.join(dir,task.id+'.queue.json');let queued=false;
@@ -121,11 +128,14 @@ class Maintenance {
    budget();
    const needles=new Map();let longest=0;
    for(const item of prepared)for(const f of item.files)for(const raw of [f,path.relative(p.dir,f),...(!item.candidate.chatTask?[path.basename(f)]:[])]) {
+    if(yieldDue())await nextBatch();
     budget();const needle=raw.normalize('NFC');longest=Math.max(longest,needle.length);
     if(!needles.has(needle))needles.set(needle,new Set());needles.get(needle).add(item);
    }
-   const referenced=new Set(),buffer=Buffer.alloc(limits.chunk);
+   const referenced=new Set(),buffer=Buffer.alloc(Math.min(limits.chunk,limits.bytes));
+   if(!buffer.length)throw Error(lt('参照の分割読取量が不正です'));
    for(const [file,expected] of refs) {
+    if(yieldDue())await nextBatch();
     scanPath=file;scanSize=fs.lstatSync(file).size;budget();noLinks(file);
     const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
     try {
@@ -147,7 +157,8 @@ class Maintenance {
       match(combined.slice(0,cut).normalize('NFC'));
      };
      let n;while((n=fs.readSync(fd,buffer,0,buffer.length,null))) {
-      budget();bytes+=n;if(bytes>scanSize)throw Error(lt('確認中に参照が変わりました。取得し直してください'));consume(decoder.write(buffer.subarray(0,n)));
+      budget();bytes+=n;batchBytes+=n;if(bytes>scanSize)throw Error(lt('確認中に参照が変わりました。取得し直してください'));consume(decoder.write(buffer.subarray(0,n)));
+      if(yieldDue())await nextBatch();
      }
      consume(decoder.end(),true);
      if(bytes!==scanSize || signature(fs.fstatSync(fd))!==expected)throw Error(lt('確認中に参照が変わりました。取得し直してください'));
@@ -161,18 +172,25 @@ class Maintenance {
   } catch(e) {return stopped(e);}
   const token=randomUUID();this.previews.set(token,{id,at:Date.now(),candidates});
   for(const [k,v] of this.previews)if(Date.now()-v.at>10*60000)this.previews.delete(k);
-  return {token,candidates,excluded,busy:this.busy(id)||this.locked(id),scripts:scriptsAt(this.baseOf(p)),history:this.history(id)};
+  return {token,candidates,excluded,scan:{files:refs.length,bytes:readBytes,batches},busy:this.busy(id)||this.locked(id),scripts:scriptsAt(this.baseOf(p)),history:this.history(id)};
  }
  save(record) {noLinks(this.records);fs.mkdirSync(this.records,{recursive:true});const file=path.join(this.records,record.id+'.json'),tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(record,null,2));fs.renameSync(tmp,file);}
  history(id) {try{return fs.readdirSync(this.records).filter(n=>/^[\w-]+\.json$/.test(n)).map(n=>JSON.parse(fs.readFileSync(path.join(this.records,n),'utf8'))).filter(r=>r.project===id).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,20).map(r=>({id:r.id,at:r.at,count:r.entries.length,restored:r.entries.every(e=>e.restored),error:r.error}));}catch(e){return [];}}
- apply(id,token,selected,confirm) {
+ async apply(id,token,selected,confirm) {
   this.idle(id);const old=this.previews.get(token);
   if(confirm!==true || !old || old.id!==id || Date.now()-old.at>10*60000 || !Array.isArray(selected) || !selected.length || new Set(selected).size!==selected.length)throw Error(lt('候補を確認して選び直してください'));
   const picked=selected.map(key=>old.candidates.find(x=>x.id===key));if(picked.some(x=>!x))throw Error(lt('候補が見つかりません'));
-  const checked=this.preview(id);
+  const checked=await this.preview(id);
+  // 分割確認中にAIや検証が始まった場合は、書き込み前に拒否する。
+  this.idle(id);
+  if(this.previews.get(token)!==old || Date.now()-old.at>10*60000)throw Error(lt('候補を確認して選び直してください'));
   if(!checked.token)throw Error(lt('移動前の参照確認を止めました：')+checked.stopped.reason+'（'+checked.stopped.path+'）');
   const fresh=checked.candidates;
   for(const c of picked)if(!fresh.some(x=>x.fingerprint===c.fingerprint && JSON.stringify(x.paths)===JSON.stringify(c.paths)))throw Error(lt('候補または参照が変わりました。取得し直してください'));
+  for(const c of picked) {
+   const list=c.paths.map(file=>({file,...inventory(file)}));
+   if(digest(JSON.stringify(list.map(x=>[x.file,x.fingerprint])))!==c.fingerprint)throw Error(lt('候補または参照が変わりました。取得し直してください'));
+  }
   noLinks(this.trash);fs.mkdirSync(this.trash,{recursive:true});
   const record={id:randomUUID(),project:id,at:new Date().toISOString(),entries:picked.flatMap(c=>c.paths.map(src=>({src,dest:path.join(this.trash,`${id}-${randomUUID()}-${path.basename(src)}`),fingerprint:inventory(src).fingerprint,restored:false}))),error:''};
   this.save(record);

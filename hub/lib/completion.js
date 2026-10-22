@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // AIの完了報告と、人が一覧から完了へ移す判断を分ける。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const hash = text => createHash('sha256').update(String(text).replace(/\r\n/g, '\n')).digest('hex');

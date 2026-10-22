@@ -15,8 +15,8 @@ async function main() {
   report.timingsMs.repeatedOwnership = Math.round(performance.now() - began);
   const parent = fs.realpathSync(os.tmpdir());
   began = performance.now();
-  p.persistence.syncDirectory(parent); report.checks.existingVolumeFlushObserved = true;
-  report.timingsMs.volumeFlush = Math.round(performance.now() - began);
+  p.persistence.syncDirectory(parent); report.checks.parentIdentityValidated = true;
+  report.timingsMs.parentValidation = Math.round(performance.now() - began);
   directory = fs.mkdtempSync(path.join(parent, 'hub-windows-native-'));
   p.persistence.syncDirectory(parent);
   const source = path.join(directory, 'before.txt'), saved = path.join(directory, 'saved.txt');
@@ -24,12 +24,12 @@ async function main() {
   const fd = fs.openSync(source, 'wx', 0o600);
   try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   p.persistence.syncFile(source); report.checks.writableFileFlushObserved = true;
-  fs.renameSync(source, saved); p.persistence.syncDirectory(directory);
+  p.persistence.renameSync(source, saved); p.persistence.syncDirectory(directory);
   const cold = cp.execFileSync(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]))', saved], { encoding: 'utf8', timeout: 10000 });
   if (cold !== bytes) throw Error('別プロセスで読み直した内容が一致しません');
   report.checks.renameColdReadMatched = true;
   p.persistence.withDirectorySync(directory, () => fs.unlinkSync(saved));
-  report.checks.beforeAfterRemovalFlushObserved = true;
+  report.checks.beforeAfterRemovalIdentityValidated = true;
   const child = cp.spawn(process.execPath, ['-e', 'setTimeout(()=>process.exit(0),60000)'], { stdio: 'ignore', shell: false });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
   const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));

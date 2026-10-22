@@ -1,6 +1,6 @@
 'use strict';
 // 契約CLIの確定上限と新鮮な100%だけを保存。表示の丸め値は使わない。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const launch = require('./launch');
 const {lt}=require('./locale');

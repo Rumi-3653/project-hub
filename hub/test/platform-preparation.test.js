@@ -62,7 +62,7 @@ test('Darwin and existing Linux ownership retain numeric UID and process-group i
   const root = { ...row, uid: 0 }, p = { processOwner: r => r?.uid, currentProcessOwner: () => 0 };
   assert.equal(P.capture(root.pid, [root], p), root);
   assert.throws(() => platforms.createDarwin({ name: 'win32' }).currentProcessOwner(), { code: 'platform_unsupported' });
-  assert.deepEqual(platforms.supervisorFiles, ['index.js', 'darwin.js', 'persistence.js']); assert.equal(Object.isFrozen(platforms.supervisorFiles), true);
+  assert.deepEqual(platforms.supervisorFiles, ['index.js', 'darwin.js', 'persistence.js', 'file-io.js']); assert.equal(Object.isFrozen(platforms.supervisorFiles), true);
 });
 
 test('unsupported OS licensing blocks paid operations without reading keys, writing or sending', async () => {
@@ -82,7 +82,7 @@ test('unsupported OS licensing blocks paid operations without reading keys, writ
 });
 
 test('license settings show the unavailable reason and hide registration while retaining the Mac form', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
+  const source = require('./fixtures/app-source.cjs').readApp();
   const start = source.indexOf('<section class="pref-section" data-tab="basic"><h2 class="pref-caption">利用コード</h2>'), end = source.indexOf('<section class="pref-section"', start + 1);
   assert.ok(start > 0 && end > start);
   const render = license => vm.runInNewContext('`' + source.slice(start, end) + '`', { state: { license }, esc: String, purchase: '',

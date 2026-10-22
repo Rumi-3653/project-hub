@@ -2,7 +2,7 @@
 const { lt } = require('./locale');
 // 子プロジェクトの結果を親プロジェクトへ渡す：親の「受け取る作業」の「やったこと」に1行書き、会話にも1行足して未読にする
 // 同じ出来事（子・種類・文が同じ）は2回渡さない。渡した記録は _hub/handoff.json
-const fs = require('fs');
+const fs = require('./platform/file-io');
 const path = require('path');
 const chat = require('./chat');
 const { hash } = require('./completion');

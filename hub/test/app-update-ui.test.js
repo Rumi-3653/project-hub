@@ -58,7 +58,7 @@ test('Unavailable update adapters disable mutation while stale status responses 
   release(snapshot); await old; assert.equal(current.innerHTML, 'new settings');
 });
 test('App update settings and module loading are distinct from AI CLI update controls', () => {
-  const app = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
+  const app = require('./fixtures/app-source.cjs').readApp();
   const index = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
   assert.match(app, /id="app-update-box"/); assert.match(app, /loadAppUpdate/); assert.match(index, /src="app-update.js"/);
   assert.match(app, /id="ai-tools"/); assert.doesNotMatch(source, /location\.reload|window\.open|\/api\/ai-tools/);
@@ -108,4 +108,16 @@ test('Windows update refusal is visible and disables both settings and manual ch
   const html = f.element('#app-update-box').innerHTML;
   assert.match(html, /Windowsでは未対応/); assert.match(html, /id="app-auto-update"[^>]*disabled/); assert.match(html, /id="app-update-check"[^>]*disabled/);
   f.context.api = () => assert.fail('disabled update must not send'); await f.context.changeAppUpdate(true); await f.context.checkAppUpdate(); await f.context.applyAppUpdate();
+});
+
+
+test('Windows ZIP card reports the actual update lifecycle and preserves draft-based restart deferral', () => {
+  const f=fixture(),data={...snapshot,mode:'packaged',packageOS:'win32',phase:'ready',pending:true,restartNeeded:true};
+  const html=f.context.appUpdateHtml(data);
+  assert.match(html,/GitHub Releases（Windows ZIP）/);assert.doesNotMatch(html,/Windowsでは未対応|GitHub Releases（完成アプリ）/);
+  assert.match(html,/入力中の文とAIの作業が終わると/);assert.match(html,/data-app-update="apply"/);
+  f.run('var chatDraft={work:"unsent"};var rolesDirty=()=>false;var restartDraftMaps=()=>({drafts:new Map()});');
+  assert.equal(f.context.appUpdateMayRestart(),false);f.run('chatDraft={};');assert.equal(f.context.appUpdateMayRestart(),true);
+  assert.match(f.context.appUpdateHtml({...data,phase:'confirming'}),/新版の起動を確認しています/);
+  assert.match(f.context.appUpdateHtml({...data,phase:'rolled-back'}),/前の版へ戻しました/);
 });

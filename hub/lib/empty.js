@@ -3,7 +3,7 @@ const platform = require('./platform');
 const { lt } = require('./locale');
 // 中身の無い作業・子プロジェクトを探して、ゴミ箱へまとめて移す（AI が勝手に作った物の片付け）
 // 中身が無い＝Hub の会話が空・作業用コピーが無い・動いていない。やったことに記録がある物は候補に出すが、最初は選ばない
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const chat = require('./chat');
 

@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // インストール済み CLI の版・更新・モデル一覧。CLI の実行は固定した引数だけを execFile に渡す。
-const fs = require('fs');
+const fs = require('./platform/file-io');
 const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');

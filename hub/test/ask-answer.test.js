@@ -2,7 +2,7 @@
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
+const source=require('./fixtures/app-source.cjs').readApp();
 const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const definitions=[{question:'記事の価格は？',options:['500円（おすすめ）','300円'],multi:false},{question:'返金は？',options:['受け付ける','受け付けない'],multi:false}];
 const classes=(...initial)=>{const set=new Set(initial);return {contains:x=>set.has(x),add:(...x)=>x.forEach(v=>set.add(v)),remove:x=>set.delete(x),toggle(x,on){on=on===undefined?!set.has(x):on;on?set.add(x):set.delete(x);}};};

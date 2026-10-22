@@ -1,6 +1,6 @@
 'use strict';
 // 途中受領は保存と通知だけ。子の状態・管理記録・コピーを片付けない。
-const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+const fs=require('./platform/file-io'),path=require('node:path'),os=require('node:os');
 const {randomUUID,createHash}=require('node:crypto');
 const git=require('./git'),chat=require('./chat'),{lt}=require('./locale');
 const {exists,noLinks,inside,snapshot}=require('./remove');

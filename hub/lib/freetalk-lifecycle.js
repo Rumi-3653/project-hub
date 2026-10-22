@@ -1,7 +1,7 @@
 'use strict';
 const platform = require('./platform');
 const { lt } = require('./locale');
-const fs = require('node:fs'), path = require('node:path');
+const fs = require('./platform/file-io'), path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const { noLinks, exists } = require('./remove');
 const { scalar } = require('./frontmatter');

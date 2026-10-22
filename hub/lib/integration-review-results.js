@@ -87,10 +87,10 @@ function scope(h,r,i,p,manifest){
   }
   return {version:1,policy:'Determine applicable languages and history from original requirements and actual artifacts; no automatic exemption. Missing applicable requirements or history cannot pass.',originals:[...files.values()],absent,histories,languageArtifacts:manifest.filter(f=>/(?:zh[-_]TW|繁[體体]|\.lproj\/|\.strings(?:dict)?$)/i.test(f.path)).map(f=>({path:f.path,sha256:f.sha256}))};
 }
-function verify(e,h,r,i){if(![1,2].includes(e?.version)||JSON.stringify(e)!==JSON.stringify(collect(h,r,i,{scoped:e.version===2})))throw Error('Saved result review evidence changed');}
+function verify(e,h,r,i){if(e?.version===3)return require('./integration-review-supplement').verify(e,h,r,i);if(![1,2].includes(e?.version)||JSON.stringify(e)!==JSON.stringify(collect(h,r,i,{scoped:e.version===2})))throw Error('Saved result review evidence changed');}
 function verifyRecovery(e,row){noLinks(e.oldEvidence.file);if(hash(fs.readFileSync(e.oldEvidence.file))!==e.oldEvidence.sha256||hash(row)!==e.completionHash)throw Error('Original insufficient review evidence changed');}
 const originals=files=>files.map(f=>'\n## original '+f.path+' (SHA256 '+f.sha256+'; total lines '+f.lineCount+')\n'+f.ranges.map(x=>'### lines '+x.start+'-'+x.end+'\n'+x.text).join('\n')).join('');
-function render(e){return '\n## saved-results\n'+JSON.stringify({project:e.project,task:e.task,sha256:e.sha256,results:e.results,manifest:e.manifest},null,2)+'\n'+e.commits.map(c=>'\n## saved-commit '+c.declaration.commit+'\n'+c.patch).join('')+originals(e.originals)+(e.scope?'\n## review-scope\n'+JSON.stringify({...e.scope,originals:e.scope.originals.map(({ranges,...f})=>f)},null,2)+'\n## scope-originals\n'+originals(e.scope.originals):'');}
+function render(e){return '\n## saved-results\n'+JSON.stringify({project:e.project,task:e.task,sha256:e.sha256,results:e.results,manifest:e.manifest,...(e.version===3?{receiptScope:e.receiptScope,priorReview:e.priorReview}:{})},null,2)+(e.version===3?'\n## prior-refusal (evidence only; resolve all findings)\n'+e.priorReview.text:'')+'\n'+e.commits.map(c=>'\n## saved-commit '+c.declaration.commit+'\n'+c.patch+(c.history?'\n## retained-history\n'+c.history:'')).join('')+originals(e.originals)+(e.scope?'\n## review-scope\n'+JSON.stringify({...e.scope,originals:e.scope.originals.map(({ranges,...f})=>f)},null,2)+'\n## scope-originals\n'+originals(e.scope.originals):'');}
 // The legacy request had no source and four empty sections. A closed, isolated
 // materials-only refusal can be supplemented once; a fail/unknown cannot.
 function recovery(h,r,i,a,k,row){
@@ -134,4 +134,4 @@ function verifyScopeRecovery(e,a,row){
   // and content must stay fixed through queues, limit switches and receipt.
   if(a?.savedResults?.version!==1||a.savedResults.sha256!==e.savedResultsHash||hash(a.delivery)!==e.deliveryHash||!e.requestHash||!a.request||hash(a.request)!==e.requestHash||row.integrationAuto?.isolation?.session!==e.previousSession)throw Error('Original insufficient scope request changed');
 }
-module.exports={collect,verify,verifyRecovery,verifyScopeRecovery,render,recovery};
+module.exports={collect,verify,verifyRecovery,verifyScopeRecovery,render,recovery,scope};

@@ -3,6 +3,15 @@
 module.exports = function taskintegrationRoutes(ctx) {
   const { send, lt, store, inWork, copyMissing, expandHome, gitw, mainMergeDelivery, getMainMergeFlow, workRoot, mainMergeTokens, crypto, integrationBlockers, HUB_INSTANCE, lastMerge, record, taskIntegrate, launch, sessions, taskTransfer, setUnread, integrationFailure, integrationAbandon, integrateAuto, pruneUnread, resultsGate, executionRoles, delegateRequest } = ctx;
   return {
+    consultationClose: {
+      matches: (req,url) => req.method==='POST'&&/^\/api\/task\/integrate\/consultation-close\/(preview|apply|status|finish)$/.test(url.pathname),
+      handle(req,res,url,b) {
+        try {
+          const close=require('../integration-consultation-close'),op=url.pathname.split('/').pop();
+          return send(res,200,op==='preview'?close.preview(taskIntegrate,b):op==='apply'?close.apply(taskIntegrate,b):op==='finish'?close.finish(taskIntegrate,b):close.status(taskIntegrate,b));
+        }catch(e){return send(res,409,{error:e.message});}
+      },
+    },
     wait: {
       matches: (req, url) => req.method === 'GET' && url.pathname === '/api/task/integrate/wait',
       handle(req, res, url, b) {
@@ -155,6 +164,16 @@ module.exports = function taskintegrationRoutes(ctx) {
       matches: (req, url) => url.pathname === '/api/task/integrate/abandon',
       handle(req, res, url, b) {
         try{const out=b.preview===true?integrationAbandon.preview(b):integrationAbandon.apply(b);if(out.abandoned||out.recovered)record(out.recovered?'integrate-abandon-'+out.recovered:'integrate-abandon',b,{id:out.id,received:0,cleaned:0});return send(res,200,out);}catch(e){return send(res,e.delivery?500:409,{error:e.message,waiting:e.waiting,delivery:e.delivery||{state:'not-sent'}});}
+      },
+    },
+    futureHold: {
+      matches: (req, url) => req.method === 'POST' && url.pathname === '/api/task/future-hold',
+      handle(req, res, url, b) {
+        try {
+          const waiting=integrationBlockers(b,{op:'receipt'});if(waiting.length)throw Error(waiting.map(x=>x.message).join('、'));
+          const out=require('../task-future-hold').save(taskIntegrate,b);
+          record('task-future-hold',b,{held:out.held,revision:out.revision});return send(res,200,out);
+        }catch(e){return send(res,409,{error:e.message});}
       },
     },
     keep: {

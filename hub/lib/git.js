@@ -3,7 +3,7 @@ const platform = require('./platform');
 const { lt } = require('./locale');
 // Git の出し入れ：作業ごとの作業用コピー（worktree）を作る・本体に取り込む・片付ける
 // Git の無いフォルダは、最初に保存を始める（作業用コピーは作らない）
-const fs = require('fs');
+const fs = require('./platform/file-io');
 const path = require('path');
 const { createHash } = require('node:crypto');
 const { execFileSync, execFile } = require('child_process');

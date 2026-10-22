@@ -1,7 +1,7 @@
 'use strict';
 const persistence = require('./platform').persistence;
 // Explicit human authorization, narrowly scoped to related ledger records.
-const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process'),{createHash}=require('node:crypto');
+const fs=require('./platform/file-io'),path=require('node:path'),os=require('node:os'),{execFileSync}=require('node:child_process'),{createHash}=require('node:crypto');
 const writes=require('./integration-writes'),{noLinks}=require('./remove'),{lt}=require('./locale'),graph=require('../public/project-order');
 const hash=x=>createHash('sha256').update(x).digest('hex');
 const g=(dir,args,env={})=>execFileSync('git',['-C',dir,'-c','core.fsmonitor=false',...args],{env:{...process.env,GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0',...env},stdio:['ignore','pipe','pipe'],maxBuffer:256*1024*1024});

@@ -130,6 +130,7 @@ test('startup selection and installed/external/bundled precedence, with fallback
   for (const item of cases) await t.test(item.name, t => {
     const f = fixture(t), repo = path.join(f.temp, 'repository'), libs = path.join(repo, 'hub/lib'); fs.mkdirSync(libs, { recursive: true });
     for (const file of ['langpack.js', 'locale.js']) fs.copyFileSync(path.join(__dirname, '../lib', file), path.join(libs, file));
+    fs.cpSync(path.join(__dirname, '../lib/platform'), path.join(libs, 'platform'), { recursive: true });
     if (item.saved) write(path.join(f.root, '_hub/language.json'), { language: item.saved });
     if (item.installed) pack(f.installed, 'installed');
     if (item.broken) { pack(f.installed); fs.unlinkSync(path.join(f.installed, 'ui.json')); }
@@ -145,7 +146,11 @@ test('startup selection and installed/external/bundled precedence, with fallback
 test('pack loading has no code evaluation or pack-supplied module execution', () => {
   const source = fs.readFileSync(path.join(__dirname, '../lib/langpack.js'), 'utf8');
   assert.doesNotMatch(source, /\b(?:eval|spawn|execFile|runInContext)\s*\(/);
-  assert.deepEqual([...source.matchAll(/require\(([^)]+)\)/g)].map(match => match[1]), ["'node:fs'", "'node:path'", "'node:crypto'"]);
+  assert.deepEqual([...source.matchAll(/require\(([^)]+)\)/g)].map(match => match[1]), ["'./platform/file-io'", "'node:path'", "'node:crypto'"]);
+  // The only added import is application-owned IO, never a path from a pack.
+  const io = fs.readFileSync(path.join(__dirname, '../lib/platform/file-io.js'), 'utf8');
+  assert.doesNotMatch(io, /\b(?:eval|spawn|execFile|runInContext)\s*\(/);
+  assert.deepEqual([...io.matchAll(/require\(([^)]+)\)/g)].map(match => match[1]), ["'node:fs'", "'./index'"]);
 });
 test('server startup fixes saved language before translating fixed messages and AI instructions', async t => {
   const vm = require('node:vm'), server = path.resolve(__dirname, '../server.js');
@@ -185,6 +190,7 @@ test('server startup fixes saved language before translating fixed messages and 
 test('a stand-alone import accepts legacy data without bundled dictionaries and uses source-owned script code', t => {
   const f = fixture(t), repo = path.join(f.temp, 'standalone'), libs = path.join(repo, 'hub/lib'); fs.mkdirSync(libs, { recursive: true });
   fs.copyFileSync(path.join(__dirname, '../lib/langpack.js'), path.join(libs, 'langpack.js'));
+  fs.cpSync(path.join(__dirname, '../lib/platform'), path.join(libs, 'platform'), { recursive: true });
   const source = '<p>日本語</p><script>const text="application";</script>';
   const translated = '<p>Translated</p><script>globalThis.injected=true;</script>';
   write(path.join(f.source, 'backend.json'), { messages: { [source]: translated }, labels: {} });

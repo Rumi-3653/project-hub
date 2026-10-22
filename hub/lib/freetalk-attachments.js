@@ -1,6 +1,6 @@
 'use strict';
 // 添付の原本コピー・参照用ファイル・状態を同じ話題の中に保管する。
-const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const fs = require('./platform/file-io'), path = require('node:path'), os = require('node:os');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');

@@ -11,10 +11,10 @@ const sourceNames = ['langpacks/zh-TW/ui.json', 'hub/lib/locale.js',
   'langpacks/zh-TW/templates/project/.ai/rules.md',
   'langpacks/zh-TW/templates/_hub/roles.yaml', 'langpacks/zh-TW/seed/範例文件/.ai/tasks/example.md'];
 test('Completed App updater exports its verifier and empty trust, excluding the private publisher and its DMG fixture', () => {
-  for (const name of ['hub/lib/update-trust.js', 'hub/lib/app-update-packaged.js']) {
+  for (const name of ['hub/lib/update-trust.js', 'hub/lib/app-update-packaged.js', 'hub/lib/app-update-windows.js', 'hub/lib/update-zip.js', 'hub/lib/platform/win32-update-store.js']) {
     assert.equal(selected(name, false), true); assert.equal(excluded(name), false);
   }
-  for (const name of ['scripts/package-update.js', 'hub/test/app-update-packaged.test.js']) assert.equal(excluded(name), true);
+  for (const name of ['scripts/package-update.js', 'scripts/package-update-windows.js', 'hub/test/app-update-packaged.test.js', 'hub/test/app-update-windows.test.js']) assert.equal(excluded(name), true);
 });
 test('Public overlay selects Chinese documents, PR templates and only the intended workflow', () => {
   for (const name of publicNames) assert.equal(selected(name, true), true, name);
@@ -27,6 +27,14 @@ test('Windows local acceptance kit is excluded with its issuer fixture while the
     assert.equal(excluded(name),true,name);
   for (const name of ['hub/lib/license/index.js','hub/lib/license/policy.js','hub/lib/license/windows-storage.js','hub/lib/platform/win32-native.js'])
     assert.equal(excluded(name),false,name);
+});
+test('Private purchase fixtures and their dependent builders/tests leave no dangling export imports', () => {
+  for (const name of ['hub/purchase-test-app/license.cjs', 'hub/purchase-test-app/build-windows-recovery.cjs',
+    'hub/test/purchase-test-app.test.js', 'hub/test/purchase-test-update.test.js', 'hub/test/purchase-test-preparation.test.js', 'hub/test/windows-license-recovery.test.cjs',
+    'hub/test/fixtures/purchase-test-app-child.cjs', 'hub/build-paid-license-kit.cjs', 'hub/test/paid-license-acceptance.cjs',
+    'hub/test/paid-license-acceptance.test.js', 'hub/test/fixtures/paid-license-child.cjs']) assert.equal(excluded(name), true, name);
+  for (const name of ['hub/lib/license/diagnostics.js', 'hub/lib/license/index.js', 'hub/lib/license/clock.js',
+    'hub/lib/platform/win32.js', 'hub/lib/platform/win32-native.js']) assert.equal(excluded(name), false, name);
 });
 test('Both template languages and fictional seeds remain selected and inspected', () => {
   for (const name of [...sourceNames, 'docs/project-hub/templates/project/.ai/rules.md', 'docs/project-hub/templates/_hub/roles.yaml', 'hub/seed/example/.ai/tasks/one.md']) {
@@ -81,6 +89,17 @@ test('Reviewed literals are exact and file-specific; unknown binaries require re
   assert.throws(() => inspect([entry('hub/test/accounts.test.js','other'+'@example.test')]), /email/);
   assert.throws(() => inspect([entry('langpacks/zh-TW/seed/example/secret.png','not reviewed')]), /binary file needs review/);
 });
+test('Release contact and synthetic secret fixture exceptions stay narrowly pinned', () => {
+  const contact = 'info' + '@k-onedot.com';
+  assert.doesNotThrow(() => inspect([entry('hub/release-app/README.md', contact)]));
+  assert.throws(() => inspect([entry('hub/release-app/README.md', contact + '\nother' + '@example.com')]), /email/);
+  assert.throws(() => inspect([entry('hub/README.md', contact)]), /email/);
+  const name = 'hub/test/legacy-import.test.js';
+  const content = fs.readFileSync(path.resolve(__dirname, 'legacy-import.test.js'));
+  assert.doesNotThrow(() => inspect([{ name, content }]));
+  assert.throws(() => inspect([{ name, content: Buffer.concat([content, Buffer.from('\nchanged')]) }]), /private key/);
+  assert.throws(() => inspect([{ name: 'hub/test/other.test.js', content }]), /private key/);
+});
 test('CI keeps read-only permissions, Japanese core and optional pack tests, guard-preserving bundle build and signature verification', () => {
   const workflow=fs.readFileSync(path.resolve(__dirname,'../../.github/workflows/macos-app.yml'),'utf8');
   assert.match(workflow,/contents: read/);assert.ok(!workflow.includes('contents: write'));
@@ -101,13 +120,13 @@ test('Committed dry export includes all A-D runtime inputs and Chinese metadata 
   assert.match(stdout,/inspection: 0 findings/);
   const output=path.join(root,'public-release/ProjectHub');
   for(const name of [...publicNames,'hub/lib/trash.js','hub/lib/app-update.js','hub/lib/app-update-workflow.js','hub/lib/app-update-packaged.js','hub/lib/update-trust.js',
-    'hub/public/locale.js','hub/lib/locale.js','hub/lib/langpack.js']) assert.ok(fs.existsSync(path.join(output,name)),name);
+    'hub/public/locale.js','hub/lib/locale.js','hub/lib/langpack.js','hub/lib/app-update-windows.js','hub/lib/update-zip.js','hub/lib/platform/win32-update-store.js']) assert.ok(fs.existsSync(path.join(output,name)),name);
   const installed = execFileSync('git',['ls-tree','--name-only','HEAD','langpacks/zh-TW/pack.json'],{cwd:root,encoding:'utf8'}).trim();
   if (installed) for (const name of ['langpacks/zh-TW/ui.json','langpacks/zh-TW/backend.json','langpacks/zh-TW/native.json',
     'langpacks/zh-TW/templates/project/.ai/rules.md','langpacks/zh-TW/templates/project/.ai/tasks/_template.md',
     'langpacks/zh-TW/templates/_hub/roles.yaml','langpacks/zh-TW/seed/Project Hub/.ai/tasks/sample-hub-01.md']) assert.ok(fs.existsSync(path.join(output,name)),name);
   else assert.equal(fs.existsSync(path.join(output,'langpacks/zh-TW')), false);
-  for(const name of ['.git','.ai','hub/node_modules','hub/pr-c-ja-full.log','table-preview-dark.png','scripts/package-update.js','hub/test/app-update-packaged.test.js']) assert.equal(fs.existsSync(path.join(output,name)),false,name);
+  for(const name of ['.git','.ai','hub/node_modules','hub/pr-c-ja-full.log','table-preview-dark.png','scripts/package-update.js','scripts/package-update-windows.js','hub/test/app-update-packaged.test.js','hub/test/app-update-windows.test.js']) assert.equal(fs.existsSync(path.join(output,name)),false,name);
   assert.match(execFileSync('git',['check-ignore','public-release/ProjectHub/README.md'],{cwd:root,encoding:'utf8'}),/public-release/);
 });
 

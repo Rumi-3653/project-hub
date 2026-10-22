@@ -25,6 +25,51 @@ function fixture(t){
   assert.equal(r().auto.stopped,undefined,JSON.stringify(r().auto.stopped));assert.equal(r().auto.main.state,'done');assert.equal(git.inspect(body).head,expectedMainHead);assert.equal(mains,0);};
  return {root,dir,body,copy:pw.dir,store,parent,removal,transfer,integrate,auto,requests,write,child,declaration,preview,start,r,settle,finish,setBusy:x=>busy=x};
 }
+test('受領後の完了承認：管理情報だけの変更は未受領に戻らず、別子だけを候補にする',async t=>{
+ const f=fixture(t),c=f.child('完了対象');f.start(true);await f.finish();
+ const before=f.preview(),receipt=fs.readFileSync(f.transfer.file('Fixture',c.id),'utf8');
+ assert.equal(before.items.find(i=>i.task===c.id).alreadyReceived,true);
+ const child=f.store.readTask(f.store.taskFile('Fixture',c.id));
+ const approved=f.store.decideTask('Fixture',c.id,'approve',child.completionHash);
+ assert.equal(approved.state,'完了');assert.notEqual(approved.completionHash,child.completionHash);
+ const other=f.child('次の子'),current=f.preview();
+ assert.deepEqual(current.items.map(i=>i.task),[other.id]);
+ const offer=f.transfer.offers().find(x=>x.task===c.id&&x.targetTask===f.parent.id);
+ assert.equal(offer.pending,false);assert.equal(offer.received.head,git.inspect(c.workdir).head);
+ assert.equal(fs.readFileSync(f.transfer.file('Fixture',c.id),'utf8'),receipt,'表示のために旧受領を書き換えない');
+ assert.ok(fs.existsSync(c.workdir));assert.ok(fs.existsSync(path.join(f.dir,'.ai/chat',c.id+'.jsonl')));
+ assert.deepEqual(f.preview().items.map(i=>i.task),[other.id],'再読込でも戻らない');
+ assert.throws(()=>f.auto.apply({project:'Fixture',task:f.parent.id,token:before.token,auto:true,confirm:true,thenMain:false,mode:'single',selected:[{project:'Fixture',task:c.id,keep:false}]}));
+});
+test('完了だけでは受領済みにしない／正式再開した受領済みの子は候補へ戻す',async t=>{
+ const f=fixture(t),c=f.child('再開対象');f.start(true);await f.finish();
+ let child=f.store.readTask(f.store.taskFile('Fixture',c.id));child=f.store.decideTask('Fixture',c.id,'approve',child.completionHash);
+ assert.equal(f.preview().items.length,0);
+ f.store.decideTask('Fixture',c.id,'continue',child.completionHash);
+ assert.equal(f.preview().items.find(i=>i.task===c.id).alreadyReceived,false);
+ const n=f.child('未受領完了');f.store.decideTask('Fixture',n.id,'approve',n.completionHash);
+ assert.equal(f.preview().items.find(i=>i.task===n.id).alreadyReceived,false);
+});
+test('受領後に保持選択を変えてから完了承認しても再掲しない',async t=>{
+ const f=fixture(t),c=f.child('保持選択後完了');f.start(true);await f.finish();
+ for(const keep of [false,true])f.integrate.simple.saveKeep({project:'Fixture',task:f.parent.id,childProject:'Fixture',childTask:c.id,keep});
+ const child=f.store.readTask(f.store.taskFile('Fixture',c.id));f.store.decideTask('Fixture',c.id,'approve',child.completionHash);
+ assert.equal(f.preview().items.length,0);assert.equal(f.transfer.offers()[0].pending,false);
+});
+for(const change of ['body','result','source','file','mode','receipt-text','receipt-hash','receipt-id'])test('完了承認で実変更・破損を隠さない：'+change,async t=>{
+ const f=fixture(t),c=f.child('変更対象');f.start(true);await f.finish();
+ const file=f.store.taskFile('Fixture',c.id);let child=f.store.readTask(file);f.store.decideTask('Fixture',c.id,'approve',child.completionHash);
+ if(change==='body')f.store.appendSection('Fixture',c.id,'やったこと','追加の作業');
+ if(change==='result')f.store.appendSection('Fixture',c.id,'成果','- なし：追加成果の説明');
+ if(change==='source'){f.write(path.join(c.workdir,'new-code'),'new');git.save(c.workdir,'new code');}
+ if(change==='file')f.write(path.join(f.dir,'作業',c.id,'report.txt'),'changed');
+ if(change==='mode')fs.chmodSync(path.join(f.dir,'作業',c.id,'report.txt'),0o600);
+ if(change.startsWith('receipt-')){const r=f.transfer.read('Fixture',c.id);if(change==='receipt-text')r.retention.text+='\nchanged';if(change==='receipt-hash')r.retention.after='wrong';if(change==='receipt-id')r.id='another';f.transfer.save(r);}
+ // Even approving an edited document must not acknowledge its new content.
+ child=f.store.readTask(file);if(child.state!=='完了')f.store.decideTask('Fixture',c.id,'approve',child.completionHash);
+ assert.equal(f.preview().items.find(i=>i.task===c.id)?.alreadyReceived,false);
+ assert.equal(f.transfer.offers().find(x=>x.task===c.id&&x.targetTask===f.parent.id).pending,true);
+});
 for(const change of ['parent-note','child-updated','target-mtime'])test('安全範囲が同じ確認は記録・表示時刻・mtimeだけでは失効しない：'+change,t=>{
  const f=fixture(t),c=f.child(),d=f.preview();
  if(change==='parent-note')f.store.appendSection('Fixture',f.parent.id,'メモ','表示確認の記録だけ');
@@ -347,4 +392,121 @@ test('整理ループ：終了済みでも残件申告なしなら再開の受�
 });
 test('整理ループ：開始許可は保存された対象・request・関係・保持選択だけに限定',async t=>{
  const f=fixture(t),c=f.child('起動境界',{unknown:true});f.start(true);await f.auto.tick();const q=f.requests[0],k=q.text.match(/integration-auto:([a-f0-9]{64}):organize/)[1],r=f.r();r.auto.attempts[k].delivery.state='intent';f.integrate.save(r);const read=f.integrate.read,pending=f.integrate.pending;f.integrate.pending=()=>[{project:'none',task:'none'},...pending.call(f.integrate)];f.integrate.read=(p,t)=>p==='none'?{auto:{}}:read.call(f.integrate,p,t);assert.doesNotThrow(()=>f.integrate.simple.organizeStart(q));f.integrate.read=read;f.integrate.pending=pending;for(const b of [{...q,task:f.parent.id},{...q,requestKey:'other'},{...q,text:'no marker'}])assert.throws(()=>f.integrate.simple.organizeStart(b));f.store.updateTask('Fixture',c.id,{question:'人の判断'});assert.throws(()=>f.integrate.simple.organizeStart(q));assert.equal(f.requests.length,1);
+});
+
+async function completedGrandchild(t){
+ const f=fixture(t),mid=f.child('中間'),leaf=f.child('受領済み孫',{parent:mid.id});
+ const keep=(c,value)=>f.integrate.simple.saveKeep({project:'Fixture',task:f.parent.id,childProject:'Fixture',childTask:c.id,keep:value});
+ keep(leaf,true);f.start(true,'selected',[{project:'Fixture',task:leaf.id,keep:true}]);await f.finish();
+ const child=f.store.readTask(f.store.taskFile('Fixture',leaf.id));f.store.decideTask('Fixture',leaf.id,'approve',child.completionHash);
+ return {...f,mid,leaf,keep};
+}
+test('完了孫R1：普段は非候補、祖先の片付け時だけ保持選択を変えず確認行を出す',async t=>{
+ const f=await completedGrandchild(t),other=f.child('別子'),before=untouched(f,f.leaf);
+ f.keep(f.mid,true);assert.deepEqual(f.preview().items.map(i=>i.task).sort(),[f.mid.id,other.id].sort());
+ f.keep(f.mid,false);const d=f.preview(),leaf=d.items.find(i=>i.task===f.leaf.id);
+ assert.equal(leaf?.cleanupOnly,true);assert.equal(leaf.keep,true);assert.equal(leaf.noop,true);
+ assert.equal(require('../public/integration-selection').select(d.items,'single',[{project:'Fixture',task:f.mid.id}]).items.length,2);
+ assert.ok(require('../public/integration-selection').select(d.items,'single',[{project:'Fixture',task:f.mid.id}]).reason);
+ assert.throws(()=>f.auto.apply({project:'Fixture',task:f.parent.id,token:d.token,auto:true,confirm:true,thenMain:false,mode:'single',selected:[{project:'Fixture',task:f.mid.id,keep:false}]}));
+ assert.deepEqual(untouched(f,f.leaf),before);assert.equal(f.r().complete,true);
+ f.keep(f.mid,true);assert.ok(!f.preview().items.some(i=>i.task===f.leaf.id));
+ assert.ok(f.preview().items.some(i=>i.task===other.id));
+});
+for(const mode of ['single','selected','batch'])test('完了孫R1：明示選択後の子孫scopeと正式片付け・受領出典保持：'+mode,async t=>{
+ const f=await completedGrandchild(t),oldReceipt=f.transfer.lastReceipt(f.transfer.read('Fixture',f.leaf.id)),select=require('../public/integration-selection').select;
+ f.keep(f.leaf,false);const before=f.preview(),d=f.preview();
+ assert.equal(d.items.find(i=>i.task===f.leaf.id).alreadyReceived,true);assert.equal(d.items.find(i=>i.task===f.leaf.id).cleanupOnly,true);
+ const selected=d.items.map(i=>({project:i.project,task:i.task,keep:i.keep}));
+ const plan=select(d.items,mode,mode==='single'?[{project:'Fixture',task:f.mid.id}]:selected);
+ assert.equal(plan.reason,'');assert.deepEqual(plan.items.map(i=>i.task),[f.leaf.id,f.mid.id]);
+ f.auto.apply({project:'Fixture',task:f.parent.id,token:d.token,auto:true,confirm:true,thenMain:false,mode,selected});
+ const scope=JSON.stringify(f.r().auto.scope.map(({review,...i})=>i));assert.deepEqual(f.r().items.map(i=>i.task),[f.leaf.id,f.mid.id]);assert.ok(f.r().auto.scope.every(i=>i.keep===false));
+ assert.throws(()=>f.auto.apply({project:'Fixture',task:f.parent.id,token:before.token,auto:true,confirm:true,thenMain:false,mode,selected}));
+ await f.finish();assert.equal(JSON.stringify(f.r().auto.scope.map(({review,...i})=>i)),scope);assert.ok(f.r().auto.scope.every(i=>i.review.confirmed));
+ const receipt=f.transfer.read('Fixture',f.leaf.id);assert.ok(receipt.received.some(r=>r.id===oldReceipt.id&&r.hash===oldReceipt.hash));
+ assert.equal(receipt.complete,true);assert.equal(receipt.retained,undefined);
+ for(const c of [f.leaf,f.mid]){const i=f.r().items.find(i=>i.task===c.id);assert.equal(i.state,'片付け済み');assert.ok(fs.existsSync(i.copyTrashed));assert.equal(f.store.taskFile('Fixture',c.id),null);}
+});
+test('完了孫R1：確認行だけの開始・保持孫・省略した未受領子孫を拒否する',async t=>{
+ const f=await completedGrandchild(t),select=require('../public/integration-selection').select;
+ f.keep(f.leaf,false);let d=f.preview(),leaf=d.items.find(i=>i.task===f.leaf.id),mid=d.items.find(i=>i.task===f.mid.id);
+ for(const mode of ['single','selected']){
+  assert.match(select(d.items,mode,[leaf]).reason,/上の作業/);
+  assert.throws(()=>f.auto.apply({project:'Fixture',task:f.parent.id,token:d.token,auto:true,confirm:true,thenMain:false,mode,selected:[{project:'Fixture',task:leaf.task,keep:false}]}),/上の作業/);
+ }
+ assert.throws(()=>selectedRequest(f,d,[{project:'Fixture',task:mid.task,keep:false}]),/も選ぶか/);
+ f.keep(f.leaf,true);d=f.preview();assert.throws(()=>selectedRequest(f,d,d.items.map(i=>({project:i.project,task:i.task,keep:i.keep}))));
+ const fresh=f.child('未受領孫',{parent:f.mid.id});d=f.preview();assert.equal(d.items.find(i=>i.task===fresh.id).cleanupOnly,undefined);
+ assert.throws(()=>selectedRequest(f,d,[{project:'Fixture',task:f.mid.id,keep:false}]),/も選ぶか/);
+ assert.equal(f.r().items.length,1);assert.equal(f.r().complete,true);assert.ok(fs.existsSync(f.leaf.workdir));assert.ok(fs.existsSync(fresh.workdir));
+});
+for(const change of ['keep','ancestor','receipt','source'])test('完了孫R1：確認後CASで無変更拒否：'+change,async t=>{
+ const f=await completedGrandchild(t);f.keep(f.leaf,false);const d=f.preview(),selected=d.items.map(i=>({project:i.project,task:i.task,keep:i.keep}));
+ if(change==='keep')f.keep(f.leaf,true);
+ if(change==='ancestor')f.keep(f.mid,true);
+ if(change==='receipt'){const r=f.transfer.read('Fixture',f.leaf.id);r.received.at(-1).hash='changed';f.transfer.save(r);}
+ if(change==='source'){f.write(path.join(f.leaf.workdir,'later'),'new');git.save(f.leaf.workdir,'later');}
+ const before=[untouched(f,f.leaf),untouched(f,f.mid)],record=JSON.stringify(f.r());
+ assert.throws(()=>f.auto.apply({project:'Fixture',task:f.parent.id,token:d.token,auto:true,confirm:true,thenMain:false,mode:'single',selected}));
+ assert.equal(JSON.stringify(f.r()),record);assert.deepEqual([untouched(f,f.leaf),untouched(f,f.mid)],before);
+});
+test('完了孫R1：再開・再読込は固定scopeを保持し、別子と後追加を巻き込まない',async t=>{
+ const f=await completedGrandchild(t),other=f.child('別の子'),before=untouched(f,other);f.keep(f.leaf,false);const d=f.preview();
+ const selected=d.items.filter(i=>i.task!==other.id).map(i=>({project:i.project,task:i.task,keep:i.keep}));selectedRequest(f,d,selected);
+ const scope=JSON.stringify(f.r().auto.scope);f.auto.stop('Fixture',f.parent.id,'合成停止');const later=f.child('後からの子'),laterBefore=untouched(f,later),fresh=f.preview();
+ assert.equal(f.auto.resume({project:'Fixture',task:f.parent.id,token:fresh.token,confirm:true}).resumed,true);
+ const restarted=new IntegrateAuto({integrate:f.integrate,dispatch:async q=>f.requests.push(q)});restarted.pendingRequest=()=>true;await restarted.tick();
+ assert.equal(JSON.stringify(f.r().auto.scope),scope);assert.deepEqual(f.r().items.map(i=>i.task),[f.leaf.id,f.mid.id]);
+ assert.deepEqual(untouched(f,other),before);assert.deepEqual(untouched(f,later),laterBefore);
+});
+test('完了孫R1：正式再開・未知の追加成果を片付け確認として隠さない',async t=>{
+ const f=await completedGrandchild(t);f.keep(f.mid,true);let child=f.store.readTask(f.store.taskFile('Fixture',f.leaf.id));
+ f.store.decideTask('Fixture',f.leaf.id,'continue',child.completionHash);let d=f.preview();assert.equal(d.items.find(i=>i.task===child.id).cleanupOnly,undefined);
+ f.keep(f.mid,false);child=f.store.readTask(f.store.taskFile('Fixture',child.id));f.store.decideTask('Fixture',child.id,'approve',child.completionHash);
+ f.write(path.join(f.dir,'作業',child.id,'new.txt'),'unreceived');d=f.preview();assert.equal(d.items.find(i=>i.task===child.id).alreadyReceived,false);assert.equal(d.items.find(i=>i.task===child.id).cleanupOnly,undefined);
+ // A missing descendant still blocks the same removal plan. No guard is dropped.
+ const mid=d.items.find(i=>i.task===f.mid.id),selection=require('../public/integration-selection');assert.ok(selection.select([mid],'single',[mid]).reason);
+});
+for(const locale of ['ja'])test('完了孫R1 UI：確認行と保持値・単独送信拒否・明示選択後scope：'+locale,async()=>{
+ const f=selectionUi(locale);f.preview.items[0].descendants=[{project:'p',task:'c1',title:'B'}];Object.assign(f.preview.items[1],{cleanupOnly:true,alreadyReceived:true,keep:true,noop:true});
+ await f.show();const html=f.el('#integrate-sheet').innerHTML;
+ assert.match(html,locale==='ja'?/完了・受領済みです/:/此作業已完成並接收成果/);
+ assert.match(html,/name="integration-keep-1"[^>]*[\s\S]*value="true" checked/);
+ assert.equal((html.match(/data-integrate-action="single"/g)||[]).length,1);
+ await f.click('single',0);assert.equal(f.posts().length,0);assert.equal(f.run('integratePreview.items[1].keep'),true);
+ const input={matches:s=>s==='[data-integrate-keep]',dataset:{index:'1'},value:'false'};
+ // Synthetic backend emulates a fresh verified preview after the explicit save.
+ f.preview.items[1].noop=false;f.ctx.keepInput=input;await f.run('saveIntegrationKeep(keepInput)');
+ assert.equal(f.calls.filter(c=>c.route.endsWith('/keep')).length,1);assert.equal(f.run('integratePreview.items[1].keep'),false);
+ await f.click('single',1);assert.equal(f.posts().length,0);assert.match(f.el('#integrate-status').textContent,locale==='ja'?/上の作業/:/上層作業/);
+ await f.click('single',0);assert.equal(f.posts().length,1);assert.deepEqual(JSON.parse(JSON.stringify(f.posts()[0].body.selected)),[{project:'p',task:'c0',keep:false},{project:'p',task:'c1',keep:false}]);
+});
+
+test('完了孫R1：完了後の保持選択を往復しても全文連鎖と正式完了承認を維持',async t=>{
+ const f=await completedGrandchild(t);const initial=f.transfer.lastReceipt(f.transfer.read('Fixture',f.leaf.id));
+ for(const keep of [false,true,false]){
+  f.keep(f.leaf,keep);const r=f.transfer.read('Fixture',f.leaf.id),last=r.keepChanges.at(-1),item=f.preview().items.find(i=>i.task===f.leaf.id);
+  assert.equal(require('../lib/completion').hash(last.beforeText),last.before);assert.equal(require('../lib/completion').hash(last.text),last.after);
+  assert.equal(item.alreadyReceived,true);assert.equal(item.cleanupOnly,true);assert.equal(item.keep,keep);
+  assert.equal(f.transfer.offers().find(i=>i.task===f.leaf.id&&i.targetTask===f.mid.id).pending,true,'未受領の中間へはpendingのまま。祖先への受領を流用しない');
+  assert.ok(require('../public/project-order').approved(f.store.readTask(f.store.taskFile('Fixture',f.leaf.id))));assert.equal(r.received.at(-1).hash,initial.hash);
+ }
+});
+for(const change of ['before-text','after-text','missing-before','before-hash','after-hash'])test('完了孫R1：完了後保持の全文根拠を欠損・改変しても受領済みとしない：'+change,async t=>{
+ const f=await completedGrandchild(t);f.keep(f.leaf,false);const r=f.transfer.read('Fixture',f.leaf.id),link=r.keepChanges.at(-1),hash=require('../lib/completion').hash;
+ if(change==='before-text'){link.beforeText+='\n変更';link.before=hash(link.beforeText);}
+ if(change==='after-text'){link.text+='\n変更';link.after=hash(link.text);const file=f.store.taskFile('Fixture',f.leaf.id);fs.writeFileSync(file,link.text);f.store.completion.approveTask('Fixture/'+f.leaf.id,link.text);}
+ if(change==='missing-before')delete link.beforeText;
+ if(change==='before-hash')link.before='changed';
+ if(change==='after-hash')link.after='changed';
+ f.transfer.save(r);const item=f.preview().items.find(i=>i.task===f.leaf.id);assert.equal(item.alreadyReceived,false);assert.equal(item.cleanupOnly,undefined);assert.equal(f.transfer.offers().find(i=>i.task===f.leaf.id&&i.targetTask===f.mid.id).pending,true);
+});
+test('完了孫R1：保留された受領済み孫は省略して祖先を片付けられない',async t=>{
+ const f=await completedGrandchild(t);f.keep(f.leaf,false);const old=f.preview(),hold=require('../lib/task-future-hold'),child=f.store.readTask(f.store.taskFile('Fixture',f.leaf.id));
+ hold.save(f.integrate,{project:'Fixture',task:child.id,held:true,before:false,revision:null,expectedHash:child.completionHash,confirm:true});
+ const before=untouched(f,f.leaf),record=JSON.stringify(f.r()),d=f.preview();assert.equal(d.items.some(i=>i.task===child.id),false);
+ const mid=d.items.find(i=>i.task===f.mid.id);assert.ok(require('../public/integration-selection').select(d.items,'single',[mid]).reason);
+ for(const token of [old.token,d.token])assert.throws(()=>f.auto.apply({project:'Fixture',task:f.parent.id,token,auto:true,confirm:true,thenMain:false,mode:'single',selected:[{project:'Fixture',task:f.mid.id,keep:false}]}));
+ assert.deepEqual(untouched(f,f.leaf),before);assert.equal(JSON.stringify(f.r()),record);
 });

@@ -18,12 +18,12 @@ function appUpdateHtml(data) {
   const d = data || {}, disabled = appUpdatePending || d.supported === false ? 'disabled' : '';
   const checking = ['checking', 'downloading', 'confirming', 'preparing', 'translating', 'testing', 'building', 'verifying', 'installing', 'publishing'].includes(d.phase);
   return UI.template`<label class="chk"><input id="app-auto-update" type="checkbox" ${d.enabled ? 'checked' : ''} ${disabled}> Project Hub を自動で更新する</label>
-    <p class="small">毎日1回確認します。取得元は ${esc(d.mode === 'packaged' ? 'GitHub Releases（完成アプリ）' : 'kieiken/project-hub')} です。AI の作業・順番待ちが終わるまで適用を待ちます。この画面を勝手に読み直すことはありません。</p>
+    <p class="small">毎日1回確認します。取得元は ${esc(d.channel === 'purchase-test' ? '署名付きの購入試験版専用配信' : d.mode === 'packaged' ? (d.packageOS === 'win32' ? 'GitHub Releases（Windows ZIP）' : 'GitHub Releases（完成アプリ）') : 'kieiken/project-hub')} です。AI の作業・順番待ちが終わるまで適用を待ちます。この画面を勝手に読み直すことはありません。</p>
     <p class="small">稼働版：<b>${esc(d.currentVersion || d.sourceVersion || '—')}</b> ／ 最新版：<b>${esc(d.latestVersion || '—')}</b><br>前回の確認：${esc(appUpdateDate(d.lastCheck))}<br>次回の確認：${esc(d.nextCheck ? appUpdateDate(d.nextCheck) : UI.text('未定'))}</p>
     <p class="note" role="status">${esc(d.supported === false ? UI.text('未対応') : APP_UPDATE_PHASES[d.phase] || UI.text('待機中'))}${d.reason ? '：' + esc(d.reason) : ''}</p>
     ${d.notes ? UI.template`<p class="small">${esc(d.notes)}</p>` : ''}
     ${d.previousVersion ? UI.template`<p class="small">保持している前の版：${esc(d.previousVersion)}</p>` : ''}
-    ${d.pending ? UI.html('<p class="small">まだ適用していない更新があります。</p>') : ''}
+    ${d.restartNeeded ? UI.html(d.manualReopen ? '<p class="small">新しい版を準備しました。入力中の文を保存し、処理が終わったらアプリを閉じて同じアプリを開き直してください。起動を確認できなければ前の版へ戻します。</p>' : '<p class="small">新しい版を準備しました。入力中の文とAIの作業が終わるとアプリを開き直します。</p>') : d.pending ? UI.html('<p class="small">まだ適用していない更新があります。</p>') : ''}
     ${d.autoTranslate ? UI.html('<p class="small">新版を繁体字中国語に翻訳し、テストを通してからアプリを更新します。</p>') : ''}
     ${d.publishEnabled ? UI.html('<p class="small">テストを通した翻訳のPRを、元のプロジェクトへ送ります。</p>') : ''}
     ${d.prUrl ? UI.template`<button class="btn plain sm" data-url="${esc(d.prUrl)}" type="button">翻訳のPRを見る</button>` : ''}

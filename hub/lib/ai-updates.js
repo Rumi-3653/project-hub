@@ -1,6 +1,6 @@
 'use strict';
 // 日次は読取だけ。一括全体のロックと同日予約を、CLI個別操作とは分けて保持する。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { AIS } = require('./launch');
 const { toolError } = require('./ai-tools');

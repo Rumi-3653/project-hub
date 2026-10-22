@@ -109,7 +109,7 @@ test('unified entry and stopped path are clear; no test command means no executi
  const a=fixture({token:'',candidates:[],scripts:[],stopped:{reason:'large',path:'/資料/<raw>.json',size:2097152}}),h=a.el('#maintenance-body').innerHTML;
  assert.match(h,/資料\/&lt;raw&gt;.json/);assert.match(h,/2.0 MB/);assert.match(h,/アプリが動くかは見ません/);
  assert.doesNotMatch(h,/data-maint-action="test"/);
- const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');assert.equal((source.match(/data-maintenance="1"/g)||[]).length,1);assert.doesNotMatch(source,/data-maintenance="verify"/);
+ const source=require('./fixtures/app-source.cjs').readApp();assert.equal((source.match(/data-maintenance="1"/g)||[]).length,1);assert.doesNotMatch(source,/data-maintenance="verify"/);
 });
 test('busy state blocks apply, verification and restore before calling API',async()=>{
  const a=fixture({busy:true}),h=a.el('#maintenance-body').innerHTML;
@@ -133,18 +133,20 @@ test('stale project responses do not overwrite a later preview',async()=>{
  assert.equal(vm.runInContext('maintenanceData.marker',a.ctx),'newer');
 });
 
-test('別プロジェクトとその作業を一覧で押すと閉じ、同じ所属や一覧外では開いたまま',()=>{
+test('整理と確認は同じ所属や一覧外も含む外側のタップで閉じ、パネル内と開くボタンでは閉じない',()=>{
  const a=fixture(),drawer=a.el('#maintenance-drawer');
  for(const [dataset,inList,closed] of [
   [{go:'project',p:'other'},true,true], [{go:'work',p:'other',t:'t'},true,true],
-  [{go:'project',p:'p'},true,false], [{go:'work',p:'p',t:'same'},true,false],
-  [{go:'work',p:'other',t:'t'},false,false], [{go:'newproject'},true,false],
-  [{p:'other',treeMenu:'1'},true,false],
+  [{go:'project',p:'p'},true,true], [{go:'work',p:'p',t:'same'},true,true],
+  [{go:'work',p:'other',t:'t'},false,true], [{go:'newproject'},true,true],
+  [{p:'other',treeMenu:'1'},true,true],
+  [{maintCandidate:'choice'},false,false], [{maintenance:'open',p:'p'},false,false],
+  [{},false,true],
  ]) {
   drawer.hidden=false;
   a.events.get('click:capture')({target:{closest:s=>{
-   assert.equal(s,'#list [data-go][data-p]');
-   return inList && dataset.go && dataset.p ? {dataset} : null;
+   assert.equal(s,'#maintenance-drawer, [data-maintenance]');
+   return dataset.maintCandidate || dataset.maintenance ? {dataset} : null;
   }},preventDefault(){assert.fail('navigation must continue');},stopPropagation(){assert.fail('navigation must continue');}});
   assert.equal(drawer.hidden,closed);
  }
@@ -161,7 +163,7 @@ test('別プロジェクトを押して閉じても、実行中の片付けと�
  };
  a.el('#maintenance-drawer').hidden=false;
  const pending=a.click({maintAction:'apply'});
- a.events.get('click:capture')({target:{closest:()=>({dataset:{go:'work',p:'other',t:'t'}})}});
+ a.events.get('click:capture')({target:{closest:()=>null}});
  assert.equal(a.el('#maintenance-drawer').hidden,true);
  assert.equal(vm.runInContext('maintenancePending',a.ctx),true);
  assert.equal(vm.runInContext('maintenanceProject',a.ctx),'p');

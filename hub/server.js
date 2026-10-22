@@ -7,13 +7,17 @@ const { loadPack } = langpacks;
 // 使い方: node server.js  →  http://127.0.0.1:4545
 const http = require('http');
 const crypto = require('crypto');
-const fs = require('fs');
+const fs = require('./lib/platform/file-io');
 const path = require('path');
 const os = require('os');
 const { StaticFiles, sendEncoded } = require('./lib/static-files');
 const { Store, expandHome } = require('./lib/store');
 // Resolve the saved language before dependencies create translated constants.
 const ROOT = expandHome(process.env.HUB_ROOT || path.join(os.homedir(), 'Documents', 'AI-Workspace'));
+// Acquire before any user store, migration or licence is opened. Older releases
+// do not implement this lease; trial selection also checks running old servers.
+const dataUse = require.main === module ? require('./lib/workspace-use').acquire([ROOT, path.join(os.homedir(), 'Documents', 'freetalk')].filter(p => p === ROOT || fs.existsSync(p))) : null;
+if (dataUse) process.once('exit', () => dataUse.release());
 const move = new (require('./lib/move').Move)({ root: ROOT, version: require('./package.json').version });
 if (require.main === module && move.needsStartup()) {
   module.exports = { move, server: require('./lib/move-boot').serve(move, { port: Number(process.env.HUB_PORT || 4545), version: require('./package.json').version, entry: __filename }) };
@@ -554,7 +558,7 @@ async function internalResult(call){
 const integrationBlockers = (b,{op}={}) => {
   if(!['receipt','main-merge'].includes(op))throw Error('統合操作の種類を確認できません');
   if(!b?.project)return [...(appUpdate.applying()?[{kind:'update',message:lt('Hubの更新が進行中です')}]:[]),...(restartControl?.committed?[{kind:'restart',message:lt('再起動を開始しています')}]:[])];
-  const record=op==='receipt'&&taskIntegrate.read(b.project,b.task),all=store.listProjects();
+  const record=op==='receipt'&&taskIntegrate.read(b.project,b.task,b.id||taskIntegrate.tokens.get(b.token)?.value?.id),all=store.listProjects();
   let selected=b.selected||record&&!require('./lib/task-continuation').closed(record)&&record.items;
   if(!selected&&op==='receipt'){const a=taskIntegrate.ancestor(b.project,b.task,{allowBusy:true});selected=all.flatMap(p=>p.tasks.filter(t=>taskIntegrate.simple.related(a,p,t)).map(t=>({project:p.id,task:t.id})));}
   const p=all.find(p=>p.id===b.project),t=p?.tasks.find(t=>t.id===b.task),target=op==='main-merge'&&t&&gitw.mainOf(expandHome(t.workdir));
@@ -567,6 +571,7 @@ const integrationBlockers = (b,{op}={}) => {
     ...(appUpdate.applying()?[{kind:'update',message:lt('Hubの更新が進行中です')}]:[]),
     ...(restartControl?.committed?[{kind:'restart',message:lt('再起動を開始しています')}]:[])]});
 };
+taskIntegrate.consultationWait=b=>integrationBlockers(b,{op:'receipt'});
 const integrateAuto=new (require('./lib/integrate-auto').IntegrateAuto)({integrate:taskIntegrate,busy:b=>Boolean(stopControl.held(b)||integrationBlockers(b,{op:'receipt'}).length>0),waitStatus:b=>integrationBlockers(b,{op:'receipt'}),
   dispatch:async request=>{
     let started=false,status,body;
@@ -632,8 +637,8 @@ const resultsGate = new (require('./lib/results-gate').ResultsGate)({store,trans
   blocked:(p,t)=> t.question || ['返事待ち','上限で停止'].includes(t.state) ? lt('質問・返事待ちを先に済ませてください')
     : chats.busy(p.id,t.id) ? lt('AIが作業中です') : chats.queue(p.id,t.id).length ? lt('順番待ちがあります')
     : delegateTerminalError(p.id,t.id) || (removal.busy(p.id,t.id) || removal.locked(p.id) ? lt('AI・整理・確認が動いています') : '')
-    || (()=>{const hand=taskTransfer.read(p.id,t.id),batch=taskIntegrate.read(p.id,t.id);
-      return hand?.integrating&&!hand.complete || batch&&!batch.complete ? lt('統合が進行中です') : '';})(),
+    || (()=>{const hand=taskTransfer.read(p.id,t.id),batches=taskIntegrate.records(p.id,t.id);
+      return hand?.integrating&&!hand.complete || batches.some(batch=>!batch.complete) ? lt('統合が進行中です') : '';})(),
   launch:async(p,t,issue)=>{
     const role=executionRoles().roles.find(r=>r.name==='調査');
     if(!role?.main.model || !['codex','claude-code','agy','grok'].includes(role.main.ai))throw Error(lt('設定の調査担当を確かめてください'));
@@ -1029,6 +1034,7 @@ restartControl = new (require('./lib/restart-control').RestartControl)({
     setTimeout(()=>{
       try{emergencyRestart?.verifyCommitted();mainMergeFlow?.verifyRestart();chats.detachForRestart();stopControl.cleanExit();}catch(e){restartControl.committed=false;restartControl.error=e.message;emergencyRestart?.fail(e.message);record('restart-handoff-error',{}, {error:e.message});return;}
       server.close();
+      if(process.platform==='win32' && process.env.HUB_WINDOW_LAUNCH) { process.exit(42); return; } // Owned native window/launcher performs the relaunch.
       const nextHub=appUpdate.restartNeeded ? appUpdate.nextHub() : __dirname;
       const child=require('node:child_process').spawn(process.execPath,[path.join(nextHub,'server.js')],{cwd:nextHub,env:{...process.env,HUB_UPDATE_SOURCE:appUpdate.source,HUB_UPDATE_CONFIRM:appUpdate.data.pendingConfirm?.token || '',HUB_RESTART_WAIT:'1'},detached:true,stdio:['ignore','inherit','inherit']});
       child.unref();process.exit(0);
@@ -1057,7 +1063,10 @@ function verifyIntegrationReviewSend(o) {
   const queued=o.mode==='queued'||o.mode==='amend',q=queued?chats.queue(o.project,o.task).find(q=>q.id===o.request):null;
   const original=x=>x?.limitSwitch?.original||x?.shown||x?.text;
   const markers=[...String(o.limitSwitch?.original||o.text||'').matchAll(/\[integration-auto:([a-f0-9]{64}):(code|review|organize|order)\]/g)];
-  const r=taskIntegrate.read(o.project,o.task);
+  const owned=require('./lib/integration-sibling').requestRecords(taskIntegrate,o,q);
+  if(owned.length>1)throw Error('Ambiguous integration request');
+  for(const record of owned){require('./lib/integration-sibling').assert(taskIntegrate,record);if(record.auto?.stopped)throw Error('Stopped integration cannot dispatch');}
+  const r=owned[0]||taskIntegrate.read(o.project,o.task);
   // Classification comes from the durable delivery and actual queue, never
   // from an isolation flag. Keep the queue id at acceptance so a replacement
   // that removes every request/marker still cannot become an ordinary chat.
@@ -1073,6 +1082,7 @@ function verifyIntegrationReviewSend(o) {
     if(q?.isolatedReview!==true||q.readOnly!==true||q.integrationReviewRequest!==o.integrationReviewRequest||original(q)!==original(o))throw Error('Saved result review queue changed');
     if(a.delivery.queueId&&q.id!==a.delivery.queueId&&q.id!=='limit-'+a.delivery.queueId&&q.id!=='limit-'+a.delivery.request)throw Error('Saved result review queue changed');
   }
+  require('./lib/integration-sibling').review(taskIntegrate,r,a);
   if(!a.savedResults)return;
   // Callbacks cannot survive a saved queue or a limit successor. Bind the
   // request to its durable attempt, then read the current material again.
@@ -1229,7 +1239,7 @@ async function apiRequest(req, res, url) {
     if (typeof body.enabled !== 'boolean') return send(res, 400, { error: lt('形式が違います') });
     try { return send(res, 200, await appUpdate.settings(body.enabled)); } catch (error) { return send(res, 400, { error: error.message }); }
   }
-  if (req.method === 'POST' && appUpdate.applying() && !integrationWaitingRoute && !(['/api/restart','/api/restart/cancel'].includes(url.pathname)) && !(['/api/quit'].includes(url.pathname) && appUpdate.status().phase === 'installed')) return send(res, 409, { error: appUpdate.busyMessage() });
+  if (req.method === 'POST' && appUpdate.applying() && !integrationWaitingRoute && !(['/api/restart','/api/restart/cancel'].includes(url.pathname)) && !(['/api/quit'].includes(url.pathname) && ['installed','confirming'].includes(appUpdate.status().phase))) return send(res, 409, { error: appUpdate.busyMessage() });
   if (routes.language.packs.matches(req, url)) return routes.language.packs.handle(req, res, url);
   // SSE・添付などJSON共通guardより前の経路も、別表記で別セッションを作らない。
   if (freetalkLib.hasTarget(Object.fromEntries(url.searchParams), true)) { req.resume(); return send(res, 409, { error: lt('freetalk は正規の名前「freetalk」で指定してください') }); }
@@ -1242,7 +1252,7 @@ async function apiRequest(req, res, url) {
   // 生きているかだけ答える（ファイルを読まないので、台帳が大きくても・iCloud が遅くてもすぐ返る）
   if (routes.queuecontrol.receipt.matches(req, url)) return routes.queuecontrol.receipt.handle(req, res, url);
   if(req.method==='GET' && (url.pathname==='/api/ideas' || url.pathname.startsWith('/api/ideas/'))) return ideaAPI.handle(req,res,url,null,send);
-  if (req.method === 'GET' && url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, pid: process.pid, runtimePath: __dirname, instance: HUB_INSTANCE, restored: updateRestoreReady, updateConfirm: process.env.HUB_UPDATE_CONFIRM || '' });
+  if (req.method === 'GET' && url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, pid: process.pid, runtimePath: __dirname, instance: HUB_INSTANCE, restored: updateRestoreReady, ...(process.platform === 'win32' && process.env.HUB_WINDOW_LAUNCH ? { windowLaunch: process.env.HUB_WINDOW_LAUNCH, windowRoot: ROOT } : {}), updateConfirm: process.env.HUB_UPDATE_CONFIRM || '' });
   if (routes.rolesettings.history.matches(req, url)) return routes.rolesettings.history.handle(req, res, url);
   if (routes.taskintegration.wait.matches(req, url)) return routes.taskintegration.wait.handle(req, res, url);
   if (req.method === 'GET' && url.pathname === '/api/discussion') return extensions.route('discussion',req,res,url,null,send);
@@ -1357,7 +1367,7 @@ async function apiRequest(req, res, url) {
   }
   if (url.pathname === '/api/license/activate') {
     try { return send(res, 200, await license.activate(b.code)); }
-    catch (e) { return send(res, e.status || 400, { error: e.message, code: e.code || 'license_activation' }); }
+    catch (e) { return send(res, e.status || 400, require('./lib/license').activationError(e)); }
   }
   // 自動ChatとMCPで共有する実作業の許可
   if (routes.accounts.write.matches(req, url)) return routes.accounts.write.handle(req, res, url, b);
@@ -1423,7 +1433,9 @@ async function apiRequest(req, res, url) {
   if (routes.taskintegration.handupPreview.matches(req, url)) return routes.taskintegration.handupPreview.handle(req, res, url, b);
   if (routes.taskintegration.handup.matches(req, url, b)) return routes.taskintegration.handup.handle(req, res, url, b);
   if (routes.taskintegration.records.matches(req, url)) return routes.taskintegration.records.handle(req, res, url, b);
+  if (routes.taskintegration.consultationClose.matches(req, url)) return routes.taskintegration.consultationClose.handle(req, res, url, b);
   if (routes.taskintegration.abandon.matches(req, url)) return routes.taskintegration.abandon.handle(req, res, url, b);
+  if (routes.taskintegration.futureHold.matches(req, url)) return routes.taskintegration.futureHold.handle(req, res, url, b);
   if (routes.taskintegration.keep.matches(req, url)) return routes.taskintegration.keep.handle(req, res, url, b);
   if (routes.taskintegration.preview.matches(req, url)) return routes.taskintegration.preview.handle(req, res, url, b);
   if (routes.taskbodywrite.write.matches(req, url)) return routes.taskbodywrite.write.handle(req, res, url, b);
@@ -1450,6 +1462,7 @@ async function apiRequest(req, res, url) {
   // 新しい版にする：本体を起動し直す（動いている AI があれば断る。止まってしまうため）
   // 本体を止める（アプリが、許可のある自分から起動し直すため）。AI が動いている間は断る
   if (url.pathname === '/api/quit') {
+    if ((b.reason === 'windows-window' || process.platform === 'win32' && process.env.HUB_WINDOW_LAUNCH && b.reason === 'update') && (process.platform !== 'win32' || !process.env.HUB_WINDOW_LAUNCH || b.windowLaunch !== process.env.HUB_WINDOW_LAUNCH || b.instance !== HUB_INSTANCE)) return send(res, 409, { error: '起動した専用窓と本体の一致を確認できません' });
     if (updateBusy()) return send(res, 409, { error: appUpdate.idleMessage() });
     if (aiTools.isOperating()) return send(res, 409, { error: lt('AI の更新・モデル再取得が進行中です') });
     const busy = sessions.list().filter(x => x.running).length + chats.running.size;
@@ -1602,6 +1615,9 @@ async function quickStart(b, maintenanceRequest = false) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    require('./lib/platform/win32-window-policy').applyWindowPolicy(res, {
+      platform: platform.name, launch: process.env.HUB_WINDOW_LAUNCH, port: PORT,
+    });
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
     if (url.pathname.startsWith('/api/move/')) {
       if (remoteLib.isRemote(req) || !allowed(req) || req.headers['x-hub'] !== '1') return send(res, 403, { error: 'forbidden' });

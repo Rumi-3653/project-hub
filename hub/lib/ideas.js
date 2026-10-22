@@ -1,6 +1,6 @@
 'use strict';
 const platform = require('./platform');
-const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const fs = require('./platform/file-io'), path = require('node:path'), os = require('node:os');
 const safe = require('./safe-file'), scope = require('./resource-scope');
 const U = require('./idea-utils'), projection = require('./idea-projection'), images = require('./idea-images');
 const order = require('./idea-order');

@@ -1,6 +1,6 @@
 'use strict';
 const { lt } = require('./locale');
-const fs = require('fs');
+const fs = require('./platform/file-io');
 const path = require('path');
 const crypto = require('crypto');
 const rules = require('../public/project-order');

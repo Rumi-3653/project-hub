@@ -2,7 +2,7 @@
 const platform = require('./platform');
 const { lt } = require('./locale');
 // 認証情報はCLIの専用場所にだけ置く。Hubの台帳には名前と場所だけを保存する。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');

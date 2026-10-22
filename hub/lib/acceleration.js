@@ -1,6 +1,6 @@
 'use strict';
 const { lt } = require('./locale');
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 
 // Hub専用の設定。CLIのconfig.tomlや認証は変更しない。

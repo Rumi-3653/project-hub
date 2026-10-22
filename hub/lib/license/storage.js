@@ -1,5 +1,5 @@
 'use strict';
-const fs = require('node:fs'), path = require('node:path'), c = require('node:crypto');
+const fs = require('../platform/file-io'), path = require('node:path'), c = require('node:crypto');
 const platforms = require('../platform');
 const { MacSecretStore } = platforms;
 function noLinks(file) {

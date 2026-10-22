@@ -2,6 +2,7 @@
 // Export committed blobs only. Never copy a working directory or Git history.
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const defaultOutput = path.join(root, 'public-release', 'ProjectHub');
@@ -42,11 +43,19 @@ function packAsset(name) {
     || file.startsWith('test/') && /\.(?:js|json|md|yaml|yml|txt)$/.test(file);
 }
 function excluded(name) {
+  if (name.startsWith('hub/purchase-test-app/') || ['hub/test/purchase-test-app.test.js', 'hub/test/purchase-test-workspace.test.js', 'hub/test/purchase-test-update.test.js', 'hub/test/purchase-test-preparation.test.js',
+    'hub/test/windows-license-recovery.test.cjs', 'hub/test/fixtures/purchase-test-app-child.cjs'].includes(name)) return true;
+  if (name.startsWith('hub/staging-app/') || ['hub/test/staging-app.test.js', 'hub/test/fixtures/staging-app-child.cjs',
+    'hub/test/staging-app-lifecycle.test.js', 'hub/test/fixtures/staging-shutdown.swift'].includes(name)) return true;
+  // Opt-in staging activation tools must never become public release entries.
+  if (['hub/build-staging-paid-kit.cjs', 'hub/STAGING-PAID-CHECK.md', 'hub/test/staging-paid-acceptance.cjs',
+    'hub/test/staging-paid-acceptance.test.js', 'hub/test/fixtures/staging-paid-child.cjs'].includes(name)) return true;
   if (name === 'hub/paid-bundle.json' || name.startsWith('hub/paid/') || name.startsWith('hub/public/paid/')) return true;
   // Local DMG acceptance uses the private publisher and macOS-only fixtures.
-  if (['scripts/package-update.js', 'scripts/sign-update.js', 'scripts/release-keychain.js', 'scripts/release-keychain.swift', 'scripts/release-license-build.sql', 'hub/test/release-candidate.test.js', 'hub/test/app-update-packaged.test.js'].includes(name)) return true;
+  if (['scripts/package-update.js', 'scripts/package-update-windows.js', 'scripts/sign-update.js', 'scripts/release-keychain.js', 'scripts/release-keychain.swift', 'scripts/release-license-build.sql', 'hub/test/release-candidate.test.js', 'hub/test/app-update-packaged.test.js', 'hub/test/app-update-windows.test.js'].includes(name)) return true;
   // Windows acceptance has an isolated private issuer fixture, never a release entry point.
   if (['hub/check-license.cmd', 'hub/WINDOWS-LICENSE.md', 'hub/build-windows-license-kit.cjs', 'hub/collect-license-result-v4.cjs',
+    'hub/build-paid-license-kit.cjs', 'hub/test/paid-license-acceptance.cjs', 'hub/test/paid-license-acceptance.test.js', 'hub/test/fixtures/paid-license-child.cjs',
     'hub/test/windows-guard-diagnostics-v4.test.js', 'hub/test/windows-license-result-v4.test.js',
     'hub/test/windows-license-acceptance.cjs', 'hub/test/windows-license-storage.test.js', 'hub/test/windows-cache.test.js'].includes(name)) return true;
   if (name === 'hub/lib/license/owner-edition.js' || name.startsWith('hub/license-issuer/') ||
@@ -87,6 +96,7 @@ const rules = [
 ];
 // Exact, reviewed non-secret literals; an exception never applies to another file.
 const safeLiterals = {
+  'hub/release-app/README.md': new Set(['info' + '@k-onedot.com']),
   'hub/lib/git.js': new Set(['git' + '@github.com']),
   'hub/lib/update-check.js': new Set(['claude-code' + '@latest.json']),
   'hub/test/accounts.test.js': new Set(['a' + '@example.test']),
@@ -96,18 +106,48 @@ const safeLiterals = {
   'hub/test/remote.test.js': new Set(['owner' + '@example.com', 'guest' + '@example.com']),
   'hub/test/procwatch.test.js': new Set(['sk-' + 'abcdefghijklmnop']),
 };
+// This exact synthetic rejection fixture contains a header and the word
+// "synthetic", never key material. Any change requires a fresh review.
+const reviewedSecretFixtures = {
+  'hub/test/legacy-import.test.js': '91a61563d713e17a81c680d111b0c6d231360154d45e8cee53cc91455ab9c8cc',
+};
+const reviewedWindowsIcon = { path: 'hub/app/windows/ProjectHub.ico', sha256: '757b92279f649abe7f4e9a0ded4540d0bd58df1caf8c9eb9436390d6cb4764bd' };
 const reviewedImages = new Set([
   'docs/screenshots/conversation-redacted.png', 'docs/screenshots/queued-instructions-redacted.png',
   'hub/app/icon-concept.png', 'hub/public/icon.png',
 ]);
+// Official NuGet 1.0.4258.31 bytes, reviewed for the Windows shell only.
+// A different path/version/content must go through a new review.
+const webviewPrefix = 'hub/app/windows/vendor/webview2/1.0.4258.31/';
+const reviewedWebview = {
+  'Microsoft.Web.WebView2.Core.dll': 'd60e6e94245078cb56e44ebd5f360dc04bf18e460136be93bfc4cfca43b98505',
+  'Microsoft.Web.WebView2.WinForms.dll': '6a9e6856f23c463783c3afb0ca5d78f56324c86657162ccb16d5227b3233b32a',
+  'WebView2Loader.dll': '3426dcc55fdfb8b5e7ac623cf33b4ccf283fbf68a0c5a65bddfdb4d749a8abee',
+};
+const digest = content => createHash('sha256').update(content).digest('hex');
 function inspect(entries) {
   const findings = [];
+  if (entries.some(e => e.name.startsWith(webviewPrefix) && /\.dll$/i.test(e.name))) {
+    const license = entries.find(e => e.name === webviewPrefix + 'LICENSE.txt');
+    if (!license || digest(license.content) !== '0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55') findings.push('WebView2: original license missing or changed');
+    const notices = entries.find(e => e.name === 'THIRD_PARTY_NOTICES.md');
+    if (!notices || !notices.content.toString().includes(webviewPrefix + 'LICENSE.txt')) findings.push('WebView2: copyright notice missing');
+  }
   for (const { name, content } of entries) {
     if (excluded(name) || name === '.git') findings.push(`${name}: excluded path`);
     const specialty = rules.find(([label]) => label === 'private specialty material')[1];
     if (specialty.test(name.normalize('NFC'))) findings.push(`${name}: private specialty path`);
     // Raster images are the reviewed redacted screenshots and product icons.
     if (reviewedImages.has(name)) continue;
+    if (name === reviewedWindowsIcon.path) {
+      if (digest(content) !== reviewedWindowsIcon.sha256) findings.push(`${name}: reviewed product icon changed`);
+      continue;
+    }
+    const sdkHash = name.startsWith(webviewPrefix) && reviewedWebview[name.slice(webviewPrefix.length)];
+    if (sdkHash) {
+      if (digest(content) !== sdkHash) findings.push(`${name}: reviewed Microsoft binary changed`);
+      continue;
+    }
     if (/\.(?:png|jpe?g|gif|webp|heic|pdf)$/i.test(name)
       || !Buffer.from(content.toString('utf8')).equals(content)) {
       findings.push(`${name}: binary file needs review`);
@@ -115,6 +155,7 @@ function inspect(entries) {
     }
     const text = content.toString('utf8').normalize('NFC');
     for (const [label, re] of rules) {
+      if (label === 'private key' && reviewedSecretFixtures[name] === digest(content)) continue;
       re.lastIndex = 0;
       const matches = [...text.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))];
       if (matches.some(m => !safeLiterals[name]?.has(m[0]) && !(label === 'GitHub token'

@@ -1,7 +1,7 @@
 'use strict';
 const persistence = require('./platform').persistence;
 // Exact provenance, outside product Git. A durable per-file intent precedes every mutation.
-const fs=require('node:fs'),path=require('node:path'),{createHash,randomUUID}=require('node:crypto'),{execFileSync}=require('node:child_process');
+const fs=require('./platform/file-io'),path=require('node:path'),{createHash,randomUUID}=require('node:crypto'),{execFileSync}=require('node:child_process');
 const roots=new Set(),digest=x=>createHash('sha256').update(x).digest('hex');
 const git=(dir,args)=>execFileSync('git',['-C',dir,...args],{env:{...process.env,GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0'},maxBuffer:256*1024*1024,stdio:['ignore','pipe','pipe']});
 function links(file){for(let f=path.resolve(file);;f=path.dirname(f)){try{if(fs.lstatSync(f).isSymbolicLink())throw Error('記録のリンク先には書き込めません');}catch(e){if(e.code!=='ENOENT')throw e;}if(f===path.dirname(f))break;}}

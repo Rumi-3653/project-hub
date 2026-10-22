@@ -1,6 +1,6 @@
 'use strict';
 const { lt } = require('./locale');
-const fs = require('node:fs'), path = require('node:path');
+const fs = require('./platform/file-io'), path = require('node:path');
 const order = require('../public/model-order');
 const special = require('../public/special-mode');
 const launch = require('./launch'), { EFFORTS } = require('./roles');

@@ -17,7 +17,7 @@ function fixture(t,opts={}) {
  function old(rel,data='fixture') {const f=path.join(dir,rel);fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,data);const when=new Date(Date.now()-40*DAY);fs.utimesSync(f,when,when);return f;}
  return {root,dir,store,trash,m,old,busy:v=>busy=v};
 }
-test('preview protects recent, referenced, tracked, symlink and original material files',t=>{
+test('preview protects recent, referenced, tracked, symlink and original material files',async t=>{
  const f=fixture(t),keep=f.old('.ai/work/referenced.dat'),safe=f.old('.ai/work/unused.dat');
  f.old('作業/versions/old-version.dat');f.old('資料/original.dat');f.old('成果物/result.dat');
  f.old('.ai/memory/memory.md');const tracked=f.old('.ai/work/tracked.dat');
@@ -25,25 +25,25 @@ test('preview protects recent, referenced, tracked, symlink and original materia
  const recent=path.join(f.dir,'.ai/work/recent.dat');fs.writeFileSync(recent,'recent');
  fs.symlinkSync(safe,path.join(f.dir,'.ai/work/link.dat'));
  execFileSync('git',['init','-q',f.dir]);execFileSync('git',['-C',f.dir,'add',tracked]);
- const d=f.m.preview('P');assert.equal(d.candidates.length,2);assert.ok(d.candidates.some(c=>c.paths.includes(safe)));
+ const d=await f.m.preview('P');assert.equal(d.candidates.length,2);assert.ok(d.candidates.some(c=>c.paths.includes(safe)));
  assert.equal(d.excluded.length,4);assert.ok(d.excluded.some(e=>e.reason.includes('Git')));assert.ok(d.excluded.some(e=>e.reason.includes('参照')));
 });
-test('cleanup requires explicit choices, rechecks content/reference/busy and restores exact content',t=>{
- const f=fixture(t),file=f.old('.ai/work/unused.dat','original');let d=f.m.preview('P');
- assert.throws(()=>f.m.apply('P',d.token,[],true),/選び直/);
- assert.throws(()=>f.m.apply('P',d.token,[d.candidates[0].id],false),/選び直/);
- assert.throws(()=>f.m.apply('P',d.token,[d.candidates[0].id,d.candidates[0].id],true),/選び直/);
- f.busy(true);assert.throws(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),/動いて/);f.busy(false);
+test('cleanup requires explicit choices, rechecks content/reference/busy and restores exact content',async t=>{
+ const f=fixture(t),file=f.old('.ai/work/unused.dat','original');let d=await f.m.preview('P');
+ await assert.rejects(()=>f.m.apply('P',d.token,[],true),/選び直/);
+ await assert.rejects(()=>f.m.apply('P',d.token,[d.candidates[0].id],false),/選び直/);
+ await assert.rejects(()=>f.m.apply('P',d.token,[d.candidates[0].id,d.candidates[0].id],true),/選び直/);
+ f.busy(true);await assert.rejects(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),/動いて/);f.busy(false);
  fs.appendFileSync(path.join(f.dir,'PROJECT.md'),'\nReference unused.dat');
- assert.throws(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),/参照が変わ/);
+ await assert.rejects(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),/参照が変わ/);
  fs.writeFileSync(path.join(f.dir,'PROJECT.md'),'---\nname: P\nstatus: 進行中\nfolders: {}\n---\n');
- d=f.m.preview('P');const r=f.m.apply('P',d.token,[d.candidates[0].id],true);assert.equal(r.ok,true);assert.equal(fs.existsSync(file),false);
+ d=await f.m.preview('P');const r=await f.m.apply('P',d.token,[d.candidates[0].id],true);assert.equal(r.ok,true);assert.equal(fs.existsSync(file),false);
  assert.equal(f.m.history('P')[0].count,1);
  assert.equal(f.m.restore('P',r.id,true).restored,1);assert.equal(fs.readFileSync(file,'utf8'),'original');
  assert.equal(f.m.history('P')[0].restored,true);
 });
-test('restore refuses overwrite, tampered trash, missing trash and path traversal',t=>{
- const f=fixture(t),file=f.old('.ai/work/old.dat');const d=f.m.preview('P'),r=f.m.apply('P',d.token,[d.candidates[0].id],true);
+test('restore refuses overwrite, tampered trash, missing trash and path traversal',async t=>{
+ const f=fixture(t),file=f.old('.ai/work/old.dat');const d=await f.m.preview('P'),r=await f.m.apply('P',d.token,[d.candidates[0].id],true);
  const rf=path.join(f.m.records,r.id+'.json'),record=JSON.parse(fs.readFileSync(rf));
  fs.writeFileSync(file,'new');assert.throws(()=>f.m.restore('P',r.id,true),/上書き/);fs.unlinkSync(file);
  const original=record.entries[0].src;record.entries[0].src=path.join(f.dir,'.ai/work')+'/../../PROJECT.md';fs.writeFileSync(rf,JSON.stringify(record));
@@ -51,24 +51,24 @@ test('restore refuses overwrite, tampered trash, missing trash and path traversa
  fs.appendFileSync(record.entries[0].dest,'tamper');assert.throws(()=>f.m.restore('P',r.id,true),/中身が変わ/);
  fs.unlinkSync(record.entries[0].dest);assert.throws(()=>f.m.restore('P',r.id,true),/復元用/);
 });
-test('only approved completed chat history is eligible, queued and referenced histories are protected',t=>{
+test('only approved completed chat history is eligible, queued and referenced histories are protected',async t=>{
  const f=fixture(t),task=f.store.createTask('P',{title:'Done'});let t1=f.store.decideTask('P',task.id,'approve',task.completionHash);
  const chat=f.old('.ai/chat/'+task.id+'.jsonl','history');f.old('.ai/chat/'+task.id+'.queue.json','[]');
- assert.equal(f.m.preview('P').candidates.length,1);
- f.old('.ai/chat/'+task.id+'.queue.json','[{"text":"next"}]');assert.equal(f.m.preview('P').candidates.length,0);
- f.old('.ai/chat/'+task.id+'.queue.json','[]');fs.appendFileSync(path.join(f.dir,'PROJECT.md'),'\n'+chat);assert.equal(f.m.preview('P').candidates.length,0);
+ assert.equal((await f.m.preview('P')).candidates.length,1);
+ f.old('.ai/chat/'+task.id+'.queue.json','[{"text":"next"}]');assert.equal((await f.m.preview('P')).candidates.length,0);
+ f.old('.ai/chat/'+task.id+'.queue.json','[]');fs.appendFileSync(path.join(f.dir,'PROJECT.md'),'\n'+chat);assert.equal((await f.m.preview('P')).candidates.length,0);
  fs.writeFileSync(path.join(f.dir,'PROJECT.md'),'---\nname: P\n---\n');
- f.store.decideTask('P',t1.id,'continue',t1.completionHash);assert.equal(f.m.preview('P').candidates.length,0);
+ f.store.decideTask('P',t1.id,'continue',t1.completionHash);assert.equal((await f.m.preview('P')).candidates.length,0);
 });
-test('changed eligible content rejects a stale cleanup token',t=>{
- const f=fixture(t);const file=f.old('.ai/work/stale.dat'),d=f.m.preview('P');
+test('changed eligible content rejects a stale cleanup token',async t=>{
+ const f=fixture(t);const file=f.old('.ai/work/stale.dat'),d=await f.m.preview('P');
  fs.writeFileSync(file,'changed');const when=new Date(Date.now()-40*DAY);fs.utimesSync(file,when,when);
- assert.throws(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),/変わりました/);assert.equal(fs.readFileSync(file,'utf8'),'changed');
+ await assert.rejects(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),/変わりました/);assert.equal(fs.readFileSync(file,'utf8'),'changed');
 });
-test('partial move retains a transaction and allows recovery of successful moves',t=>{
- const f=fixture(t);f.old('.ai/work/a.dat');f.old('.ai/work/b.dat');const d=f.m.preview('P'),original=fs.renameSync;
+test('partial move retains a transaction and allows recovery of successful moves',async t=>{
+ const f=fixture(t);f.old('.ai/work/a.dat');f.old('.ai/work/b.dat');const d=await f.m.preview('P'),original=fs.renameSync;
  fs.renameSync=(src,dst)=>{if(src.endsWith('/b.dat')){const e=Error('fixture');e.code='EXDEV';throw e;}return original(src,dst);};
- let r;try {r=f.m.apply('P',d.token,d.candidates.map(c=>c.id),true);}finally{fs.renameSync=original;}
+ let r;try {r=await f.m.apply('P',d.token,d.candidates.map(c=>c.id),true);}finally{fs.renameSync=original;}
  assert.equal(r.ok,false);assert.equal(r.moved,1);assert.equal(f.m.restore('P',r.id,true).restored,1);assert.equal(f.m.history('P')[0].restored,true);
 });
 test('verification runs only confirmed existing scripts, skips npm hooks and locks AI launch until finished',async t=>{
@@ -80,7 +80,7 @@ test('verification runs only confirmed existing scripts, skips npm hooks and loc
  await assert.rejects(()=>f.m.verify('P','test','stale',true),/選び直/);
  await assert.rejects(()=>f.m.verify('P','test',s[0].hash,false),/選び直/);
  await assert.rejects(()=>f.m.verify('P','test',s[0].hash,true,()=>{throw Error('execution lease denied');}),/execution lease denied/);assert.equal(f.m.locked('P'),false);
- let leased=false;const pending=f.m.verify('P','test',s[0].hash,true,()=>{assert.equal(f.m.locked('P'),false);leased=true;});assert.equal(leased,true);assert.equal(f.m.locked('P'),true);assert.throws(()=>f.m.apply('P','bad',[],true),/検証が動いて/);
+ let leased=false;const pending=f.m.verify('P','test',s[0].hash,true,()=>{assert.equal(f.m.locked('P'),false);leased=true;});assert.equal(leased,true);assert.equal(f.m.locked('P'),true);await assert.rejects(()=>f.m.apply('P','bad',[],true),/検証が動いて/);
  const r=await pending;assert.equal(r.ok,true);assert.match(r.result.output,/fixture passed/);assert.equal(fs.existsSync(path.join(f.dir,'hook-ran')),false);assert.equal(f.m.locked('P'),false);
 });
 test('verification reports broken structure and terminates an overlong local script',async t=>{
@@ -91,14 +91,14 @@ test('verification reports broken structure and terminates an overlong local scr
  const r=await f.m.verify('P','test',scriptsAt(f.dir)[0].hash,true);assert.equal(r.ok,false);assert.match(r.result.note,/時間内/);assert.equal(f.m.locked('P'),false);
 });
 
-test('shared body ledgers and Unicode-equivalent references protect old versions; nested Git is excluded',t=>{
+test('shared body ledgers and Unicode-equivalent references protect old versions; nested Git is excluded',async t=>{
  const f=fixture(t),body=path.join(f.root,'body');fs.mkdirSync(body);f.m.baseOf=()=>body;
  const oldDir=path.join(body,'作業/過去版');fs.mkdirSync(oldDir,{recursive:true});
  const nfd='データ.dat'.normalize('NFD'),file=path.join(oldDir,nfd);fs.writeFileSync(file,'version');const when=new Date(Date.now()-40*DAY);fs.utimesSync(file,when,when);
  const other=path.join(f.root,'Product/Q');fs.mkdirSync(other);fs.writeFileSync(path.join(other,'PROJECT.md'),'---\nname: Q\n---\n参照：'+file.normalize('NFC'));
- assert.equal(f.m.preview('P').candidates.length,0);
+ assert.equal((await f.m.preview('P')).candidates.length,0);
  const nested=f.old('.ai/work/nested/.git/HEAD','git');fs.utimesSync(path.dirname(nested),when,when);fs.utimesSync(path.dirname(path.dirname(nested)),when,when);
- assert.ok(f.m.preview('P').excluded.some(e=>e.reason.includes('Git履歴')));
+ assert.ok((await f.m.preview('P')).excluded.some(e=>e.reason.includes('Git履歴')));
  fs.writeFileSync(path.join(body,'package.json'),JSON.stringify({scripts:{test:'jest',build:'tsc',check:'curl'}}));
  const scripts=scriptsAt(body);assert.equal(scripts.find(x=>x.name==='test').allowed,true);assert.equal(scripts.find(x=>x.name==='build').allowed,true);assert.equal(scripts.find(x=>x.name==='check').allowed,false);
 });
@@ -119,22 +119,26 @@ test('構造確認は資料の相対パスをプロジェクト基準に解決�
  assert.equal(fs.readFileSync(file,'utf8'),'keep this source');assert.equal(fs.readFileSync(path.join(f.dir,'PROJECT.md'),'utf8'),doc);
 });
 
-test('total reference budget stop retains protected path, size and busy state',t=>{
- const f=fixture(t,{referenceLimits:{bytes:1024*1024}}),large=f.old('large.json','x'.repeat(1024*1024+1));f.busy(true);
- const d=f.m.preview('P');assert.equal(d.token,'');assert.equal(d.candidates.length,0);assert.equal(d.stopped.path,large);assert.equal(d.stopped.size,1024*1024+1);assert.equal(d.busy,true);assert.equal(fs.statSync(large).size,1024*1024+1);
+test('references exceeding the batch size finish completely and retain busy state',async t=>{
+ const f=fixture(t,{referenceLimits:{bytes:1024*1024}}),file=f.old('.ai/work/protected.dat'),large=f.old('large.json','x'.repeat(1024*1024+1)+file);f.busy(true);
+ let ticks=0;const timer=setInterval(()=>ticks++,0);let d;
+ try {d=await f.m.preview('P');}finally{clearInterval(timer);}
+ assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);assert.ok(d.excluded.some(x=>x.path===file && /参照/.test(x.reason)));
+ assert.equal(d.busy,true);assert.ok(d.scan.batches>1);assert.ok(d.scan.bytes>1024*1024);assert.ok(ticks>0,'other event-loop work runs during the scan');
+ assert.equal(fs.statSync(large).size,1024*1024+1+Buffer.byteLength(file));
 });
 
 
-test('deep references at depths 7 through 13 protect candidates; excessive depth fails closed',t=>{
+test('deep references at depths 7 through 13 protect candidates; excessive depth fails closed',async t=>{
  const f=fixture(t);const file=f.old('.ai/work/deep.dat');
  for(let depth=7;depth<=13;depth++) {
   const ref=f.old(Array(depth).fill('level').join('/')+'/ref.md',file);
-  const d=f.m.preview('P');assert.ok(d.token);assert.equal(d.candidates.length,0);fs.unlinkSync(ref);
+  const d=await f.m.preview('P');assert.ok(d.token);assert.equal(d.candidates.length,0);fs.unlinkSync(ref);
  }
  f.m.referenceLimits.depth=12;f.old(Array(13).fill('other').join('/')+'/ref.md',file);
- const d=f.m.preview('P');assert.equal(d.token,'');assert.equal(d.candidates.length,0);assert.match(d.stopped.reason,/深さ/);
+ const d=await f.m.preview('P');assert.equal(d.token,'');assert.equal(d.candidates.length,0);assert.match(d.stopped.reason,/深さ/);
 });
-test('large reference tail and UTF-8/NFC/Hangul chunk boundaries protect every reference form',t=>{
+test('large reference tail and UTF-8/NFC/Hangul chunk boundaries protect every reference form',async t=>{
  const f=fixture(t,{referenceLimits:{chunk:4096}});
  const cases=[['café.dat','cafe\u0301.dat'],['データ.dat','テ\u3099ータ.dat'],['각.dat','\u1100\u1161\u11a8.dat'],['😀.dat','😀.dat'],['ḉ.dat','c\u0301\u0327.dat']];
  for(const [name,ref] of cases) {
@@ -143,13 +147,13 @@ test('large reference tail and UTF-8/NFC/Hangul chunk boundaries protect every r
    // Put every byte of the spelling on a read boundary, after more than 1 MiB.
    for(let offset=1;offset<=Buffer.byteLength(ref);offset++) {
     const padding=4096*257-offset;f.old('large.txt','x'.repeat(padding)+form);
-    const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0,form+' offset '+offset);
+    const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0,form+' offset '+offset);
    }
   }
   fs.unlinkSync(file);
  }
 });
-for(const chunk of [65536,9])test(`supplementary NFC before Hangul V/T protects all reference forms at chunk ${chunk}`,t=>{
+for(const chunk of [65536,9])test(`supplementary NFC before Hangul V/T protects all reference forms at chunk ${chunk}`,async t=>{
  // The default size uses the independent R1 reproduction, beyond 1 MiB.
  const f=fixture(t,chunk===65536?{}:{referenceLimits:{chunk}}),unsafe=[];
  assert.equal(f.m.referenceLimits.chunk,chunk);
@@ -162,7 +166,7 @@ for(const chunk of [65536,9])test(`supplementary NFC before Hangul V/T protects 
    if(chunk===65536)assert.ok(Buffer.byteLength(text)>1024*1024,context);
    assert.ok(text.normalize('NFC').includes((prefix+name).normalize('NFC')),context);
    f.old('boundary.txt',text);
-   const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);
+   const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);
    if(d.candidates.length)unsafe.push(context);
    else assert.ok(d.excluded.some(e=>e.path===file && /参照/.test(e.reason)),context);
    assert.equal(fs.readFileSync(file,'utf8'),'fixture');
@@ -172,14 +176,14 @@ for(const chunk of [65536,9])test(`supplementary NFC before Hangul V/T protects 
  }
  assert.deepEqual(unsafe,[],'NFC-equivalent references must never be eligible');
 });
-test('minimal supplementary NFC and Hangul boundary retains whole-code-point normalization',t=>{
+test('minimal supplementary NFC and Hangul boundary retains whole-code-point normalization',async t=>{
  const f=fixture(t,{referenceLimits:{chunk:9}});
  for(const jamo of ['\u1161','\u11a8']) {
   const raw='\u{1D15E}'+jamo+'ab.dat',name=raw.normalize('NFC'),file=f.old('.ai/work/'+name);
   assert.equal(name,'\u{1D157}\u{1D165}'+jamo+'ab.dat');
   for(const offset of [0,1,2]) {
    const text='x'.repeat(offset)+raw;assert.ok(text.normalize('NFC').includes(name));
-   f.old('boundary.txt',text);const d=f.m.preview('P');
+   f.old('boundary.txt',text);const d=await f.m.preview('P');
    assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0,`jamo=${jamo} offset=${offset}`);
    assert.ok(d.excluded.some(e=>e.path===file && /参照/.test(e.reason)));
   }
@@ -198,7 +202,7 @@ function streamedReferenceNFC(text,chunk) {
  for(let pos=0;pos<bytes.length;pos+=chunk)consume(decoder.write(bytes.subarray(pos,pos+chunk)));
  consume(decoder.end(),true);return normalized;
 }
-for(const mode of ['default','short'])test(`combining sequence before Hangul V/T protects all reference forms at ${mode} chunks`,t=>{
+for(const mode of ['default','short'])test(`combining sequence before Hangul V/T protects all reference forms at ${mode} chunks`,async t=>{
  const f=fixture(t),unsafe=[],nonEquivalent=[];
  for(const base of ['c','\u{1D15E}']) {
   const chunk=mode==='default'?65536:base==='c'?10:13;
@@ -212,7 +216,7 @@ for(const mode of ['default','short'])test(`combining sequence before Hangul V/T
     if(mode==='default')assert.ok(Buffer.byteLength(text)>1024*1024,context);
     assert.ok(text.normalize('NFC').includes((prefix+name).normalize('NFC')),context);
     if(streamedReferenceNFC(text,chunk)!==text.normalize('NFC'))nonEquivalent.push(context);
-    f.old('boundary.txt',text);const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);
+    f.old('boundary.txt',text);const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);
     if(d.candidates.length)unsafe.push(context);
     else assert.ok(d.excluded.some(e=>e.path===file && /参照/.test(e.reason)),context);
     assert.equal(fs.readFileSync(file,'utf8'),'fixture');
@@ -232,16 +236,16 @@ test('streamed combining and Hangul normalization equals whole-string NFC across
   }
  }
 });
-test('combining and Hangul carry overflow fails closed and preserves the candidate',t=>{
+test('combining and Hangul carry overflow fails closed and preserves the candidate',async t=>{
  const f=fixture(t,{referenceLimits:{chunk:10,carry:16}}),raw='c'+'\u0301\u0327'.repeat(16)+'\u1161ab.dat';
  const file=f.old('.ai/work/safe.dat');f.old('boundary.txt',raw+file);
- const d=f.m.preview('P');assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,/Unicode/);
+ const d=await f.m.preview('P');assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,/Unicode/);
  assert.equal(fs.readFileSync(file,'utf8'),'fixture');assert.equal(fs.existsSync(f.trash),false);assert.deepEqual(f.m.history('P'),[]);
 });
 // End R2 regressions.
 
 // R3 regressions: non-Mark canonical composition in Unicode 17 (Tulu-Tigalari).
-for(const mode of ['default','short','partial-default','partial-short'])test(`non-Mark NFC composition protects all reference forms at ${mode} chunks`,t=>{
+for(const mode of ['default','short','partial-default','partial-short'])test(`non-Mark NFC composition protects all reference forms at ${mode} chunks`,async t=>{
  const f=fixture(t),unsafe=[],nonEquivalent=[];let count=0;
  const bases=mode.startsWith('partial')?['\u{16D63}\u{16D68}','\u{16D67}\u{16D68}','\u{16D63}\u{16D67}\u{16D68}']:['\u{16D68}','\u{16D69}','\u{16D6A}'].map(c=>c.normalize('NFD'));
  for(const base of bases)for(const tail of ['ab','\u0301\u0327\u1161ab','\u0301\u0327\u11a8ab']) {
@@ -254,7 +258,7 @@ for(const mode of ['default','short','partial-default','partial-short'])test(`no
    if(mode.endsWith('default'))assert.ok(Buffer.byteLength(text)>1024*1024,context);
    assert.ok(text.normalize('NFC').includes((prefix+name).normalize('NFC')),context);
    if(streamedReferenceNFC(text,chunk)!==text.normalize('NFC'))nonEquivalent.push(context);
-   f.old('boundary.txt',text);const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);
+   f.old('boundary.txt',text);const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);
    if(d.candidates.length)unsafe.push(context);
    else assert.ok(d.excluded.some(e=>e.path===file && /参照/.test(e.reason)),context);
    assert.equal(fs.readFileSync(file,'utf8'),'fixture');
@@ -300,74 +304,108 @@ test('all Unicode scalars and canonical decompositions stream as whole-string NF
  assert.deepEqual(failures,[]);
  assert.deepEqual([...continuations].filter(cp=>!(cp>=0x1161&&cp<=0x1175 || cp>=0x11a8&&cp<=0x11c2 || cp===0x16d67)),[],'all non-Mark canonical continuation characters are protected');
 });
-test('non-Mark NFC composition carry overflow fails closed and preserves the candidate',t=>{
+test('non-Mark NFC composition carry overflow fails closed and preserves the candidate',async t=>{
  const f=fixture(t,{referenceLimits:{chunk:10,carry:16}}),file=f.old('.ai/work/safe.dat');
  f.old('boundary.txt','\u{16D67}'.repeat(32)+file);
- const d=f.m.preview('P');assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,/Unicode/);
+ const d=await f.m.preview('P');assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,/Unicode/);
  assert.equal(fs.readFileSync(file,'utf8'),'fixture');assert.equal(fs.existsSync(f.trash),false);assert.deepEqual(f.m.history('P'),[]);
 });
 // End R3 regressions.
-test('item, total byte, elapsed time and normalization budgets fail closed with reasons',t=>{
+test('item, elapsed time and normalization safety budgets still fail closed with reasons',async t=>{
  const f=fixture(t);f.old('.ai/work/safe.dat');f.old('one.txt','abc');f.old('two.txt','def');
- for(const [limits,reason] of [[{items:1},/多すぎ/],[{bytes:5},/総読量/],[{ms:-1},/時間/],[{chunk:8,carry:16},/Unicode/]]) {
+ for(const [limits,reason] of [[{items:1},/多すぎ/],[{ms:-1},/時間/],[{chunk:8,carry:16},/Unicode/]]) {
   f.m.referenceLimits={...f.m.referenceLimits,items:50000,bytes:128*1024*1024,ms:15000,chunk:65536,carry:1024*1024,...limits};
   if(limits.carry)f.old('marks.txt','\u0301'.repeat(32));
-  const d=f.m.preview('P');assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,reason);assert.ok(d.stopped.path);
+  const d=await f.m.preview('P');assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,reason);assert.ok(d.stopped.path);
  }
 });
-test('overlapping roots and symlink loops do not reread references or consume duplicate budgets',t=>{
+test('overlapping roots and symlink loops do not reread references or consume duplicate budgets',async t=>{
  const f=fixture(t),file=f.old('.ai/work/safe.dat'),ref=f.old('nested/ref.txt',file);
  f.m.baseOf=()=>path.dirname(ref);fs.symlinkSync(f.dir,path.join(path.dirname(ref),'loop'));
  const bytes=fs.statSync(ref).size+fs.statSync(path.join(f.dir,'PROJECT.md')).size;
- f.m.referenceLimits.bytes=bytes;const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);
+ f.m.referenceLimits.bytes=bytes;const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);
 });
-test('unreadable references and mid-scan file or directory changes stop without a token',t=>{
+test('unreadable references and mid-scan file or directory changes stop without a token',async t=>{
  for(const mode of ['unreadable','file','directory','symlink']) {
   const f=fixture(t),file=f.old('.ai/work/safe.dat'),ref=f.old('ref.txt','no reference');
   const read=fs.readSync,open=fs.openSync;let changed=false;
   fs.openSync=(name,...args)=>{if(name===ref && mode==='unreadable')throw Error('read denied');if(name===ref && mode==='symlink'){fs.unlinkSync(ref);fs.symlinkSync(file,ref);}return open(name,...args);};
   fs.readSync=(...args)=>{const n=read(...args);if(!changed && n && (mode==='file'||mode==='directory')) {changed=true;if(mode==='file')fs.appendFileSync(ref,file);else f.old('new-reference.txt',file);}return n;};
-  let d;try {d=f.m.preview('P');}finally{fs.readSync=read;fs.openSync=open;}
+  let d;try {d=await f.m.preview('P');}finally{fs.readSync=read;fs.openSync=open;}
   assert.equal(d.token,'',mode);assert.equal(d.candidates.length,0,mode);assert.ok(d.stopped.path);assert.equal(fs.readFileSync(file,'utf8'),'fixture');
  }
 });
-test('apply recheck exposes its stop reason and path before trash or transaction creation',t=>{
- const f=fixture(t),file=f.old('.ai/work/safe.dat'),d=f.m.preview('P');
- const ref=f.old('large.txt','x'.repeat(2048));f.m.referenceLimits.bytes=1024;
- assert.throws(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),e=>/移動前.*総読量/.test(e.message)&&e.message.includes(ref));
+test('apply recheck exposes its stop reason and path before trash or transaction creation',async t=>{
+ const f=fixture(t),file=f.old('.ai/work/safe.dat'),d=await f.m.preview('P');
+ const ref=f.old('large.txt','x'.repeat(2048));f.m.referenceLimits.items=1;
+ await assert.rejects(()=>f.m.apply('P',d.token,[d.candidates[0].id],true),e=>/移動前.*多すぎ/.test(e.message)&&/（.+）/.test(e.message));
  assert.equal(fs.existsSync(file),true);assert.equal(fs.existsSync(f.trash),false);assert.deepEqual(f.m.history('P'),[]);
 });
-test('more than 5000 reference entries are scanned without relaxing candidate inventory',t=>{
+test('more than 5000 reference entries are scanned without relaxing candidate inventory',async t=>{
  const f=fixture(t);const file=f.old('.ai/work/safe.dat');
  fs.mkdirSync(path.join(f.dir,'many'));for(let i=0;i<5010;i++)fs.writeFileSync(path.join(f.dir,'many',i+'.txt'),i===5009?file:'');
- const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);
+ const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);
  f.old('.ai/work/nested/'+Array(7).fill('level').join('/')+'/leaf.dat');
- const limited=f.m.preview('P');assert.ok(limited.excluded.some(x=>/多すぎ/.test(x.reason)));
+ const limited=await f.m.preview('P');assert.ok(limited.excluded.some(x=>/多すぎ/.test(x.reason)));
 });
-test('Git tracking lists above 2 MiB protect candidates; Git list budget failure stops',t=>{
+test('Git tracking lists above 2 MiB protect candidates; Git list budget failure stops',async t=>{
  const f=fixture(t),file=f.old('.ai/work/tracked.dat');execFileSync('git',['init','-q',f.dir]);
  const blob=execFileSync('git',['-C',f.dir,'hash-object','-w','--stdin'],{input:'tracked',encoding:'utf8'}).trim();
  const names=[path.relative(f.dir,file),...Array.from({length:9000},(_,i)=>'long/'+String(i).padStart(5,'0')+'x'.repeat(230))];
  execFileSync('git',['-C',f.dir,'update-index','--index-info'],{input:names.map(n=>'100644 '+blob+'\t'+n+'\n').join(''),maxBuffer:16*1024*1024});
- const d=f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);assert.ok(d.excluded.some(x=>/Gitで追跡/.test(x.reason)));
- f.m.referenceLimits.gitBytes=1024;const stopped=f.m.preview('P');assert.equal(stopped.token,'');assert.equal(stopped.candidates.length,0);assert.ok(stopped.stopped.reason);
+ const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);assert.ok(d.excluded.some(x=>/Gitで追跡/.test(x.reason)));
+ f.m.referenceLimits.gitBytes=1024;const stopped=await f.m.preview('P');assert.equal(stopped.token,'');assert.equal(stopped.candidates.length,0);assert.ok(stopped.stopped.reason);
 });
 
 
-test('Git tracking changes during reference reading stop the preview',t=>{
+test('Git tracking changes during reference reading stop the preview',async t=>{
  const f=fixture(t),file=f.old('.ai/work/safe.dat');execFileSync('git',['init','-q',f.dir]);
  const read=fs.readSync;let changed=false;
  fs.readSync=(...args)=>{const n=read(...args);if(n&&!changed){changed=true;execFileSync('git',['-C',f.dir,'add',file]);}return n;};
- let d;try {d=f.m.preview('P');}finally{fs.readSync=read;}
+ let d;try {d=await f.m.preview('P');}finally{fs.readSync=read;}
  assert.equal(d.token,'');assert.equal(d.candidates.length,0);assert.match(d.stopped.reason,/参照が変わりました/);assert.match(d.stopped.path,/index$/);
 });
 
 
-test('large references are read in bounded chunks without whole-file reads',t=>{
+test('large references are read in bounded chunks without whole-file reads',async t=>{
  const f=fixture(t),file=f.old('.ai/work/safe.dat'),ref=f.old('large.txt','x'.repeat(3*1024*1024)+file);
  const whole=fs.readFileSync,read=fs.readSync;let largest=0;
  fs.readFileSync=(name,...args)=>{assert.notEqual(name,ref,'reference must not be read as a whole');return whole(name,...args);};
  fs.readSync=(fd,buffer,offset,length,...args)=>{largest=Math.max(largest,length);return read(fd,buffer,offset,length,...args);};
- let d;try {d=f.m.preview('P');}finally{fs.readFileSync=whole;fs.readSync=read;}
+ let d;try {d=await f.m.preview('P');}finally{fs.readFileSync=whole;fs.readSync=read;}
  assert.ok(d.token,d.stopped?.reason);assert.equal(d.candidates.length,0);assert.equal(largest,65536);
+});
+
+// Batch boundaries must retain the destructive-operation safety checks.
+for(const mode of ['reference','directory','git'])test(`batch resumption refuses changed ${mode} snapshots`,async t=>{
+ const f=fixture(t,{referenceLimits:{bytes:32,chunk:16}}),file=f.old('.ai/work/safe.dat');
+ const ref=f.old('ref.txt','x'.repeat(256));
+ if(mode==='git')execFileSync('git',['init','-q',f.dir]);
+ const pending=f.m.preview('P');
+ setImmediate(()=>{
+  if(mode==='reference')fs.appendFileSync(ref,file);
+  else if(mode==='directory')f.old('new-reference.txt',file);
+  else execFileSync('git',['-C',f.dir,'add',file]);
+ });
+ const d=await pending;assert.equal(d.token,'');assert.deepEqual(d.candidates,[]);assert.match(d.stopped.reason,/変わりました/);
+ assert.equal(fs.readFileSync(file,'utf8'),'fixture');assert.equal(fs.existsSync(f.trash),false);assert.deepEqual(f.m.history('P'),[]);
+});
+for(const mode of ['busy','candidate','token'])test(`apply refuses ${mode} changes while awaiting batched recheck`,async t=>{
+ const f=fixture(t,{referenceLimits:{bytes:32,chunk:16}}),file=f.old('.ai/work/safe.dat');f.old('ref.txt','x'.repeat(256));
+ const d=await f.m.preview('P'),pending=f.m.apply('P',d.token,[d.candidates[0].id],true);
+ setImmediate(()=>{
+  if(mode==='busy')f.busy(true);
+  else if(mode==='candidate')fs.appendFileSync(file,'changed during scan');
+  else f.m.previews.delete(d.token);
+ });
+ await assert.rejects(()=>pending,mode==='busy'?/動いて/:mode==='candidate'?/変わりました/:/選び直/);
+ assert.equal(fs.existsSync(file),true);assert.equal(fs.existsSync(f.trash),false);assert.deepEqual(f.m.history('P'),[]);
+});
+test('apply rechecks large references completely, protects their tail and can move only the unused candidate',async t=>{
+ const f=fixture(t,{referenceLimits:{bytes:32,chunk:16}}),safe=f.old('.ai/work/unused.dat'),keep=f.old('.ai/work/used.dat');
+ f.old('one.txt','x'.repeat(256));f.old('two.txt','x'.repeat(256)+keep);
+ const d=await f.m.preview('P');assert.ok(d.token,d.stopped?.reason);assert.ok(d.scan.bytes>512);assert.ok(d.scan.batches>2);
+ assert.deepEqual(d.candidates.flatMap(x=>x.paths),[safe]);
+ const r=await f.m.apply('P',d.token,[d.candidates[0].id],true);assert.equal(r.moved,1);assert.equal(fs.existsSync(safe),false);assert.equal(fs.readFileSync(keep,'utf8'),'fixture');
+ assert.equal(f.m.restore('P',r.id,true).restored,1);assert.equal(fs.readFileSync(safe,'utf8'),'fixture');
 });

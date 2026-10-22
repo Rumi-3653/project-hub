@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // 初回案内だけを保存する。CLIの確認は固定の読み取りコマンドに限定する。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { AIS, childEnv, exeArgv } = require('./launch');

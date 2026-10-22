@@ -1,8 +1,9 @@
 'use strict';
 // Strict namespace/file durability boundary. Never turn an unsupported flush or
 // an I/O error into a successful save. This module is pinned with the supervisor.
-// Windows must supply native primitives in its adapter: Node's read-only
-// directory handles do not satisfy FlushFileBuffers' GENERIC_WRITE requirement.
+// Windows has a separately approved, weaker namespace durability contract:
+// parent identity validation, file flush and write-through rename (see win32.js).
+// No whole-volume flush or elevation. The Mac/Linux contract below is unchanged.
 const fs = require('node:fs');
 function create(name, defaultIO = fs) {
   function supported() {

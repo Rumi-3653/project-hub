@@ -80,7 +80,7 @@ test('単独のHub誘導なし・通常の案内は1200字以内', () => {
 
 test('停止が必要な時の場所とボタンは実画面の切替とAI欄に一致する', () => {
   const fs = require('node:fs'), path = require('node:path');
-  const ui = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
+  const ui = require('./fixtures/app-source.cjs').readApp();
   const text = info();
   assert.match(text, /ボタン名の無い停止や終了の操作を頼まない/);
   assert.match(text, /理由・場所（作業画面の［ターミナル］の、その AI の欄）・ボタン（［停止］）/);

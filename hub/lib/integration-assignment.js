@@ -43,8 +43,8 @@ function bind(r,a,key,request){
 }
 function records(h,o,q){
   const refs=[o.integrationAssignment,q?.integrationAssignment].filter(Boolean);
-  const ids=new Map([[o.project+'\0'+o.task,{project:o.project,task:o.task}],...h.pending().map(r=>[r.project+'\0'+r.task,r]),...refs.map(r=>[r.project+'\0'+r.task,r])]);
-  return [...ids.values()].map(r=>h.read(r.project,r.task)).filter(Boolean);
+  const rows=[...h.records(o.project,o.task),...h.pending().map(r=>h.read(r.project,r.task,r.id)),...refs.map(r=>h.read(r.project,r.task,r.id))].filter(Boolean);
+  return [...new Map(rows.map(r=>[r.id,r])).values()];
 }
 function find(h,o,q){
   const ids=[o.request,q?.id,q?.request,o.integrationReviewRequest,q?.integrationReviewRequest,o.limitSwitch?.sourceRequest].filter(Boolean);
@@ -56,12 +56,14 @@ function find(h,o,q){
 }
 function assign(h,request){
   const ref=request.integrationAssignment;if(!ref)return null;
-  const r=h.read(ref.project,ref.task),p=validate(r),a=r?.auto?.attempts?.[ref.key];
+  const r=h.read(ref.project,ref.task,ref.id),p=validate(r),a=r?.auto?.attempts?.[ref.key];
+  require('./integration-sibling').assert(h,r);
   if(!p||!a||r.id!==ref.id||!equal(ref,a.request?.integrationAssignment)||!equal({...request,requestKey:request.requestKey??a.delivery?.request},{...a.request,requestKey:a.delivery?.request}))fail();
   return {...request,...p.slots[phaseSlot(ref.phase)],requireModel:true,requiredModel:a.assigned.model};
 }
 function verify(h,o,q,check=()=>{}){
   const found=find(h,o,q);if(!found)return null;
+  require('./integration-sibling').assert(h,found.r);
   const {r,key,a}=found,p=validate(r),ref=reference(r,key,a.assigned.phase),s=p.slots[phaseSlot(ref.phase)];
   if(r.abandoned||r.complete||r.auto.stopped||a.phase!==ref.phase||!['intent','accepted'].includes(a.delivery?.state)||o.project!==a.request.project||o.task!==a.request.task)fail();
   for(const x of [o,...(q?[q]:[])]){

@@ -1,7 +1,7 @@
 'use strict';
 // The journal and roles travel in ONE atomic roles.yaml replacement. Comments
 // keep the file compatible with existing YAML readers and human editing.
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { parseYaml } = require('./frontmatter');

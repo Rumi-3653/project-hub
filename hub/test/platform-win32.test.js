@@ -22,7 +22,7 @@ test('Windows selection is lazy; Mac and Linux dependency sets and primitives ar
     vm.runInNewContext(source, { require: local, process: { platform: name }, module: result });
     assert.equal(result.exports.name, name);
     assert.deepEqual(Array.from(result.exports.supervisorFiles), name === 'win32'
-      ? ['index.js', 'darwin.js', 'persistence.js', 'win32.js', 'win32-native.js', 'cache-guard.js', 'cache-guard-worker.js'] : ['index.js', 'darwin.js', 'persistence.js']);
+      ? ['index.js', 'darwin.js', 'persistence.js', 'win32.js', 'win32-native.js', 'cache-guard.js', 'cache-guard-worker.js', 'file-io.js'] : ['index.js', 'darwin.js', 'persistence.js', 'file-io.js']);
     for (const file of result.exports.supervisorFiles) assert.match(file, /^[a-z][a-z0-9-]*\.js$/);
   }
 });
@@ -84,7 +84,7 @@ test('desktop arguments remain data, folder cancellation is empty and legacy cal
   const selecting = p.pickFolder('choose'); finish(null, 'C:\\chosen'); assert.equal(await selecting, 'C:\\chosen');
 });
 
-test('Windows persistence preserves before/callback/after ordering and binds both flushes to the same volume and parent identity', () => {
+test('Windows persistence preserves before/callback/after ordering and binds both checks to the same volume and parent identity', () => {
   const calls = [], binding = 'volume-guid|serial|file-id'; let failure;
   const p = create({ native: { call(action, data) { calls.push([action, data]); if (failure) throw Error(failure); return action === 'file' ? true : binding; } } });
   assert.equal(p.persistence.withDirectorySync('C:\\trial', () => { calls.push('operation'); return 'result'; }), 'result');
@@ -94,7 +94,7 @@ test('Windows persistence preserves before/callback/after ordering and binds bot
   assert.throws(() => p.persistence.syncFile('C:\\file'), /access denied/);
 });
 
-test('failed post-flush, changed binding and callback failures remain unconfirmed', () => {
+test('failed post-check, changed binding and callback failures remain unconfirmed', () => {
   let calls = 0, completed = false;
   const p = create({ native: { call() { if (++calls === 2) throw Error('flush failed'); return 'binding'; } } });
   assert.throws(() => { p.persistence.withDirectorySync('C:\\trial', () => {}); completed = true; }, /flush failed/); assert.equal(completed, false);
@@ -198,11 +198,11 @@ test('reported initialization and compilation failures stay distinct without lea
   }
 });
 
-test('licensing uses read-only NTFS validation while the general directory action retains its flush contract', t => {
+test('licensing uses read-only NTFS validation and general storage uses ordinary-rights identity validation', t => {
   const fixture = bridgeFixture(t);
   fixture.native.call('license-directory');
   assert.match(fixture.compilation.source, /case "license-directory": value=HubWindows\.ValidateDirectory\([^\n]+false\)/);
-  assert.match(fixture.compilation.source, /case "directory": value=HubWindows\.ValidateDirectory\([^\n]+true\)/);
+  assert.match(fixture.compilation.source, /case "directory": value=HubWindows\.ValidateDirectory\([^\n]+false\)/);
   assert.match(fixture.compilation.source, /if\(flush\) using\(var disk=Open\([^\n]+FlushFileBuffers\(disk\)/);
   const calls = [], platform = create({ native: { call(action, data) { calls.push([action, data]); return 'bound'; } } });
   assert.equal(platform.licenseDirectory('C:\\isolated', 'bound'), 'bound');
@@ -277,9 +277,9 @@ test('declared Windows supervisor set loads in isolation with no live Hub depend
     const directory = path.join(temp, 'platform'); fs.mkdirSync(directory, { mode: 0o700 });
     const names = ['index.js', ...create().supervisorFiles];
     for (const name of names) fs.copyFileSync(path.join(__dirname, '../lib/platform', name), path.join(directory, name));
-    const script = `Object.defineProperty(process,'platform',{value:'win32'}); const p=require(process.argv[1]); if(p.name!=='win32'||p.supervisorFiles.length!==7)throw Error('missing Windows dependency'); console.log(JSON.stringify(p.supervisorFiles));`;
+    const script = `Object.defineProperty(process,'platform',{value:'win32'}); const p=require(process.argv[1]); if(p.name!=='win32'||p.supervisorFiles.length!==8)throw Error('missing Windows dependency'); console.log(JSON.stringify(p.supervisorFiles));`;
     const loaded = JSON.parse(cp.execFileSync(process.execPath, ['-e', script, directory], { encoding: 'utf8' }));
-    assert.deepEqual(loaded, ['index.js', 'darwin.js', 'persistence.js', 'win32.js', 'win32-native.js', 'cache-guard.js', 'cache-guard-worker.js']);
+    assert.deepEqual(loaded, ['index.js', 'darwin.js', 'persistence.js', 'win32.js', 'win32-native.js', 'cache-guard.js', 'cache-guard-worker.js', 'file-io.js']);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
@@ -354,4 +354,26 @@ test('Windows resume watcher requires its handshake and matching request, then s
   child.stdout.emit('data',Buffer.from(JSON.stringify({ok:true,id:'wrong',value:'resume'})+'\n'));
   assert.equal(events,1);assert.equal(errors,1);
   assert.match(fixture.compilation.source,/ProtectedData\.Protect/);assert.match(fixture.compilation.source,/GetTickCount64/);
+});
+
+test('integrated Windows rename keeps native rejection and never substitutes a Node rename', () => {
+  const calls=[];let value=true;
+  const p=create({native:{call(action,data){calls.push([action,data]);return value;}}});
+  assert.equal(p.persistence.durability,'file-flush-write-through-rename');
+  p.persistence.renameSync('C:\\from','C:\\to');
+  assert.deepEqual(calls,[['rename',{from:'C:\\from',to:'C:\\to'}]]);
+  value=false;assert.throws(()=>p.persistence.renameSync('C:\\from','C:\\to'),/名前変更/);
+  const denied=create({native:{call(){throw Error('native denied');}}});
+  assert.throws(()=>denied.persistence.renameSync('C:\\from','C:\\to'),/native denied/);
+});
+
+test('integrated native payload combines write-through same-volume rename with protected license dispatch', t => {
+  const f=bridgeFixture(t);f.native.call('snapshot');const code=f.compilation.source;
+  assert.match(code,/MoveFileExW\(source,destination,0x1\|0x8\)/);
+  assert.doesNotMatch(code,/MoveFileExW\(source,destination,[^\n]*(?:0x2|COPY_ALLOWED)/);
+  assert.match(code,/before\.Split\('\|'\)\[0\]!=origin\.Split\('\|'\)\[0\]/);
+  assert.ok(code.indexOf('if(!directory) FlushFile(source);')<code.indexOf('Check(MoveFileExW(source,destination,0x1|0x8))'));
+  for(const part of ['ValidateDirectory(parent,before,false)','ValidateDirectory(sourceParent,origin,false)',
+    'case "license-directory"','case "secret-get"','case "secret-put"','case "clock"','case "watch"',
+    'ProtectedData.Unprotect','ProtectedData.Protect','HubWindowsLicense.MachineHint']) assert.ok(code.includes(part),part);
 });

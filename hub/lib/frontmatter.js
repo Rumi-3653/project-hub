@@ -89,9 +89,10 @@ function parseYaml(text) {
 
 // 先頭の --- ... --- を分けて読む
 function parseDoc(text) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) return { data: {}, body: text };
-  return { data: parseYaml(m[1]), body: m[2] };
+  // Only scan the header; slicing preserves even a large body byte-for-byte.
+  return { data: parseYaml(m[1]), body: text.slice(m[0].length) };
 }
 
 // 先頭部分の「key: 値」1行だけを書き換える（無ければ足す）。コメントは残す

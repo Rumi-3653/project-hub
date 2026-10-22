@@ -224,6 +224,7 @@ test('Native and Node select the same pack after rejecting invalid core dictiona
   const f = fixture(t), repo = path.join(f.root, 'repository'), libs = path.join(repo, 'hub/lib');
   fs.mkdirSync(libs, { recursive: true });
   for (const file of ['langpack.js', 'locale.js']) fs.copyFileSync(path.join(hub, 'lib', file), path.join(libs, file));
+  fs.cpSync(path.join(hub, 'lib/platform'), path.join(libs, 'platform'), { recursive: true });
   const source = fs.readFileSync(path.join(hub, 'app/window.swift'), 'utf8');
   // Isolate only the default installation path; the consumer functions are unchanged.
   const globals = source.slice(source.indexOf('let home ='), source.indexOf('\nlet port ='))

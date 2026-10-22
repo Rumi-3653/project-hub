@@ -1,6 +1,6 @@
 'use strict';
 // Optional data only: a pack never supplies executable code or module paths.
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const cache = new Map(), warned = new Set();

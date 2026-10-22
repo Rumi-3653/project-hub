@@ -1,6 +1,6 @@
 'use strict';
 const { lt } = require('./locale');
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { scalar, setScalar, parseDoc } = require('./frontmatter');

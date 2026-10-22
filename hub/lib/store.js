@@ -124,12 +124,25 @@ function projectNotes(body) {
 const STEP = /^\s*[-*]\s+\[([ xX])\]\s+(\S.*)$/;
 function readSteps(body) {
   const out = [];
-  let inside = false;
-  for (const line of body.split(/\r?\n/)) {
-    if (/^##\s/.test(line)) { inside = new RegExp('^##\\s+(?:' + sectionPattern('手順') + ')(?=$|\\s|（)').test(line); continue; }
-    const m = inside && line.match(STEP);
-    if (m) out.push({ text: m[2].trim(), done: m[1] !== ' ' });
+  let start = -1, heading;
+  const collect = end => {
+    if (start < 0) return;
+    for (const line of body.slice(start, end).split(/\r?\n/)) {
+      const m = line.match(STEP);
+      if (m) out.push({ text: m[2].trim(), done: m[1] !== ' ' });
+    }
+  };
+  // Locate section boundaries without allocating lines for notes and results.
+  // Only LF/CRLF separate lines, matching the document's existing split rule.
+  for (const m of body.matchAll(/(?:^|\n)(##[^\n]*)/g)) {
+    const at = m.index + (m[0].startsWith('\n') ? 1 : 0);
+    const line = body[at + m[1].length] === '\n' ? m[1].replace(/\r$/, '') : m[1];
+    if (!/^##\s/.test(line)) continue;
+    heading ||= new RegExp('^##\\s+(?:' + sectionPattern('手順') + ')(?=$|\\s|（)');
+    collect(at);
+    start = heading.test(line) ? at + m[1].length + 1 : -1;
   }
+  collect(body.length);
   return out;
 }
 const oneLine = s => String(s || '').replace(/[\r\n]+/g, ' ').trim();
@@ -213,6 +226,7 @@ class Store {
       ...(data.freetalk === true ? { freetalk: true } : {}),
       ...(data.gptChild === true ? { gptChild: true } : {}),
       ...(typeof data.integrateKeep === 'boolean' ? { integrateKeep: data.integrateKeep } : {}),
+      ...require('./task-future-hold').read(this.root,path.basename(path.dirname(path.dirname(path.dirname(file)))),id),
       role: data.role || '',
       owner: data.owner || '',
       ...this.completion.task(`${path.basename(path.dirname(path.dirname(path.dirname(file))))}/${id}`, data.state, text, steps, c),

@@ -38,11 +38,12 @@ module.exports.createDelivery = host => {
     if (ai === 'grok' && b.effort === 'Ultra') return send(res, 400, { error: lt('Grok の思考は 中・高・極高・MAX です') });
     const effort = integrationAssignment ? b.effort : ai === 'agy' ? '高' : roles.EFFORTS.includes(b.effort) ? b.effort : automatic?.effort || role?.main.effort || '';
     const verifyReviewResults=()=>{
-      if(!review?.savedResults)return;
-      const r=taskIntegrate.read(p.id,t.id),a=r?.auto?.attempts[review.key],i=r?.items.find(i=>i.project===review.savedResults.project&&i.task===review.savedResults.task);
+      if(!review)return;
+      const r=taskIntegrate.read(p.id,t.id,review.integrationId),a=r?.auto?.attempts[review.key];
+      if(r?.stoppedSibling){if(!a||a.delivery?.request!==requestKey)throw Error('Integration request changed');require('./integration-sibling').review(taskIntegrate,r,a);}
+      if(!review.savedResults)return;
       if(!a||a.phase!=='review'||a.delivery?.request!==requestKey||JSON.stringify(a.savedResults)!==JSON.stringify(review.savedResults))throw Error('Saved result review request changed');
-      taskIntegrate.simple.validate(r);require('./integration-review-results').verify(review.savedResults,taskIntegrate,r,i);
-      if(a.evidenceRecovery)require('./integration-review-results').verifyRecovery(a.evidenceRecovery,integrateAuto.savedCompletion(r,a.previousAttempt,'review'));
+      taskIntegrate.simple.validate(r);integrateAuto.verifySavedReview(r,a);
     };
     let evidence;
     if(isolatedReview){try{verifyReviewResults();evidence=require('./integration-review').prepare({dir,pdir:p.dir,task:t.id,...review});}catch(e){return send(res,409,{error:e.message});}}

@@ -1,0 +1,276 @@
+'use strict';
+// Classic-script declarations only. Shared state and startup stay in app.js.
+// See README.md for the loading and state contract.
+
+function trimUrl(u) {
+  let x = u.replace(/[.,;:!?'*]+$/, '');
+  for (;;) {
+    const n = x.length;
+    if (x.endsWith(')') && (x.match(/\(/g) || []).length < (x.match(/\)/g) || []).length) x = x.slice(0, -1);
+    if (x.endsWith(']') && (x.match(/\[/g) || []).length < (x.match(/\]/g) || []).length) x = x.slice(0, -1);
+    x = x.replace(/[.,;:!?'*]+$/, '');
+    if (x.length === n) return x;
+  }
+}
+
+function linkify(text) {
+  const s = String(text == null ? '' : text);
+  let out = '', last = 0, m;
+  LINK_RE.lastIndex = 0;
+  while ((m = LINK_RE.exec(s))) {
+    // Markdown画像も場所リンクとして扱い、記法の ! を表示に残さない。
+    const image = m[1] !== undefined && m.index > last && s[m.index - 1] === '!';
+    out += esc(s.slice(last, image ? m.index - 1 : m.index));
+    last = LINK_RE.lastIndex;
+    if (m[1] !== undefined) { // [名前](URL または場所)
+      const t = m[2].replace(/^<|>$/g, '').replace(/^file:\/\//, '');
+      let dec = t; try { dec = decodeURI(t); } catch (e) { /* そのまま */ }
+      const local = dec.replace(/#L?\d+(-L?\d+)?$/, '');
+      out += /^https?:\/\//.test(t) ? urlLink(t, m[1]) : isPath(dec) ? image && /\.(png|jpe?g|gif|webp)$/i.test(local) ? imagePathLink(local, m[1]) : pathLink(local, m[1]) : esc(m[0]);
+    } else if (m[3]) { const u = trimUrl(m[3]); out += urlLink(u) + esc(m[3].slice(u.length)); LINK_RE.lastIndex = last = m.index + m[3].length; }
+    else if (m[4] !== undefined) {
+      const c = m[4].trim();
+      out += /^https?:\/\//.test(c) ? '`' + urlLink(c) + '`' : isPath(c) ? '`' + pathLink(c) + '`' : esc(m[0]);
+    }
+    else { const raw = m[5] || m[6], x = raw.replace(/[.,;:!?]+$/, ''); out += pathLink(x) + esc(raw.slice(x.length)); }
+  }
+  return out + esc(s.slice(last));
+}
+
+function richText(text, streaming = false) {
+  const lines=String(text??'').match(/[^\n]*\n|[^\n]+$/g)||[];
+  let out='', plain='', code='', quote='', quoting=false, fence=0, lang='';
+  for(const line of lines) {
+    const raw=line.replace(/\r?\n$/, ''), start=raw.match(/^ {0,3}(`{3,})([^`]*)$/);
+    if(!fence && /^ {0,3}>/.test(raw)) {
+      if(!quoting) {out+=tables(plain);plain='';quoting=true;}
+      quote+=line.replace(/^ {0,3}> ?/, '');
+      continue;
+    }
+    flushQuote();
+    if(!fence && start) {out+=tables(plain);plain='';fence=start[1].length;lang=start[2].trim().split(/\s+/)[0]||UI.text('テキスト');code='';}
+    else if(fence && new RegExp('^ {0,3}`{'+fence+',}\\s*$').test(raw)) {
+      out+=block(code, false);fence=0;
+    } else if(fence) code+=line; else plain+=line;
+  }
+  flushQuote();
+  if(fence)out+=block(code,true);else out+=tables(plain);
+  return out;
+  function flushQuote() {
+    if(!quoting)return;
+    out+=UI.template`<div class="codeblock quote-block"><div class="cb-head"><span>${UI.text('引用')}${streaming?UI.text(' ・書きかけ'):''}</span>${streaming?'':UI.html('<button type="button" class="cb-copy quote-copy" aria-label="引用の本文をコピー">⧉ 引用をコピー</button>')}</div><pre><code>${esc(quote).replace(/\r/g,'&#13;')}</code></pre></div>`;
+    quote='';quoting=false;
+  }
+  function block(value,partial) {return UI.template`<div class="codeblock"><div class="cb-head"><span>${esc(lang)}${partial?UI.text(' ・書きかけ'):''}</span>${partial?'': UI.html('<button type="button" class="cb-copy" aria-label="この囲みをコピー">⧉ コピー</button>')}</div><pre><code>${esc(value).replace(/\r/g,'&#13;')}</code></pre></div>`;}
+  // エスケープした | はセルの文字。両端の省略可能な | だけを取り除く。
+  function cells(line) {
+    const row=[''];let pipes=0,slashes=0;
+    for(const ch of line.replace(/\r?\n$/, '')) {
+      if(ch==='|') {
+        if(slashes%2)row[row.length-1]=row[row.length-1].slice(0,-1)+'|';
+        else {row.push('');pipes++;}
+      } else row[row.length-1]+=ch;
+      slashes=ch==='\\'?slashes+1:0;
+    }
+    if(!pipes)return null;
+    if(!row[0].trim())row.shift();
+    if(row.length && !row[row.length-1].trim())row.pop();
+    return row.map(x=>x.trim());
+  }
+  function inline(value) {
+    // リンク全体を先に拾い、名前や行先の記号を装飾として分断しない。
+    const tokens=/!?\[[^\]\n]+\]\((?:<[^>\n]+>|[^)\s]+(?:\([^)\s]*\)[^)\s]*)*)\)|`([^`\n]+)`|\*\*([^\n]+?)\*\*/g;
+    let html='',last=0,m;
+    while((m=tokens.exec(value))) {
+      html+=linkify(value.slice(last,m.index));
+      html+=m[1]!==undefined?UI.template`<code class="rt-inline">${linkify(m[1])}</code>`:m[2]!==undefined?UI.template`<strong>${inline(m[2])}</strong>`:linkify(m[0]);
+      last=tokens.lastIndex;
+    }
+    return html+linkify(value.slice(last));
+  }
+  function tables(value) {
+    const rows=value.match(/[^\n]*\n|[^\n]+$/g)||[];
+    let html='',pending='';
+    for(let i=0;i<rows.length;i++) {
+      const head=cells(rows[i]),sep=i+1<rows.length?cells(rows[i+1]):null;
+      if(!head?.length || !sep || head.length!==sep.length || !sep.every(x=>/^:?-{2,}:?$/.test(x))) {pending+=rows[i];continue;}
+      html+=linkify(pending);pending='';
+      const align=sep.map(x=>x.startsWith(':')&&x.endsWith(':')?'center':x.endsWith(':')?'right':'left');
+      const tr=(row,tag)=>'<tr>'+head.map((_,n)=>`<${tag}${tag==='th'?' scope="col"':''} class="rt-${align[n]}">${inline(row[n]??'')}</${tag}>`).join('')+'</tr>';
+      html+=UI.html('<div class="rt-table-wrap" tabindex="0" role="region" aria-label="表（横にスクロールできます）"><table class="rt-table"><thead>')+tr(head,'th')+'</thead><tbody>';
+      i++;
+      while(i+1<rows.length) {
+        const row=cells(rows[i+1]);
+        // 多すぎる列は捨てずに、元の文字として残す。
+        if(!row?.length || row.length>head.length)break;
+        html+=tr(row,'td');i++;
+      }
+      html+='</tbody></table></div>';
+    }
+    return html+linkify(pending);
+  }
+}
+
+async function copyText(v, quiet) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(v); ok = true; }
+  catch (e) { const ta = document.createElement('textarea'); ta.value = v; document.body.appendChild(ta); ta.select(); try { ok = document.execCommand('copy'); } catch (e2) { ok = false; } ta.remove(); }
+  if (!quiet) toast(ok ? UI.text('コピーしました') : UI.text('コピーできませんでした。文を選んで ⌘C でコピーしてください'));
+  return ok;
+}
+
+function continuationSummary(text) {
+  if(typeof text!=='string')return text;
+  const next=['次にすること','次にする作業','下一步','接下來要做的工作'];
+  const pending=['残件・判断待ち','人の判断待ち','剩餘工作與待決定事項','待使用者決定'];
+  const headings=[...next,...pending,'承認（人の発言のみ）','核准（僅限使用者發言）','決定事項','已決定事項','理由','参照先','參照位置','參考位置','參考來源'];
+  const lines=text.split('\n'),sections=[];let current=null,prefix=[];
+  for(const l of lines){const label=l.trim().replace(/[：:]$/, '');if(headings.includes(label)&&/[：:]$/.test(l.trim())){current={label,lines:[l]};sections.push(current);}else (current?current.lines:prefix).push(l);}
+  if(!sections.some(s=>next.includes(s.label)||pending.includes(s.label)))return text;
+  for(const s of sections)if(next.includes(s.label))s.lines[0]=UI.text('次にする作業')+'：';
+  const rank=s=>next.includes(s.label)?0:pending.includes(s.label)?1:2;
+  return [...prefix,...sections.sort((a,b)=>rank(a)-rank(b)).flatMap(s=>s.lines)].join('\n');
+}
+
+function msgHtml(r) {
+  const html=baseMsgHtml(r),button=window.HubIdeas?.messageButton(r,{project:view.project,task:view.task})||'';
+  return button?html.replace(/<\/div>$/,`<div class="idea-message-action">${button}</div></div>`):html;
+}
+
+function baseMsgHtml(r) {
+  const time = r.at ? new Date(r.at).toLocaleTimeString(UI.dateLocale, { hour: '2-digit', minute: '2-digit' }) : '';
+  if (r.from === 'gptchat' || r.from === 'gptchat-report') {
+    const child = taskOf(proj(view.project), r.childTask);
+    return UI.template`<div class="m ai"><div class="mh"><b>ChatGPT（Chat／Pro）</b><span class="small">${time}</span></div><div class="mb">${richText(r.text)}</div>${child ? gptChildLink(view.project, child.id) : UI.html('')}</div>`;
+  }
+  if (r.role === 'user' && r.to === 'gptchat' && r.request) return UI.template`<div class="m me" data-gpt-request="${esc(r.request)}"><div class="mh"><b data-gpt-status>ChatGPT（Chat）への依頼（未処理）</b><span class="small">${time}</span></div><div class="mb">${richText(r.text)}</div>${gptChildLink(view.project, view.task)}</div>`;
+  if (r.summaryAuto) return UI.template`<div class="m handoff"><details><summary>前の会話を整理しました（人の確認なし）・中身を見る</summary><div class="mb">${richText(continuationSummary(r.text))}</div></details></div>`;
+  if (r.role === 'event' && r.continuation) return UI.template`<div class="ev" role="status">${esc(r.text)}</div>`;
+  if (r.role === 'event') return isToolRow(r) && !showDetail() ? '' : UI.template`<div class="ev">▸ ${esc(r.text)}</div>`;
+  if (r.role === 'user' && (r.from === 'delegate' || r.from === 'child' || r.from === 'subtask')) {
+    // 過去の結果通知でも、実際の成果を確認する共通引渡しへ進む。
+    const childProject = proj(r.childProject || view.project);
+    const candidate = r.child && r.from !== 'child' && taskOf(childProject, r.child);
+    const receiver = { project: proj(view.project), task: taskOf(proj(view.project),view.task) };
+    const recordedTitle = typeof r.childTitle === 'string' ? r.childTitle : /^（子作業「(.+)」の結果）(?:\r?\n|$)/.exec(r.text || '')?.[1];
+    const mismatch = candidate && recordedTitle !== undefined && recordedTitle !== candidate.title;
+    const block = candidate && !mismatch && !r.handoff && !r.partialReceipt ? ProjectOrder.integrateBlock(receiver,childProject,candidate,state.projects,'continue') : null;
+    const offer = candidate && (state.taskOffers||[]).find(x=>x.project===childProject.id&&x.task===candidate.id&&x.targetProject===view.project&&x.targetTask===view.task);
+    const received = offer?.pending===false;
+    const unchecked = offer?.received&&offer.pending!==false&&offer.receiptChecked!==true;
+    const kid = !mismatch && !received && !unchecked && !r.handoff && !r.partialReceipt && !block ? candidate : null;
+    const absorb = kid ? transferButton(childProject.id,kid.id,recordedTitle ?? kid.title,r.offer?UI.text('統合…'):UI.text('成果を受け取る')) : '';
+    const note = r.handoff ? (r.disposition==='continue'?UI.text('この成果は受領済みです。作業と残件を保持して続けられます。新しい成果が届いたときだけ［統合…］が表示されます。'):r.integrating ? UI.text('この成果はもう受け取っています。統合や片付けが残っている場合は上部の［統合…］から進めてください。') : UI.text('この成果はもう受け取っています。片付けが残っている場合は上部の［引渡しの残りを続ける］から進めてください。'))
+      : received ? UI.text('この成果は受領済みです。作業と残件を保持して続けられます。新しい成果が届いたときだけ［統合…］が表示されます。')
+      : unchecked ? UI.text('受領状況が未確認です')
+      : mismatch ? UI.text('この結果の子作業は今はありません（同じ番号の別の作業があります）。')
+      : r.child && r.from !== 'child' && !candidate ? UI.text('この子作業は今はありません。受け取った成果は本作業の会話と［ファイルを見る］で確認できます。')
+      : block || (kid && transferNeedsUpdate() ? transferUpdateMessage() : '');
+    return UI.template`<div class="m ai"><div class="mh"><span class="chip"><span class="ic">↩</span>${r.from === 'delegate' ? UI.text('渡した作業の結果') : r.from === 'subtask' ? UI.text('子作業の結果') : UI.text('子プロジェクトの結果')}${r.ai ? UI.template`<small>・${esc(AI_LABEL[r.ai] || r.ai)}</small>` : ''}</span><span class="small">${time}</span>${absorb}</div>${note ? UI.template`<p class="transfer-hint">${esc(note)}</p>` : ''}<div class="mb">${richText(r.text)}</div></div>`;
+  }
+  if (r.role === 'user' && r.to === 'dot' && r.request) return UI.template`<div class="m me" data-dot-request="${esc(r.request)}"><div class="mh"><b data-dot-status>Dotへの依頼（廃止・参照のみ）</b><span class="small">${time}</span></div><div class="mb">${richText(r.text)}</div><p class="small">依頼ID：${esc(r.request)}</p></div>`;
+  if (r.role === 'user') return UI.template`<div class="m me"><div class="mh">${r.mode === 'redo' || r.mode === 'interrupt' ? UI.html('<span class="tagm int">やり直し</span>') : r.mode === 'amend' ? UI.html('<span class="tagm am">追加指示</span>') : r.mode === 'queued' ? UI.html('<span class="tagm">順番待ちの指示</span>') : ''}<span class="small">${time}・${esc(AI_LABEL[r.to] || '')}${r.model ? '・' + esc(r.model) : ''}${r.to === 'codex' && r.fast === true ? UI.text('・加速ON（Fast）') : ''} へ</span></div><div class="mb">${richText(r.text)}</div></div>`;
+  return UI.template`<div class="m ai ${r.discussion ? 'discussion-message' : ''} ${r.discussion?.summary && !r.error ? 'discussion-summary' : ''}" ${r.ai === 'chatgpt-chat' && r.request ? `data-gpt-report="${esc(r.request)}"` : ''} ${r.ai === 'dot' && r.request ? `data-dot-report="${esc(r.request)}"` : ''}><div class="mh">${r.discussion ? UI.template`<b>${esc(r.discussion.summary ? '話し合いのまとめ' : r.discussion.stage)}</b>` : ''}<span class="chip k-${esc(r.ai)}"><span class="ic">${AI_ICON[r.ai] || '?'}</span>${esc(AI_LABEL[r.ai] || r.ai)}${r.model ? UI.template`<small>・${esc(r.model)}${r.effort ? '・' + esc(r.effort) : ''}</small>` : ''}</span><span class="small">${time}</span>${r.error ? UI.html('<span class="done bad">⚠ 止まりました</span>') : UI.template`<span class="done">✓ 完了${r.ms ? '（' + dur(r.ms) + '）' : ''}</span>`}${r.text ? UI.template`<button type="button" class="cp cp-msg" data-copy="${esc(r.text)}" title="この返事をコピー">⧉ コピー</button>` : ''}</div>
+    ${r.text ? UI.template`<div class="mb">${richText(r.text)}</div>` : ''}${(r.generatedImages || []).map(x => imagePathLink(x.path, x.name)).join('')}${r.asks && r.asks.length ? askHtml(r.asks) : ''}${r.error ? UI.template`<div class="merr">${esc(r.error)}</div>` : ''}</div>`;
+}
+
+function askHtml(asks) {
+  const key = JSON.stringify([view.project, view.task, asks]);
+  const saved = askDrafts.get(key) || [];
+  return UI.template`<div class="ask${askPending.has(key) ? ' pending' : ''}" data-ask-key="${esc(key)}">${asks.map((a, i) => {
+    const d = saved[i] || { selected: [], free: '' };
+    return UI.template`<div class="ask-q" data-i="${i}" data-multi="${a.multi ? 1 : 0}" data-q="${esc(a.question)}">
+      <div class="ask-t">❓ ${richText(a.question || UI.text('選んでください'))}</div>
+      <div class="ask-opts">${a.options.map(o => UI.template`<button type="button" class="ask-o${d.selected.includes(o) ? ' on' : ''}" data-ask="${esc(o)}" aria-pressed="${d.selected.includes(o)}">${esc(o)}</button>`).join('')}</div>
+      <label class="ask-free-label">ほかの回答・補足<textarea class="ask-free" rows="2" placeholder="選択肢にない回答を書けます。選んだ回答への補足もできます。">${esc(d.free)}</textarea></label></div>`;
+  }).join('')}
+    <div class="ask-foot"><span class="small">質問ごとに選ぶか入力して、まとめて［選んで送る］を押してください。</span><button type="button" class="btn sm ask-send">選んで送る</button></div><div class="ask-status small" role="status"></div></div>`;
+}
+
+function askValues(ask) {
+  return [...ask.querySelectorAll('.ask-q')].map(q => ({ question: q.dataset.q,
+    selected: [...q.querySelectorAll('.ask-o.on')].map(b => b.dataset.ask), free: q.querySelector('.ask-free').value }));
+}
+
+function askAnswer(values) {
+  return values.map(v => {
+    const selected = v.selected.map(cleanOpt).join('、'), free = v.free.trim();
+    const answer = selected && free ? UI.template`${selected}\n自由入力：${free}` : selected || free;
+    return values.length > 1 ? `${v.question}：${answer}` : answer;
+  }).join('\n\n');
+}
+
+function updateAskControls(ask) {
+  if(ask.closest?.('.freetalk-work')?.dataset.readonly==='true'){ask.querySelectorAll('button, textarea').forEach(e=>e.disabled=true);return;}
+  const disabled = ask.classList.contains('done') || askPending.has(ask.dataset.askKey) || (typeof chatSending !== 'undefined' && chatSending.has(JSON.stringify(JSON.parse(ask.dataset.askKey).slice(0,2))));
+  ask.querySelectorAll('button, textarea').forEach(el => { el.disabled = disabled; });
+  ask.querySelector('.ask-send').textContent = askPending.has(ask.dataset.askKey) ? UI.text('送っています…') : UI.text('選んで送る');
+}
+
+function bindAskAnswers(box, send) {
+  box.addEventListener('input', e => {
+    const ask = e.target.closest('.ask');
+    if (!ask || !e.target.matches('.ask-free') || ask.classList.contains('done') || askPending.has(ask.dataset.askKey)) return;
+    askDrafts.set(ask.dataset.askKey, askValues(ask)); ask.querySelector('.ask-status').textContent = '';
+  });
+  box.addEventListener('click', async e => {
+    const ask = e.target.closest('.ask');
+    if (!ask || ask.classList.contains('done') || askPending.has(ask.dataset.askKey)) return;
+    const opt = e.target.closest('.ask-o');
+    if (opt) {
+      const q = opt.closest('.ask-q'), wasOn = opt.classList.contains('on');
+      if (q.dataset.multi !== '1') q.querySelectorAll('.ask-o').forEach(b => b.classList.remove('on'));
+      opt.classList.toggle('on', !wasOn);
+      q.querySelectorAll('.ask-o').forEach(b => b.setAttribute('aria-pressed', String(b.classList.contains('on'))));
+      askDrafts.set(ask.dataset.askKey, askValues(ask)); ask.querySelector('.ask-status').textContent = ''; return;
+    }
+    if (!e.target.closest('.ask-send')) return;
+    const values = askValues(ask), missing = values.findIndex(v => !v.selected.length && !v.free.trim());
+    askDrafts.set(ask.dataset.askKey, values);
+    if (missing !== -1) {
+      ask.querySelector('.ask-status').textContent = UI.template`質問${missing + 1}の選択肢を選ぶか、ほかの回答を入力してください。`;
+      ask.querySelectorAll('.ask-free')[missing].focus(); return;
+    }
+    const key = ask.dataset.askKey;
+    const currentAsks = () => [...new Set([ask, ...document.querySelectorAll('.ask')])].filter(a => a.dataset.askKey === key);
+    askPending.add(key); updateAskControls(ask);
+    ask.querySelector('.ask-status').textContent = '';
+    try {
+      if (await send(askAnswer(values))) {
+        askDrafts.delete(key); currentAsks().forEach(a => { a.classList.add('answered', 'done'); a.querySelector('.ask-status').textContent = UI.text('回答をまとめて送信しました。'); });
+      } else { currentAsks().forEach(a => { a.querySelector('.ask-status').textContent = UI.text('送信されていません。回答はそのまま残っています。'); }); }
+    } catch (err) { currentAsks().forEach(a => { a.querySelector('.ask-status').textContent = UI.template`送信できませんでした。回答は残っています。${err.message}`; }); }
+    finally { askPending.delete(key); currentAsks().forEach(updateAskControls); }
+  });
+}
+
+function refreshAsks(box) {
+  const all = [...box.querySelectorAll('.m')];
+  const last = all.filter(m => !m.id).pop();
+  const asks = [...box.querySelectorAll('.ask')];
+  const workKey = JSON.stringify([view.project, view.task]), attempt = askAttempts.get(workKey);
+  const current = attempt && taskOf(proj(view.project), view.task);
+  const target = attempt && asks.filter(a => a.dataset.askKey === attempt.askKey).at(-1);
+  const newer = target && asks.slice(asks.indexOf(target) + 1).some(a => a.dataset.askKey !== attempt.askKey);
+  const retry = attempt && current?.question === attempt.question && target && !newer && !target.classList.contains('answered');
+  // 初期履歴が届く前の空DOMは、対象の質問が消えたという情報ではない。
+  if (attempt && (current?.question !== attempt.question || newer || target?.classList.contains('answered') || (!target && box.dataset?.askHistoryPending !== '1'))) askAttempts.delete(workKey);
+  asks.forEach(a => {
+    a.classList.toggle('done', a.classList.contains('answered') || (!(retry && a === target) && (!last || !last.contains(a))));
+    updateAskControls(a);
+  });
+}
+
+function dur(ms) { const t = Math.max(0, Math.round(ms / 1000)); return t < 60 ? UI.template`${t}秒` : UI.template`${Math.floor(t / 60)}分${t % 60 ? (t % 60) + '秒' : ''}`; }
+
+// Create the original callback at its original registration point in app.js.
+function appMessagesCallback1642() {
+  return (async e=>{
+  const b=e.target.closest?.('.cb-copy');if(!b || b.disabled)return;
+  const label=UI.text(b.classList?.contains('quote-copy')?'⧉ 引用をコピー':'⧉ コピー');
+  b.disabled=true;
+  const ok=await copyText(b.closest('.codeblock').querySelector('code').textContent,true);
+  b.textContent=ok?UI.text('✓ コピーしました'):UI.text('コピーできませんでした。選んで ⌘C');
+  setTimeout(()=>{b.textContent=label;b.disabled=false;},2000);
+});
+}

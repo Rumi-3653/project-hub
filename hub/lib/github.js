@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // gh の認証を操作の間だけ借りる。秘密を設定・応答・コマンド引数に残さない。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');

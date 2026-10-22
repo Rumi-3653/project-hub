@@ -134,6 +134,22 @@ public static class HubWindows {
       return binding;
     }
   }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool MoveFileExW(string from, string to, uint flags);
+  public static bool Rename(string from, string to) {
+    bool directory=Directory.Exists(from);
+    string source=Local(from,directory), destination=Path.GetFullPath(to);
+    if(source.Equals(destination,StringComparison.OrdinalIgnoreCase)) throw new Exception("rename_same_path");
+    string parent=Path.GetDirectoryName(destination), sourceParent=Path.GetDirectoryName(source);
+    string before=ValidateDirectory(parent,null,false), origin=ValidateDirectory(sourceParent,null,false);
+    if(before.Split('|')[0]!=origin.Split('|')[0]) throw new Exception("rename_same_volume_required");
+    if(File.Exists(destination)) Local(destination,false);
+    if(Directory.Exists(destination)) Local(destination,true);
+    if(!directory) FlushFile(source);
+    // No COPY_ALLOWED: cross-volume copying would lose atomic replacement.
+    Check(MoveFileExW(source,destination,0x1|0x8));
+    ValidateDirectory(parent,before,false); ValidateDirectory(sourceParent,origin,false);
+    return true;
+  }
   public static bool FlushFile(string p) {
     string full=Local(p,false);
     // OPEN_EXISTING + GENERIC_WRITE, no truncation and no concurrent rename/write.
@@ -223,7 +239,7 @@ public static class HubWindowsLicense {
     object gate=new object();
     Microsoft.Win32.PowerModeChangedEventHandler handler=(sender,args)=> {
       if(args.Mode!=Microsoft.Win32.PowerModes.Resume&&args.Mode!=Microsoft.Win32.PowerModes.Suspend) return;
-      lock(gate) { Console.WriteLine(json.Serialize(new { ok=true,id=id,value="resume" })); Console.Out.Flush(); }
+      lock(gate) { Console.WriteLine(json.Serialize(new { ok=true,id=id,value=args.Mode==Microsoft.Win32.PowerModes.Suspend?"suspend":"resume" })); Console.Out.Flush(); }
     };
     Microsoft.Win32.SystemEvents.PowerModeChanged+=handler;
     try {
@@ -234,8 +250,8 @@ public static class HubWindowsLicense {
 }
 `;
 
-// The reviewed HubWindows implementation above is unchanged. This fixed console
-// entry point replaces only PowerShell's per-request dispatch/JSON serialization.
+// Fixed console dispatch retains license actions and guarded compilation.
+// General directory checks/rename use the ordinary-rights Windows storage policy.
 const program = String.raw`
 public static class HubNativeProgram {
   [STAThread]
@@ -252,8 +268,9 @@ public static class HubNativeProgram {
         case "stop":
           var row=json.ConvertToType<HubWindows.Row>(r["row"]);
           value=HubWindows.Stop(row.pid,row.sid,row.since,row.command,(bool)r["probe"],Convert.ToInt32(r["caller"])); break;
-        case "directory": value=HubWindows.ValidateDirectory((string)r["path"],r.ContainsKey("expected")?(string)r["expected"]:null,true); break;
+        case "directory": value=HubWindows.ValidateDirectory((string)r["path"],r.ContainsKey("expected")?(string)r["expected"]:null,false); break;
         case "license-directory": value=HubWindows.ValidateDirectory((string)r["path"],r.ContainsKey("expected")?(string)r["expected"]:null,false); break;
+        case "rename": value=HubWindows.Rename((string)r["from"],(string)r["to"]); break;
         case "file": value=HubWindows.FlushFile((string)r["path"]); break;
         case "secret-get": value=HubWindowsLicense.Get((string)r["account"]); break;
         case "secret-put": value=HubWindowsLicense.Put((string)r["account"],(string)r["value"]); break;
@@ -403,7 +420,7 @@ function create(options = {}) {
       let rest = '', stopping = false, ready = false;
       let confirmReady;
       const handshake = new Promise(resolve => { confirmReady = resolve; });
-      const fail = () => { if (!stopping) { stopping = true; confirmReady(false); clearTimeout(deadline); onError?.(); child.kill(); } };
+      const fail = error => { if (!stopping) { stopping = true; confirmReady(false); clearTimeout(deadline); onError?.(error); child.kill(); } };
       const deadline = setTimeout(fail, 30000); deadline.unref?.();
       child.stdout.on('data', data => {
         if (stopping) return;
@@ -411,11 +428,16 @@ function create(options = {}) {
         if (rest.length > 8192) return fail();
         const lines = rest.split('\n'); rest = lines.pop();
         for (const line of lines) try {
-          ensure(); const event = decode(line, id);
+          const event = decode(line, id);
+          // Suspend only invalidates trust. Do not start a guard RPC while the
+          // OS is freezing its children; every ready/resume/use still verifies
+          // the live guard and executable before it can enable any operation.
+          if (event === 'suspend' && ready) { onEvent(event); continue; }
+          ensure();
           if (event === 'ready' && !ready) { ready = true; confirmReady(true); clearTimeout(deadline); }
-          else if (event === 'resume' && ready) onEvent();
+          else if ((event === 'resume' || event === 'suspend') && ready) onEvent(event);
           else fail();
-        } catch { fail(); }
+        } catch (error) { fail(error); }
       });
       child.once('error', fail); child.stdin.once('error', fail);
       child.once('close', () => { watchers.delete(child); fail(); if (closed) close(); });

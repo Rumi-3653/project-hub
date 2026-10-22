@@ -11,7 +11,7 @@ const { execFileSync } = require('node:child_process');
 const git = require('../lib/git');
 
 const {app,project,snapshot}=require('./fixtures/app-ui-harness.cjs');
-const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
+const source=require('./fixtures/app-source.cjs').readApp();
 
 test('summary-only tasks preserve progress segments, next step and finished filtering',()=>{
  const a=app();a.context.data=snapshot();
@@ -368,8 +368,8 @@ test('自動ChatをGPT子の既定にし、旧依頼とrequest別の処理済み
   a.context.refreshRequestStatus(box); assert.equal(heading.textContent, 'ChatGPT（Chat）への依頼（処理済み）');
 });
 
-test('一覧の描き直し前に整理の所属を判定し、利用状況を閉じても実際の画面移動を続ける', () => {
-  for (const [go, pid, shouldClose] of [['project', 'other', true], ['work', 'other', true], ['work', 'p', false]]) {
+test('整理と利用状況は外側の一覧タップで閉じ、実際の画面移動を続ける', () => {
+  for (const [go, pid, shouldClose] of [['project', 'other', true], ['work', 'other', true], ['work', 'p', true]]) {
     const a = app(); a.context.api = () => new Promise(() => {});
     const navigation = a.documentListeners.find(x => x.name === 'click' && x.cb.toString().includes('view = { kind: go.dataset.go'));
     const before = a.documentListeners.length;
@@ -4027,4 +4027,15 @@ test('external screen controls are absent while free MCP settings and old conver
  assert.match(settings,/id="chatgpt-box"|id="mcp-box"|data-ai-fold="mcp"/);
  assert.doesNotMatch(a.context.chatModelChoices(s.projects[0],s.projects[0].tasks[0]),/value="chatgpt\|auto"/);
  assert.match(a.context.msgHtml({role:'assistant',ai:'chatgpt-chat',text:'Retained old reply'}),/Retained old reply/);
+});
+
+test('screen modules preserve the main activation and purchase gate for an unregistered issuer', () => {
+  for (const gate of [{supported:true,activationAvailable:false},{supported:false,activationAvailable:true}]) {
+    const a=app(),s=snapshot();
+    s.license={edition:'public',trial:{state:'active'},purchaseUrl:'https://issuer.invalid/buy',introAvailable:true,...gate};
+    vm.runInContext('state='+JSON.stringify(s)+';view={kind:"settings"}',a.context);
+    a.element('#ai-use-settings').contains=()=>false;
+    a.context.renderSettings();
+    assert.doesNotMatch(a.element('#main').innerHTML,/id="license-form"|id="license-code"|data-license-intro|data-license-purchase/);
+  }
 });

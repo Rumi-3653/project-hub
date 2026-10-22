@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // 表示だけをゲートし、Storeの完了承認記録は変えない。読込ではAIを始めない。
-const fs = require('node:fs'), path = require('node:path');
+const fs = require('./platform/file-io'), path = require('node:path');
 const graph = require('../public/project-order');
 class ResultsGate {
   constructor({store, transfer, blocked = () => '', launch}) {

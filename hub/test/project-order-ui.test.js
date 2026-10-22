@@ -9,7 +9,7 @@ function app() {
   const context=vm.createContext({document,window:{},navigator:{userAgent:''},console,innerWidth:1024,innerHeight:700,URLSearchParams,location:{hostname:'127.0.0.1'},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>new Promise(()=>{}),setInterval(){},clearInterval(){},setTimeout(){},clearTimeout(){},requestAnimationFrame(){},matchMedia:()=>({matches:false}),ModelOrder:require('../public/model-order'),ProjectOrder:require('../public/project-order')});
   const nodes=[];
   context.window.HubChatHistory = require('../public/chat-history');
-  vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'),context);
+  require('./fixtures/app-source.cjs').loadApp(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/hierarchy.js'),'utf8'),context);
   context.stubApi=async(route,body)=>{calls.push({route,body:JSON.parse(JSON.stringify(body))});if(context.fail)throw Error('fixture save failed');return{};};
   context.stubToast=text=>messages.push(text);

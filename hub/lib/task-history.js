@@ -1,6 +1,6 @@
 'use strict';
 const {lt}=require('./locale');
-const fs=require('node:fs'),path=require('node:path');
+const fs=require('./platform/file-io'),path=require('node:path');
 const {randomUUID,createHash}=require('node:crypto');
 const {noLinks,readNoLinks,noLink,exists}=require('./remove'),chat=require('./chat'),auto=require('./task-history-auto');
 const AUTO_ACTIVE=['collecting','selecting','writing','switching'],AUTO_END=['done','failed','cancelled'];

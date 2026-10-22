@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../..', 'public', 'app.js'), 'utf8');
+const { loadApp } = require('./app-source.cjs');
 
 function app(userAgent = '', sessionStorage) {
   const elements = new Map();
@@ -54,7 +54,7 @@ function app(userAgent = '', sessionStorage) {
   if(fs.existsSync(paidUI))vm.runInContext(fs.readFileSync(paidUI,'utf8'),context);
   const webUI=path.join(__dirname,'../../public/paid/webchat.js');
   if(fs.existsSync(webUI))vm.runInContext(fs.readFileSync(webUI,'utf8'),context);
-  vm.runInContext(source, context);
+  loadApp(context);
   vm.runInContext('webchatUI()',context);
   return { context, document, elements, element, events, documentListeners, timers, timeouts, details, stream: () => stream };
 }

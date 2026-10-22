@@ -69,7 +69,7 @@ test('送らずに消す操作は会話とAI起動を増やさない',async()=>{
 });
 
 // 下書きなどのDOMを保持したまま上部だけ同期する。新質問・別作業・古い取得を区別する。
-const app=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
+const app=require('./fixtures/app-source.cjs').readApp();
 const helper=app.slice(app.indexOf('let sendWorkAnswer = null;'),app.indexOf('\nfunction syncChatHandoff()'));
 function ui() {
  const t={id:'answer',question,state:'返事待ち'},p={id:'p',tasks:[t]},slot={dataset:{question},innerHTML:'question'},badge={className:'pill',textContent:'返事待ち'},select={value:'返事待ち'},msgs={scrollTop:173};

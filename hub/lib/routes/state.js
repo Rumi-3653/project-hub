@@ -21,6 +21,7 @@ module.exports = function stateRoutes(ctx) {
           const handoffErrors = chats.handoffErrors({display:true}), restartWaiting = restartBlockers(handoffErrors);
           return {
             extensions:extensions.state(), stopControl:stopControl.view(), root: ROOT, hubInstance: HUB_INSTANCE, roles: roleData, version: VERSION, latest: readVersion(), runtime:{version:VERSION,bootHead:BOOT_HEAD}, saved:{version:readVersion(),mainHead:null}, license: license.status(), appUpdate: appUpdate.status(), appShell: appShell.status(req.headers['user-agent']), freetalk: freetalkStatus(),
+            ...(process.platform === 'win32' ? { windowsStorage: 'Windowsではファイル単位の書き込み確定と名前変更の完了待ちを使います。保存直後の停電では、ファイル名の変更や削除が残らない可能性があります。管理者として起動する必要はありません。' } : {}),
             onboarding: onboarding.state(),
             aiCliUpdate: { available: Object.values(aiUpdates.status().tools).some(t => t.eligible && t.installed && t.updateCheck?.ok && t.updateCheck.available === true && t.updateCheck.applicable === true), busyCount: aiTools.busy() },
             updateBlocked: Boolean(updateBusy(handoffErrors)), restart: getRestartControl().status(restartWaiting), restartBusy:restartWaiting.length>0, restartWaiting, chatHandoffErrors:handoffErrors,

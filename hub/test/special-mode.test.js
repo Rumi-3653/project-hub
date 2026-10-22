@@ -28,7 +28,7 @@ function ui() {
   const el = s => { if(s==='.work-compact .work-attention')return null; if (!elements.has(s)) elements.set(s, { innerHTML: '', value: '', hidden: false, dataset: {}, setAttribute() {}, listeners: {}, addEventListener(n, fn) { (this.listeners[n] ||= []).push(fn); }, querySelectorAll: () => [] }); return elements.get(s); };
   const document = { querySelector: el, querySelectorAll: () => [], addEventListener: (n, fn) => (events[n] ||= []).push(fn) };
   const context = vm.createContext({ document, window: { matchMedia: () => ({ matches: false }), HubSpecialMode: special, HubChatHistory: require('../public/chat-history') }, navigator: { userAgent: '' }, localStorage: { getItem: k => saved.get(k) || null, setItem: (k,v) => saved.set(k,v) }, fetch: () => new Promise(() => {}), setInterval() {}, clearInterval() {}, setTimeout() {}, clearTimeout() {}, requestAnimationFrame() {}, console, URLSearchParams, ModelOrder: require('../public/model-order'), ProjectOrder: require('../public/project-order') });
-  const run = source => vm.runInContext(source, context); run(fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8'));
+  const run = source => vm.runInContext(source, context); require('./fixtures/app-source.cjs').loadApp(context);
   context.data = data; context.stub = async (route, body) => { calls.push({ route, body: JSON.parse(JSON.stringify(body)) }); if (context.fail) throw Error('保存失敗'); return { specialMode: body }; };
   run(`state={projects:[],roles:data, specialMode:{enabled:true,ai:'claude'}, efforts:['中','高','極高'],initialPick:{ai:'codex',model:'GPT-6.1-Sol',effort:'高'}};view={kind:'settings'};api=stub;toast=()=>{};`);
   return { run, context, el, saved, calls, events };
@@ -116,7 +116,7 @@ test('R1/R2: 入力中の会話を再描画せず最新既定へ同期し、明�
 });
 // Bind the actual composer listeners/send closure, stopping before unrelated queue/history loading.
 function chatComposer(f) {
-  const source = fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8');
+  const source = require('./fixtures/app-source.cjs').readApp();
   const start = source.indexOf('function openChat(p, t, savedScroll) {');
   const end = source.indexOf('  updateWorkAnswerControls();\n  bindAskAnswers', start);
   assert.ok(start >= 0 && end > start);

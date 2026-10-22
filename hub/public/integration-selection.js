@@ -18,6 +18,10 @@
   }
   if(!chosen.length)return {items:[],reason:'新しい成果はありません'};
   if(chosen.some(i=>!eligible(i)))return {items:chosen,reason:'子孫の統合内容を確認してください'};
+  // These are received history, exposed only to authorize an ancestor cleanup.
+  // They cannot become independent integration roots or silently join a plan
+  // which keeps the ancestor. Their own keep value remains an explicit choice.
+  if(chosen.some(i=>i.cleanupOnly&&!chosen.some(p=>!p.cleanupOnly&&!p.keep&&(p.descendants||[]).some(c=>key(c)===key(i)))))return {items:chosen,reason:'完了・受領済みの子は、上の作業の片付けと一緒に選んでください'};
   for(const i of chosen.filter(i=>!i.keep))for(const c of i.descendants||[]){
    const child=chosen.find(j=>key(j)===key(c));
    if(!child)return {items:chosen,reason:template`「${i.title}」を残さないには、下の「${c.title}」も選ぶか、「${i.title}」を［残す］にしてください`};

@@ -1,6 +1,6 @@
 'use strict';
 // 正式なCLI上限だけを保持。利用率からフラグを作ったり解除したりしない。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const MODEL = 'claude-fable-5-1';
 const stamp = value => typeof value === 'string' ? Date.parse(value) : NaN;

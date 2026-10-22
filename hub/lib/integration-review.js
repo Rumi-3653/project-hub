@@ -11,7 +11,7 @@ function filesEvidence({dir,files}){
 function verifyFiles(e,dir){
   if(e?.version!==1||e.dir!==path.resolve(dir)||JSON.stringify(e)!==JSON.stringify(filesEvidence({dir,files:e.files.map(f=>f.path)})))throw Error('Integration file review range changed');
 }
-function prepare({dir,pdir,task,key,targetHead,reviewHead,sourceHead,fileReview,savedResults}){
+function prepare({dir,pdir,task,key,targetHead,reviewHead,sourceHead,fileReview,savedResults,stoppedSibling,reportProjection}){
   if(!/^[a-f0-9]{64}$/.test(key)||!/^\d{8}-[\w-]+$/.test(task))throw Error('Invalid integration review identity');
   if(fileReview){
     if(targetHead||reviewHead||sourceHead||git.inspect(dir,{readOnly:true}))throw Error('Invalid integration file review range');
@@ -23,19 +23,20 @@ function prepare({dir,pdir,task,key,targetHead,reviewHead,sourceHead,fileReview,
   const refs=[targetHead,reviewHead,...(sourceHead?[sourceHead]:[])];
   if(!refs.every(h=>/^[a-f0-9]{40,64}$/.test(h||'')))throw Error('Invalid integration review range');
   noLinks(dir);const current=writes.inspect(git,dir);
-  if(!current||current.status||current.head!==reviewHead||git.merging(dir)||!refs.every(h=>git.isAncestor(dir,h)))throw Error('Integration review range changed');
+  if(!current||current.status||current.head!==reviewHead||git.merging(dir)||![targetHead,reviewHead,...(!reportProjection&&sourceHead?[sourceHead]:[])].every(h=>git.isAncestor(dir,h)))throw Error('Integration review range changed');
+  if(reportProjection){if(!stoppedSibling||reportProjection.sourceHead!==sourceHead||reportProjection.targetHead!==targetHead)throw Error('Integration report review range changed');require('./integration-report-projection').verify(dir,reportProjection,reviewHead);}
   const read=args=>execFileSync('git',['-C',dir,'--no-pager',...args],{encoding:'utf8',maxBuffer:64*1024*1024,stdio:['ignore','pipe','pipe'],env:{...process.env,GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0'}});
-  const diff=(from,to)=>read(['diff','--binary','--no-ext-diff','--no-textconv',from,to,'--']);
-  const evidence={version:1,key,targetHead,reviewHead,sourceHead:sourceHead||null,
+  const diff=(from,to,paths=[])=>read(['--literal-pathspecs','diff','--binary','--no-ext-diff','--no-textconv',from,to,'--',...paths]);
+  const evidence={version:1,key,targetHead,reviewHead,sourceHead:sourceHead||null,...(stoppedSibling?{stoppedSibling,scope:"今回の報告差分 integration/child の保管・受領のみ。resolution は履歴比較であり旧停止のコードを承認しない。静的検査スクリプトも実行しない。本体反映・Windows安全判定なし。"}:{}),
     integration:diff(targetHead,reviewHead),
-    ...(sourceHead?{child:diff(read(['merge-base',targetHead,sourceHead]).trim(),sourceHead),resolution:diff(sourceHead,reviewHead)}:{}),
+    ...(reportProjection?{reportProjection,receiptScope:'列挙した報告だけを受領。sourceHeadは出典であり、子の引継ぎメモ・履歴全体の受領ではない。',child:diff(reportProjection.base,sourceHead,reportProjection.entries.map(e=>e.path)),resolution:'引継ぎメモは子に保持。元HEAD全体との比較は承認範囲外。'}:sourceHead?{child:diff(read(['merge-base',targetHead,sourceHead]).trim(),sourceHead),resolution:diff(sourceHead,reviewHead)}:{}),
     history:read(['log','--format=%H %P %s',targetHead+'..'+reviewHead,'--'])};
   const after=writes.inspect(git,dir);
   if(after?.head!==reviewHead||after?.status)throw Error('Integration review range changed');
   // Keep diffs as actual lines: read-only tools truncate very long JSON lines.
   const {integration,child,resolution,history,...identity}=evidence;
   if(savedResults){
-    if(sourceHead||![1,2].includes(savedResults.version)||savedResults.version===2&&!savedResults.scope?.originals?.length||!savedResults.commits?.length||!savedResults.testFiles?.length)throw Error('Saved result review range missing');
+    if(sourceHead||![1,2,3].includes(savedResults.version)||savedResults.version>=2&&!savedResults.scope?.originals?.length||savedResults.version===3&&(!savedResults.priorReview?.text||!savedResults.supplement||!savedResults.manifest?.length||savedResults.receiptScope?.implementationAccepted!==false||savedResults.receiptScope?.bodyApplied!==false)||!savedResults.commits?.length||!savedResults.testFiles?.length)throw Error('Saved result review range missing');
     const value={...savedResults};delete value.sha256;
     if(createHash('sha256').update(JSON.stringify(value)).digest('hex')!==savedResults.sha256)throw Error('Saved result review evidence changed');
   }

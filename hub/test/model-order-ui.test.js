@@ -12,7 +12,7 @@ function fixture() {
  const document={querySelector:el,querySelectorAll:()=>[],addEventListener:(n,f)=>(events[n]||=[]).push(f)};
  const ctx=vm.createContext({document,window:{matchMedia:()=>({matches:false})},navigator:{userAgent:''},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>new Promise(()=>{}),setInterval(){},clearInterval(){},setTimeout(){},clearTimeout(){},requestAnimationFrame(){},console,URLSearchParams,ModelOrder,ProjectOrder:require('../public/project-order'),confirm:()=>true});
  ctx.window.HubChatHistory = require('../public/chat-history');
- const run=s=>vm.runInContext(s,ctx);const paid=path.join(__dirname,'../public/paid/webchat.js');if(fs.existsSync(paid))run(fs.readFileSync(paid,'utf8'));run(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'));
+ const run=s=>vm.runInContext(s,ctx);const paid=path.join(__dirname,'../public/paid/webchat.js');if(fs.existsSync(paid))run(fs.readFileSync(paid,'utf8'));require('./fixtures/app-source.cjs').loadApp(ctx);
  run(fs.readFileSync(path.join(__dirname,'../public/role-settings.js'),'utf8'));
  ctx.stubApi=async(route,b)=>{calls.push({route,b:JSON.parse(JSON.stringify(b))});if(ctx.hold)await ctx.hold;if(ctx.fail){const e=Error(ctx.fail);e.status=ctx.status;throw e;}if(route==='/api/models/hidden')return{modelOrder:mixed,hiddenModels:{codex:b.hidden?[b.model]:[]}};return {modelOrder:b.order,hiddenModels:{codex:['GPT-6-Astra']}};};
  ctx.notice=x=>messages.push(x);

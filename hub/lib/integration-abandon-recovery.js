@@ -33,6 +33,7 @@ function residue(h,project,task){
 }
 function publicInfo(x){if(!x)return null;const {archive,...info}=x;return info;}
 function commit(h,x,r){
+ require('./integration-sibling').blocked(h,r);
  if(x.action==='finalize'){
   h.save(x.archive);
   if(fs.readFileSync(h.file(r.project,r.task),'utf8')!==fs.readFileSync(x.file,'utf8'))throw Error('中止記録の保存を確認できません');

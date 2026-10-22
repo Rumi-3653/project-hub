@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // 全文を必要時だけ読む。送信済みの版は会話セッション単位で管理する。
-const fs = require('node:fs');
+const fs = require('./platform/file-io');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { ARTIFACT_POLICY } = require('./artifact-policy');

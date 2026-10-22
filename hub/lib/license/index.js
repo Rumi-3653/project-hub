@@ -5,6 +5,33 @@ const policy = require('./policy');
 const { PAID, MAX_TERM, fingerprint, verifyEnvelope, validateProof, scopeMatches, evaluate } = require('./codec');
 const { LicenseClock } = require('./clock');
 const { LicenseStore } = require('./storage');
+const issuerMessages = Object.freeze({
+  device_limit_mac: 'この利用権のMacは登録台数の上限です。前の端末を外す時は運営に連絡してください',
+  device_limit_windows: 'この利用権のWindowsは登録台数の上限です。前の端末を外す時は運営に連絡してください',
+  unregistered: 'この端末は登録されていません。移行について運営に連絡してください',
+  unsupported_os: 'このOSは利用コードの対象外です',
+  entitlement: 'この利用コードの有効性を確認できませんでした。発行先・対象の版・有効期間の確認が必要です。再送・再購入せず、発行元に確認してください。',
+  issuer_unavailable: '発行先からエラー応答があり、登録を完了できませんでした。保存済みの利用証明は保持しています。',
+  issuer_connection: '発行先の応答を確認できませんでした。登録結果は未確認です。再送・再購入せず、状況を確認してください。',
+  issuer_response: '発行先の応答を読み取れませんでした。登録結果は未確認です。再送・再購入せず、状況を確認してください。',
+  invalid_code: '利用コードを入力してください（256文字以内）。',
+  license_busy: '利用権を確認中です。登録結果を確認するまで、再送しないでください。',
+  license_activation: '利用コードの登録結果を確認できませんでした。保存済みの利用証明は保持しています。再送・再購入せず、状況を確認してください。',
+  // Preserve the fixed local precondition guidance added in the 4.125 line.
+  issuer_unconfigured: 'この版の利用コード受付は準備中です。実際のコードは入力せずお待ちください',
+  license_unsupported: 'このOSは利用コードの対象外です',
+  legacy_license_unavailable: '以前の利用権を確認できません。選んだデータの保存先は使えますが、有料機能・無料体験の開始・コード登録は保留しています。購入や登録を繰り返さず、この表示をお知らせください。',
+  license_registration_pending: '利用コードの登録は受付済みです。再送・再購入せず結果を確認してください。',
+});
+const issuerHttpCodes = new Set(['device_limit_mac', 'device_limit_windows', 'unregistered', 'unsupported_os', 'entitlement', 'trial_used', 'challenge', 'signature', 'build_os']);
+// Only fixed classifications/messages cross the registration API boundary.
+function activationError(error) {
+  let value = error?.code;
+  // These two existing local validation errors have a fixed message but no code.
+  if (value === undefined && ['invalid_code', 'license_busy'].includes(error?.message)) value = error.message;
+  const code = typeof value === 'string' && (Object.hasOwn(issuerMessages, value) || issuerHttpCodes.has(value)) ? value : 'license_activation';
+  return { error: issuerMessages[code] || issuerMessages.issuer_unavailable, code };
+}
 function ownerEdition() {
   try { return require('./owner-edition').ownerEdition === true; }
   catch (e) { if (e.code === 'MODULE_NOT_FOUND' && e.message.includes("'./owner-edition'")) return false; throw e; }
@@ -14,25 +41,42 @@ const macMachineHint = platforms.forPlatform('darwin').machineHint;
 class License {
   constructor({ root, platform = process.platform, config = policy.forPlatform(platform), owner = ownerEdition(),
     store = new LicenseStore(root, platforms.forPlatform(platform)), secret = platforms.forPlatform(platform).secretStore(), fetcher = fetch,
-    elapsed, wall = () => Date.now() / 1000, machineHint = platforms.forPlatform(platform).machineHint, extensions = require('../extensions').loadExtensions() } = {}) {
+    elapsed, wall = () => Date.now() / 1000, machineHint = platforms.forPlatform(platform).machineHint, extensions = require('../extensions').loadExtensions(), onDiagnostic = () => {} } = {}) {
     this.config = config; this.owner = owner; this.store = store; this.secret = secret; this.fetcher = fetcher;
     this.elapsed = elapsed || (() => secret.elapsed()); this.wall = wall; this.platform = platform;
+    this.onDiagnostic = onDiagnostic;
+    this.suspended = false;
     this.execution = ['queue_auto','limit_switch','parallel'].map(id => ({id,included:extensions.state().included.includes(id),policy:extensions.create(id,{})}));
     for (const {policy} of this.execution) if (typeof policy.features !== 'function') throw Error('invalid execution decision contract');
     this.machineHint = machineHint; this.trialUsed = false;
     this.identity = null; this.clock = null; this.proofs = []; this.lastResult = null; this.lastOnline = 0; this.retryAfter = 0;
     if (!owner && ['darwin', 'win32'].includes(platform)) {
       try {
-        this.proofs = store.read('state')?.proofs || [];
-        const meta = store.read('device');
+        this.proofs = this.checked('load-state', () => store.read('state'))?.proofs || [];
+        const meta = this.checked('load-device', () => store.read('device'));
         if (meta) {
-          const raw = secret.get(meta.id);
-          if (!raw) throw Error('device_key_missing');
-          this.identity = this.identityFrom(raw, meta);
+          this.identity = this.checked('key-restore', () => {
+            const raw = secret.get(meta.id);
+            if (!raw) throw Error('device_key_missing');
+            return this.identityFrom(raw, meta);
+          });
         }
         if (this.proofs.length) this.makeClock();
       } catch { this.loadError = true; }
     }
+  }
+  recordFailure(stage, error, hold = true) {
+    if (hold) this.loadError = true;
+    // Watcher loss invalidates trusted time without itself holding the licence.
+    // Keep its first event separately so it cannot hide the first holding fault.
+    const field = hold ? 'firstFailure' : 'resumeWatchFailure';
+    if (!this[field]) {
+      this[field] = require('./diagnostics').failure(stage, error);
+      try { this.onDiagnostic(this[field]); } catch {} // Diagnostic I/O never replaces the original result.
+    }
+  }
+  checked(stage, operation) {
+    try { return operation(); } catch (error) { this.recordFailure(stage, error); throw error; }
   }
   identityFrom(raw, meta) {
     const b = JSON.parse(raw), privateKey = c.createPrivateKey({ key: Buffer.from(b.privateKeyPkcs8B64, 'base64'), format: 'der', type: 'pkcs8' });
@@ -55,7 +99,8 @@ class License {
     return this.identity;
   }
   makeClock() {
-    if (!this.clock) this.clock = new LicenseClock({ state: this.store.read('state'), elapsed: this.elapsed, wall: this.wall, save: s => this.store.write('state', { ...s, proofs: this.proofs }) });
+    if (!this.clock) this.clock = new LicenseClock({ state: this.checked('load-state', () => this.store.read('state')), elapsed: this.elapsed, wall: this.wall,
+      save: s => this.store.write('state', { ...s, proofs: this.proofs }), onFailure: (stage, error) => this.recordFailure(stage, error) });
     return this.clock;
   }
   status() {
@@ -64,7 +109,7 @@ class License {
       features: Object.fromEntries(['chat_basic', ...PAID].map(f => [f, { allowed: f === 'chat_basic', state: f === 'chat_basic' ? 'basic' : 'held', expiry: null }])) };
     let clock = { t: this.wall(), wall: this.wall(), mode: 'U', valid: false };
     if (this.platform === 'win32' && this.resumeUnavailable && this.clock) this.clock.mode = 'U';
-    try { if (this.proofs.length) clock = this.makeClock().tick(); } catch { this.loadError = true; }
+    try { if (!this.suspended && this.proofs.length) clock = this.makeClock().tick(); } catch (error) { this.recordFailure('status-tick', error); }
     const result = evaluate({ proofs: this.proofs, keys: this.config.trustedKeys, device: { ok: Boolean(this.identity) && !(this.platform === 'win32' && this.loadError), dev: this.identity?.dev }, build: this.config.build, clock });
     const personal = this.proofs.map(e => { try { return validateProof(verifyEnvelope(e, this.config.trustedKeys, 'proof')); } catch { return null; } })
       .find(p => p?.kind === 'trial' && p.dev === this.identity?.dev && scopeMatches(p.scope, this.config.build));
@@ -79,6 +124,8 @@ class License {
     try { const url = new URL(this.config.purchaseUrl); if (url.protocol === 'https:' && !url.username && !url.password) purchaseUrl = url.href; } catch {}
     const purchased = PAID.every(f => result.features[f].state === 'purchased');
     return { edition: 'public', enforcement: this.config.licenseEnforcement, ...result, trial, purchaseUrl, purchased, activationAvailable: Boolean(this.config.endpoint),
+      ...(this.firstFailure ? { diagnostic: this.firstFailure } : {}),
+      ...(this.resumeWatchFailure ? { resumeDiagnostic: this.resumeWatchFailure } : {}),
       introAvailable: Boolean(purchaseUrl && !purchased && !this.loadError && personal && trial.state === 'active' && personal.entStartsAt <= clock.t && clock.t < expiry),
       reason: purchased ? '購入した版の全機能を期限なしで使えます' :
         this.loadError ? '端末の鍵・保存内容・経過時計を確認できません' :
@@ -120,13 +167,17 @@ class License {
     this.requireSupported();
     const url = this.config.endpoint;
     if (!url || !/^https:\/\//.test(url) && !/^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::\d+)?\/?$/.test(url)) throw Error('issuer_unconfigured');
-    const response = await this.fetcher(url.replace(/\/$/, '') + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+    const request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) };
+    let response;
+    try { response = await this.fetcher(url.replace(/\/$/, '') + route, request); }
+    catch { throw Object.assign(Error(issuerMessages.issuer_connection), { code: 'issuer_connection' }); }
     if (!response.ok) {
-      let code; try { code = (await response.json()).code; } catch {}
-      const messages = { device_limit_mac: 'この利用権のMacは登録台数の上限です。前の端末を外す時は運営に連絡してください', device_limit_windows: 'この利用権のWindowsは登録台数の上限です。前の端末を外す時は運営に連絡してください', unregistered: 'この端末は登録されていません。移行について運営に連絡してください', unsupported_os: 'このOSは利用コードの対象外です' };
-      const e = Error(messages[code] || '発行先に接続できません。保存済みの利用証明は保持しています'); e.code = code || 'issuer_unavailable'; throw e;
+      let value; try { value = (await response.json())?.code; } catch {}
+      const code = issuerHttpCodes.has(value) ? value : 'issuer_unavailable';
+      throw Object.assign(Error(activationError({ code }).error), { code });
     }
-    return response.json();
+    try { return await response.json(); }
+    catch { throw Object.assign(Error(issuerMessages.issuer_response), { code: 'issuer_response' }); }
   }
   async signedRequest(purpose, params) {
     const d = this.ensureIdentity();
@@ -165,7 +216,7 @@ class License {
   async activate(code) {
     if (this.owner) return { ok: true, owner: true, note: '製作者版は利用コードの登録が不要です' };
     this.requireSupported();
-    if (!this.config.endpoint) throw Error('この版の利用コード受付は準備中です。実際のコードは入力せずお待ちください');
+    if (!this.config.endpoint) throw Object.assign(Error(issuerMessages.issuer_unconfigured), { code: 'issuer_unconfigured' });
     if (typeof code !== 'string' || !code.trim() || code.length > 256) throw Error('invalid_code');
     if (this.online) throw Error('license_busy');
     this.online = true;
@@ -188,6 +239,7 @@ class License {
   }
   async prepare() {
     if (this.owner || !['darwin', 'win32'].includes(this.platform) || !this.config.endpoint) return;
+    if (this.suspended) return;
     if (this.preparing) return this.preparing;
     if (this.online) return;
     this.preparing = this.prepareOnline();
@@ -223,10 +275,14 @@ class License {
   }
   start() {
     if (this.owner || !['darwin', 'win32'].includes(this.platform) || this.timer) return;
-    const resume = () => { try { this.clock?.resume(); } catch { this.loadError = true; } };
+    const resume = () => { this.suspended = false; try { this.clock?.resume(); } catch (error) { this.recordFailure('resume-tick', error); } };
+    // A suspend notification must never start synchronous native/SQLite I/O.
+    // Windows may freeze those children before they reply, making a healthy
+    // guard time out and permanently poisoning this process's licence bridge.
+    const suspend = () => { this.suspended = true; this.clock?.suspend(); };
     if (this.config.endpoint || this.proofs.length) {
-      const unavailable = () => { this.resumeUnavailable = true; resume(); };
-      this.stopResume = this.secret.watchResume?.(resume, unavailable);
+      const unavailable = error => { this.resumeUnavailable = true; this.recordFailure('resume-watch', error, false); this.clock?.suspend(); };
+      this.stopResume = this.secret.watchResume?.(resume, unavailable, suspend);
       if (this.platform === 'win32' && !this.stopResume) unavailable();
     }
     void this.prepare();
@@ -237,4 +293,4 @@ class License {
   }
   stop() { clearInterval(this.timer); this.timer = null; this.stopResume?.(); this.stopResume = null; }
 }
-module.exports = { License, ownerEdition, macMachineHint };
+module.exports = { License, ownerEdition, macMachineHint, activationError };

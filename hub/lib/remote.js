@@ -3,7 +3,7 @@ const { lt, locale } = require('./locale');
 // 外から使う（iPhone）：Tailscale serve 越しの通信を見分け、合言葉でログインさせる
 // 設定は <ROOT>/_hub/remote.json：{ enabled, passcodeHash, salt, host, sessions: [{ id, createdAt, lastSeen, ua }], failures: [{ at, who }] }
 // 札（Cookie）はそのまま保存せず、SHA-256 にした物を id として残す（ファイルが読まれても札にはならない）
-const fs = require('fs');
+const fs = require('./platform/file-io');
 const path = require('path');
 const crypto = require('crypto');
 

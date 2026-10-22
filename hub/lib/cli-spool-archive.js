@@ -3,7 +3,7 @@ const persistence = require('./platform').persistence;
 // Explicit, reviewed maintenance only. Never called by state polling or startup.
 // Completed ordinary turns have their final rows pinned in the active chat log.
 // Automation, unresolved runs and evidence needed by their recovery stay put.
-const fs=require('node:fs'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
+const fs=require('./platform/file-io'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
 const spool=require('./cli-spool'),{noLinks,exists}=require('./remove');
 const hash=x=>createHash('sha256').update(x).digest('hex'),json=x=>JSON.stringify(x);
 function alive(pid){if(!Number.isSafeInteger(pid)||pid<=0)return false;try{process.kill(pid,0);return true;}catch(e){return e.code!=='ESRCH';}}

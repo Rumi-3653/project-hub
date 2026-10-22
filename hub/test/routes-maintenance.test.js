@@ -56,3 +56,14 @@ test('maintenance verification failure releases only an acquired lease and keeps
     assert.equal(events.filter(e => e[0] === 'record').length, 0);
   }
 });
+
+test('maintenance awaits asynchronous preview and apply before sending or auditing', async () => {
+ for(const operation of ['preview','apply']) {
+  const {route,ctx,events,result}=fixture();let finish;
+  ctx.maintenance[operation]=()=>new Promise(resolve=>finish=resolve);
+  const pending=route.handle({}, {}, url('/api/maintenance/'+operation),body);
+  assert.deepEqual(events,[]);finish(result);
+  assert.deepEqual(await pending,{status:200,body:result});
+  assert.equal(events.filter(x=>x[0]==='record').length,operation==='apply'?1:0);
+ }
+});

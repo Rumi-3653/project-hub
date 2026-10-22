@@ -66,6 +66,9 @@ function create(options = {}) {
     return true; // request delivered; callers still wait for the actual exit
   }
   const persistence = Object.freeze({
+    // General storage uses ordinary-rights file flush + write-through rename.
+    durability: 'file-flush-write-through-rename',
+    renameSync(from, to) { if (native.call('rename', { from, to }) !== true) throw Error('Windowsの名前変更を確認できません'); },
     syncDirectory(dir) { const binding = native.call('directory', { path: dir }); if (typeof binding !== 'string' || !binding) throw Error('Windowsの保存確定を確認できません'); },
     syncFile(file) { if (native.call('file', { path: file }) !== true) throw Error('Windowsのファイル同期を確認できません'); },
     withDirectorySync(dir, operation) {
@@ -82,7 +85,10 @@ function create(options = {}) {
       get(account) { const value = call('secret-get', { account }); if (value !== null && typeof value !== 'string') throw Error('secret_store_unavailable'); return value; },
       put(account, value) { if (call('secret-put', { account, value }) !== true) throw Error('secret_store_unavailable'); },
       elapsed() { const value = call('clock'); if (!Number.isFinite(value) || value < 0) throw Error('elapsed_clock_unavailable'); return value; },
-      watchResume(onResume, onError) { try { return native.watch(onResume, onError); } catch { onError?.(); return null; } },
+      watchResume(onResume, onError, onSuspend) {
+        try { return native.watch(event => { if (event === 'suspend') onSuspend?.(); else onResume(); }, onError); }
+        catch (error) { onError?.(error); return null; }
+      },
     };
   };
   function machineHint() {
@@ -91,7 +97,7 @@ function create(options = {}) {
     return value;
   }
   const trashDir = (home = os.homedir()) => path.join(home, '.ProjectHubTrash');
-  return { ...base, name: 'win32', supervisorFiles: Object.freeze(['darwin.js', 'persistence.js', 'win32.js', 'win32-native.js', 'cache-guard.js', 'cache-guard-worker.js']),
+  return { ...base, name: 'win32', supervisorFiles: Object.freeze(['darwin.js', 'persistence.js', 'win32.js', 'win32-native.js', 'cache-guard.js', 'cache-guard-worker.js', 'file-io.js']),
     openTerminal: async () => unavailable(), focusTerminal: async () => unavailable(),
     openPath: (p, dry) => desktop('open', p, dry), revealPath: (p, dry) => desktop('reveal', p, dry), openUrl: (url, dry) => desktop('url', url, dry), pickFolder,
     processSnapshot, processOwner, currentProcessOwner, processBirth, listProcesses: async () => processSnapshot(), processCwd: async () => new Map(), killTree,

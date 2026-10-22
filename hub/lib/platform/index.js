@@ -13,7 +13,7 @@
  * @property {function(Function=): Array<object>} processSnapshot Strong ownership identity.
  * @property {function(object): (number|string|undefined)} processOwner Native UID or nonempty Windows SID; never a display name.
  * @property {function(): (number|string|undefined)} currentProcessOwner Same native owner type as processOwner.
- * @property {object} persistence Strict syncDirectory(dir), syncFile(file), withDirectorySync(dir, operation); optional per-call IO for fixtures. Errors propagate, unsupported OS never succeeds.
+ * @property {object} persistence syncDirectory(dir), syncFile(file), withDirectorySync(dir, operation); Windows syncDirectory checks identity only, plus renameSync uses file flush/write-through move. Mac/Linux retain directory fsync; optional per-call IO for fixtures. Errors propagate, unsupported OS never succeeds.
  * @property {string[]} supervisorFiles All local JS dependencies needed by this OS's detached ownership code.
  * @property {function(number, Function=): string} processBirth Empty when unavailable.
  * @property {function(object, string|number=, object=): *} killTree
@@ -54,7 +54,7 @@ function forPlatform(value = process.platform) {
 }
 // The pre-existing Linux process/trash helpers are retained by the factory;
 // other systems have no native implementation. Windows dependencies load only
-// when selected, so Mac supervisors retain their existing pinned file set.
+// when selected. The shared file-io facade also travels with each worker.
 const selected = forPlatform();
-const supervisorFiles = Object.freeze([...new Set(['index.js', 'darwin.js', 'persistence.js', ...selected.supervisorFiles])]);
+const supervisorFiles = Object.freeze([...new Set(['index.js', 'darwin.js', 'persistence.js', ...selected.supervisorFiles, 'file-io.js'])]);
 module.exports = { ...selected, supervisorFiles, forPlatform, createDarwin: options => darwin.create(options) };

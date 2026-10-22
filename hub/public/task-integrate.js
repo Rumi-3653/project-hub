@@ -9,7 +9,7 @@ const integrateResumeUncertain=new Set();
 // not-sent reply can retire it, even after the visible sheet has changed.
 const integrateRecordUncertain=new Map();
 const integrateStartUncertain=new Set(),integrateKeepUncertain=new Set();
-const integrationStartKey=d=>JSON.stringify([d.project,d.task,d.ancestorHash,d.targetSnapshot?.head,d.items.map(i=>[i.project,i.task,i.taskHash,i.source?.head,i.keep])]);
+const integrationStartKey=d=>JSON.stringify([d.project,d.task,d.sibling===true,d.stoppedSibling||null,d.ancestorHash,d.targetSnapshot?.head,d.items.map(i=>[i.project,i.task,i.taskHash,i.source?.head,i.keep])]);
 const integrationKeepKey=(d,i)=>JSON.stringify([d.project,d.task,i.project,i.task,i.taskHash]);
 function integrationSimpleUncertainty(d){
   if(d.auto||!d.simple)return;
@@ -101,7 +101,7 @@ async function integrationCheckLatest(epoch=integrateEpoch){
   if(integrateBusy||document.hidden){integrationScheduleWait();return;}
   const request={epoch};integrateWaitRequest=request;
   try{
-    const out=await api('/api/task/integrate/preview',{project:d.project,task:d.task,only:d.only,simple:true});
+    const out=await api('/api/task/integrate/preview',{project:d.project,task:d.task,only:d.only,simple:true,sibling:d.sibling===true});
     if(epoch!==integrateEpoch||integrateWaitRequest!==request||integratePreview!==d||integrateBusy||d.requiresRefresh||d.resumeUncertain||$('#integrate-sheet')?.hidden)return;
     if(out.waiting?.length){integratePreview={...out,project:d.project,task:d.task,only:d.only};integrationRestoreSelection(integratePreview,d);drawTaskIntegration();}
     else if(out.confirmationHash!==d.confirmationHash){integratePreview={...out,project:d.project,task:d.task,only:d.only};integrationRestoreSelection(integratePreview,d);drawTaskIntegration();integrationRequireRefresh(UI.text('統合対象・成果・保存先が変わりました。最新の記録を確認してください'));}
@@ -115,11 +115,11 @@ async function integrationCheckWait(epoch=integrateEpoch){
   const request={epoch};integrateWaitRequest=request;
   integrateBusy=true;integrationWaitState(d.waiting,'checking');
   try{
-    const out=await api('/api/task/integrate/wait?project='+encodeURIComponent(d.project)+'&task='+encodeURIComponent(d.task));
+    const out=await api('/api/task/integrate/wait?project='+encodeURIComponent(d.project)+'&task='+encodeURIComponent(d.task)+(d.id?'&id='+encodeURIComponent(d.id):'')+(d.sibling?'&sibling=true':''));
     if(epoch!==integrateEpoch||integrateWaitRequest!==request||$('#integrate-sheet')?.hidden)return;
     if(!Array.isArray(out?.waiting))throw Error(UI.text('待機状況を確認できません'));
     if(out.waiting.length)integrationWaitState(out.waiting);
-    else {integrateWaitRequest=null;integrateBusy=false;await showTaskIntegration(d.project,d.task,d.only,true);}
+    else {integrateWaitRequest=null;integrateBusy=false;await showTaskIntegration(d.project,d.task,d.only,true,d.sibling===true);}
   }catch(e){if(epoch===integrateEpoch&&integrateWaitRequest===request&&!$('#integrate-sheet')?.hidden){const status=$('#integrate-status');status.dataset.waitPhase='failed';status.textContent=UI.text('待機状況の確認に失敗しました。開始・再開せず、15秒後に再確認します')+'：'+transferError(e);integrationScheduleWait();}}
   finally{if(integrateWaitRequest===request){integrateWaitRequest=null;integrateBusy=false;integrationApplyState();}}
 }
@@ -139,7 +139,7 @@ function integrationRestoreDraft(d,previous){
 function integrationRestoreSelection(d,previous){
   if(!d.simple)return;
   for(const i of d.items)i.selected=false;
-  if(!previous?.simple||previous.auto||d.auto||previous.resume||d.resume||previous.project!==d.project||previous.task!==d.task)return;
+  if(previous?.sibling!==d.sibling||!previous?.simple||previous.auto||d.auto||previous.resume||d.resume||previous.project!==d.project||previous.task!==d.task)return;
   const removed=[];
   for(const old of previous.items.filter(i=>i.selected)){
     const i=d.items.find(i=>integrateKey(i)===integrateKey(old));
@@ -167,11 +167,11 @@ function drawTaskIntegration(){
   else if(d.requiresRefresh)integrationRequireRefresh(d.refreshMessage);
   integrationApplyState();
 }
-async function showTaskIntegration(project,task,only,waitEnded=false){
+async function showTaskIntegration(project,task,only,waitEnded=false,sibling=false){
   if(integrateBusy)return;clearTimeout(integrateWaitTimer);integrateWaitRequest=null;const epoch=++integrateEpoch;integratePreviewRequest={epoch};const previous=integratePreview?.project===project&&integratePreview?.task===task&&(!integratePreview.simple||!$('#integrate-sheet')?.hidden)?integratePreview:null;integrateBusy=true;
   if(!$('#integrate-sheet'))document.body.insertAdjacentHTML('beforeend',UI.html('<div id="integrate-sheet" class="remove-sheet" hidden role="dialog" aria-modal="true" aria-label="子作業の統合確認"></div>'));
   const sheet=$('#integrate-sheet');sheet.hidden=false;sheet.innerHTML=UI.html('<div class="remove-box"><p>子作業の成果と統合先を確認しています…</p><button class="btn plain" data-integrate-action="close" type="button">閉じる</button></div>');
-  try{const d=await api('/api/task/integrate/preview',{project,task,only,simple:true});if(epoch!==integrateEpoch)return;if(!d.resume&&!d.simple){d.items=[...d.items,...(d.retainedItems||[])];}integratePreview={...d,project,task,only};if(integrateResumeUncertain.has(integrationStopKey(integratePreview)))integratePreview.resumeUncertain=true;if(!d.resume&&!d.simple)for(const i of d.items){i.checked=!i.alreadyReceived&&!i.blockers.length;i.disposition=i.partial?'partial':i.remaining?.status==='なし'&&!i.cleanupBlockers?.length?'cleanup':'continue';}if(d.simple)integrationRestoreSelection(integratePreview,previous);else integrationRestoreDraft(integratePreview,previous);drawTaskIntegration();if(previous&&!d.simple&&!d.resume&&!d.waiting?.length)$('#integrate-status').textContent=UI.text('最新の範囲と残件申告を表示しました。開始後は自動で続けます');if(waitEnded&&!d.waiting?.length){const status=$('#integrate-status');status.dataset.waitPhase='finished';status.insertAdjacentHTML('afterbegin',UI.html(esc(UI.text(d.auto&&!d.auto.stopped?'待機は終了しました。開始済みの統合を自動で続けます。追加操作は不要です':'待機は終了しました。最新の内容とボタンを確認してください。自動では開始・再開しません'))+' '));}}
+  try{const d=await api('/api/task/integrate/preview',{project,task,only,simple:true,sibling});if(epoch!==integrateEpoch)return;if(!d.resume&&!d.simple){d.items=[...d.items,...(d.retainedItems||[])];}integratePreview={...d,project,task,only};if(integrateResumeUncertain.has(integrationStopKey(integratePreview)))integratePreview.resumeUncertain=true;if(!d.resume&&!d.simple)for(const i of d.items){i.checked=!i.alreadyReceived&&!i.blockers.length;i.disposition=i.partial?'partial':i.remaining?.status==='なし'&&!i.cleanupBlockers?.length?'cleanup':'continue';}if(d.simple)integrationRestoreSelection(integratePreview,previous);else integrationRestoreDraft(integratePreview,previous);drawTaskIntegration();if(previous&&!d.simple&&!d.resume&&!d.waiting?.length)$('#integrate-status').textContent=UI.text('最新の範囲と残件申告を表示しました。開始後は自動で続けます');if(waitEnded&&!d.waiting?.length){const status=$('#integrate-status');status.dataset.waitPhase='finished';status.insertAdjacentHTML('afterbegin',UI.html(esc(UI.text(d.auto&&!d.auto.stopped?'待機は終了しました。開始済みの統合を自動で続けます。追加操作は不要です':'待機は終了しました。最新の内容とボタンを確認してください。自動では開始・再開しません'))+' '));}}
   catch(e){if(epoch===integrateEpoch){if(previous){integratePreview=previous;drawTaskIntegration();integrationRequireRefresh(transferError(e));}else{integratePreview=null;sheet.innerHTML=UI.template`<div class="remove-box"><p>${esc(transferError(e))}</p><button class="btn plain" data-integrate-action="close" type="button">閉じる</button></div>`;}}}
   finally{if(epoch===integrateEpoch){integratePreviewRequest=null;integrateBusy=false;integrationApplyState();integrationScheduleWait();}}
 }
@@ -182,6 +182,8 @@ document.addEventListener('click',async e=>{
   if(integrateBusy)return;
   const d=integratePreview;if(!d)return;
   if(['abandon-preview','abandon-confirm'].includes(action)){await abandonTaskIntegration(action);return;}
+  if(action==='sibling'){await showTaskIntegration(d.project,d.task,undefined,false,true);return;}
+  if(action==='primary'){await showTaskIntegration(d.project,d.task,undefined,false,false);return;}
   if(action==='records-save'){await saveIntegrationRecords();return;}
   if(d.simple&&['single','batch','selected'].includes(action)){await startSimpleIntegration(action,Number(b.dataset.index));return;}
   integrateChoices();
@@ -194,7 +196,7 @@ document.addEventListener('click',async e=>{
   }
   if(action==='stop'){integrateBusy=true;const unlock=integrationLock();try{await api('/api/chat/stop',{project:d.project,task:d.task});await load();render();$('#integrate-sheet').hidden=true;}catch(e){integrationRequireRefresh(transferError(e));}finally{integrateBusy=false;unlock();}return;}
   if(action==='up'||action==='down'){const n=Number(b.dataset.index),to=n+(action==='up'?-1:1);if(to>=0&&to<d.items.length){[d.items[n],d.items[to]]=[d.items[to],d.items[n]];drawTaskIntegration();}return;}
-  if(action==='refresh'){await showTaskIntegration(d.project,d.task,d.only);return;}
+  if(action==='refresh'){await showTaskIntegration(d.project,d.task,d.only,false,d.sibling===true);return;}
   if(action==='resolve'||action==='results'){
     const i=d.items[Number(b.dataset.index)];if(!i)return;
     integrateBusy=true;const unlock=integrationLock();
@@ -249,6 +251,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&(!integrateBusy||in
 function integrationSimpleState(){
   const recordButton=$('#integrate-sheet [data-integrate-action="records-save"]');if(recordButton)recordButton.disabled=integrateBusy||!integratePreview?.token||Boolean(integratePreview.requiresRefresh)||!integratePreview?.recordSave?.allowed||integrateRecordUncertain.has(integratePreview.recordSave.fingerprint);
   const d=integratePreview,disabled=integrateBusy||Boolean(d.auto)||Boolean(d.waiting?.length)||Boolean(d.requiresRefresh);
+  const siblingButton=$('#integrate-sheet [data-integrate-action="sibling"]');if(siblingButton)siblingButton.disabled=integrateBusy||Boolean(d.waiting?.length)||!d.siblingOption?.allowed;
   const abandonDisabled=integrateBusy||Boolean(d.requiresRefresh)||!d.abandon?.allowed||integrateAbandonUncertain.has(integrationAbandonKey(d));
   const abandonPreview=$('#integrate-sheet [data-integrate-action="abandon-preview"]');if(abandonPreview)abandonPreview.disabled=abandonDisabled;
   const abandonConfirm=$('#integrate-sheet [data-integrate-action="abandon-confirm"]');if(abandonConfirm)abandonConfirm.disabled=abandonDisabled||!d.abandonConfirmation?.token||!$('#integration-abandon-confirm')?.checked;
@@ -281,11 +284,16 @@ function integrationPendingMainStatus(d){
   if(d.mainDisplay?.reflected===true&&d.mainDisplay.key===JSON.stringify(pending))return UI.text('過去の本体取り込み記録（現在の本体に反映済み）')+'\n'+UI.text('以前の記録を保持しています。この記録から再送はしません')+(d.mainDisplay.mainUncommitted?'\n'+UI.text('本体には別の未保存変更があります。この取り込み結果とは別です')+`（${d.mainDisplay.mainUncommitted}）`:'');
   return UI.text('本体への反映が未確認です')+(pending.stopped?'\n'+UI.text('過去の停止理由')+'：'+UI.text(pending.stopped.reason||'状態未確認'):'')+(pending.main?.state==='intent'?'\n'+UI.text('本体取り込みの結果が不明です。再送はしません'):'');
 }
+function integrationSiblingPanel(d){
+ if(d.sibling)return UI.template`<section class="note" data-integration-sibling><h3>停止記録を残した別の子の受領</h3><p>以前の統合は未完了のまま残します。そのコードの合格や本体反映を、今回の報告の確認で認めることはありません。</p><p>${esc(d.stoppedWarning?.items?.map(i=>i.title).join('、')||'')}：${esc(d.stoppedWarning?.reason||'状態未確認')}</p><button class="btn plain" data-integrate-action="primary" type="button">以前の停止記録を見る</button></section>`;
+ if(!d.siblingOption)return '';
+ return UI.template`<section class="note" data-integration-sibling><p>${esc(d.siblingOption.message)}</p>${d.siblingOption.allowed?'<button class="btn" data-integrate-action="sibling" type="button">別の子の報告を受け取る</button>':''}</section>`;
+}
 function drawSimpleIntegration(){
   const d=integratePreview,stopped=d.auto?.stopped;integrationSimpleUncertainty(d);
-  const operation=stopped?'停止しています。最新の記録を確認し、［統合を再開］が使える場合に押してください。自動では再開しません':d.auto?'開始済みです。追加で統合ボタンを押す必要はありません':'各行の［統合］はその子を対象にし、［残さない］では子孫も含めます。［一括統合］は表示された統合可能な子すべてを対象にします。［選別統合］は選んだ子だけを対象にし、子孫を自動では加えません';
-  const scope=stopped||d.mainPending||d.auto?.pendingMain||d.auto?.thenMain===false?'今回は本作業への受領まで。本体反映と新版起動は別に行います':'新しい成果は統合・確認・受領から本体反映まで進めます。受領済みの子だけの片付けでは本体を再反映しません。新版の起動は人が行います';
-  $('#integrate-sheet').innerHTML=UI.template`<div class="remove-box history-box integration-simple"><header><h2>${UI.text('子作業を統合する')}</h2><button class="btn plain" data-integrate-action="close" type="button">閉じる</button></header><div class="history-content"><div class="integration-guide"><p>${UI.text(operation)}</p><p>${UI.text('［残す］は子作業・会話・コピーを保持します。［残さない］は残件を本作業へ引き継ぎ、成果・会話を保全して子作業・コピーをゴミ箱へ移します。未受領の内容は残します')}</p><p>${UI.text(scope)}</p></div>${integrationAssignmentPanel(d)}${integrationRecordsPanel(d)}${integrationAbandonPanel(d)}${d.items.map((i,n)=>UI.template`<section class="integration-row"><label class="integration-select"><input type="checkbox" data-integrate-select data-index="${n}" aria-label="${esc(UI.template`選ぶ：${i.title}`)}" ${i.selected?'checked':''}>${UI.text('選ぶ')}</label><b>${esc(i.route||i.title)}</b><fieldset aria-label="${esc(UI.text('統合後の子作業'))}"><label><input type="radio" name="integration-keep-${n}" data-integrate-keep data-index="${n}" value="true" ${i.keep?'checked':''}>${UI.text('残す')}</label><label><input type="radio" name="integration-keep-${n}" data-integrate-keep data-index="${n}" value="false" ${!i.keep?'checked':''}>${UI.text('残さない')}</label></fieldset><button class="btn" data-integrate-action="single" data-index="${n}" type="button">統合</button>${integrationSimpleRowStatus(i,d)?UI.template`<p class="integration-row-status" role="status">${esc(integrationSimpleRowStatus(i,d))}</p>`:''}</section>`).join('')}${!d.items.length?UI.template`<p>${UI.text('新しい成果はありません')}</p>`:''}</div><footer class="acts">${integrationPendingMainStatus(d)?(d.mainDisplay?.reflected===true&&d.mainDisplay.key===JSON.stringify(d.mainPending||d.auto?.pendingMain)?UI.template`<details class="note" data-integration-history><summary>${esc(integrationPendingMainStatus(d).split("\n")[0])}</summary><p>${esc(integrationPendingMainStatus(d))}</p></details>`:UI.template`<p data-integration-main role="status">${esc(integrationPendingMainStatus(d))}</p>`):''}<p id="integrate-status" role="status" aria-live="polite">${esc(integrationSimpleStatus(d))}</p>${stopped?UI.html('<button class="btn" data-integrate-action="resume" type="button">統合を再開</button>'):UI.html('<button class="btn" data-integrate-action="selected" type="button">選別統合</button><button class="btn" data-integrate-action="batch" type="button">一括統合</button>')}</footer></div>`;
+  const operation=d.sibling?'別の子の保存済み報告を一つ受け取ります。子作業・会話・コピーは残します。製品コードの取り込みや片付けは行いません':stopped?'停止しています。最新の記録を確認し、［統合を再開］が使える場合に押してください。自動では再開しません':d.auto?'開始済みです。追加で統合ボタンを押す必要はありません':'各行の［統合］はその子を対象にし、［残さない］では子孫も含めます。［一括統合］は表示された統合可能な子すべてを対象にします。［選別統合］は選んだ子だけを対象にし、子孫を自動では加えません';
+  const scope=d.sibling||stopped||d.mainPending||d.auto?.pendingMain||d.auto?.thenMain===false?'今回は本作業への受領まで。本体反映と新版起動は別に行います':'新しい成果は統合・確認・受領から本体反映まで進めます。受領済みの子だけの片付けでは本体を再反映しません。新版の起動は人が行います';
+  $('#integrate-sheet').innerHTML=UI.template`<div class="remove-box history-box integration-simple"><header><h2>${UI.text('子作業を統合する')}</h2><button class="btn plain" data-integrate-action="close" type="button">閉じる</button></header><div class="history-content"><div class="integration-guide"><p>${UI.text(operation)}</p><p>${UI.text('［残す］は子作業・会話・コピーを保持します。［残さない］は残件を本作業へ引き継ぎ、成果・会話を保全して子作業・コピーをゴミ箱へ移します。未受領の内容は残します')}</p><p>${UI.text(scope)}</p></div>${integrationSiblingPanel(d)}${integrationAssignmentPanel(d)}${integrationRecordsPanel(d)}${integrationAbandonPanel(d)}${d.items.map((i,n)=>i.futureHold?UI.template`<p class="note">${esc(i.route||i.title)}：将来検討として保留中です。以前の停止記録は残しています。この記録の統合は保留解除まで再開できません。</p>`:UI.template`<section class="integration-row"><label class="integration-select" ${d.sibling?'hidden':''}><input type="checkbox" data-integrate-select data-index="${n}" aria-label="${esc(UI.template`選ぶ：${i.title}`)}" ${i.selected?'checked':''}>${UI.text('選ぶ')}</label><b>${esc(i.route||i.title)}</b>${i.cleanupOnly?UI.template`<p class="note">${UI.text('完了・受領済みです。上の作業を片付けるため、残すか確認してください。追加の成果ではありません')}</p>`:''}<fieldset aria-label="${esc(UI.text('統合後の子作業'))}"><label><input type="radio" name="integration-keep-${n}" data-integrate-keep data-index="${n}" value="true" ${i.keep?'checked':''}>${UI.text('残す')}</label><label><input type="radio" name="integration-keep-${n}" data-integrate-keep data-index="${n}" value="false" ${!i.keep?'checked':''}>${UI.text('残さない')}</label></fieldset>${i.cleanupOnly?'':UI.template`<button class="btn" data-integrate-action="single" data-index="${n}" type="button">${UI.text(d.sibling?'報告を受け取る':'統合')}</button>`}${i.reportScope?UI.template`<p class="note">${esc(i.reportScope)}</p>`:''}${integrationSimpleRowStatus(i,d)?UI.template`<p class="integration-row-status" role="status">${esc(integrationSimpleRowStatus(i,d))}</p>`:''}</section>`).join('')}${!d.items.length?UI.template`<p>${UI.text('新しい成果はありません')}</p>`:''}</div><footer class="acts">${integrationPendingMainStatus(d)?(d.mainDisplay?.reflected===true&&d.mainDisplay.key===JSON.stringify(d.mainPending||d.auto?.pendingMain)?UI.template`<details class="note" data-integration-history><summary>${esc(integrationPendingMainStatus(d).split("\n")[0])}</summary><p>${esc(integrationPendingMainStatus(d))}</p></details>`:UI.template`<p data-integration-main role="status">${esc(integrationPendingMainStatus(d))}</p>`):''}<p id="integrate-status" role="status" aria-live="polite">${esc(integrationSimpleStatus(d))}</p>${stopped?UI.html('<button class="btn" data-integrate-action="resume" type="button">統合を再開</button>'):d.sibling?'':UI.html('<button class="btn" data-integrate-action="selected" type="button">選別統合</button><button class="btn" data-integrate-action="batch" type="button">一括統合</button>')}</footer></div>`;
   if(d.waiting?.length)integrationWaitState(d.waiting);
   else if(d.resumeUncertain)integrationRequireRefresh(UI.text('再開の通信結果が不明です。同じ停止記録への再送はしません。最新の記録を確認してください'));
   else if(d.requiresRefresh)integrationRequireRefresh(d.refreshMessage);
@@ -296,18 +304,18 @@ async function saveIntegrationKeep(input){
   const d=integratePreview,i=d?.items[Number(input.dataset.index)];if(!i||d.auto||integrateBusy)return;
   const keep=input.value==='true';if(keep===i.keep)return;
   integrateBusy=true;const unlock=integrationLock();
-  try{const out=await api('/api/task/integrate/keep',{project:d.project,task:d.task,childProject:i.project,childTask:i.task,keep});if(out?.ok!==true||out.keep!==keep)throw Error(UI.text('通信結果を確認できません。再送せず、最新の記録を確認してください'));integrateBusy=false;await showTaskIntegration(d.project,d.task,d.only);}
+  try{const out=await api('/api/task/integrate/keep',{project:d.project,task:d.task,childProject:i.project,childTask:i.task,keep});if(out?.ok!==true||out.keep!==keep)throw Error(UI.text('通信結果を確認できません。再送せず、最新の記録を確認してください'));integrateBusy=false;await showTaskIntegration(d.project,d.task,d.only,false,d.sibling===true);}
   catch(e){if(e.status!==409)integrateKeepUncertain.add(integrationKeepKey(d,i));drawSimpleIntegration();integrationRequireRefresh(transferError(e));}
   finally{integrateBusy=false;unlock();}
 }
 async function startSimpleIntegration(mode,n){
-  const d=integratePreview;if(integrateBusy||!d?.token||d.auto||d.requiresRefresh||d.waiting?.length||!['single','batch','selected'].includes(mode))return;
+  const d=integratePreview;if(d?.sibling&&mode!=='single')return;if(integrateBusy||!d?.token||d.auto||d.requiresRefresh||d.waiting?.length||!['single','batch','selected'].includes(mode))return;
   const requested=mode==='single'?[d.items[n]]:d.items.filter(i=>i.selected);
   const plan=globalThis.HubIntegrationSelection.select(d.items,mode,requested,UI.text,UI.template);
   if(plan.reason){$('#integrate-status').textContent=UI.text(plan.reason);return;}
   const items=plan.items;
   integrateBusy=true;const unlock=integrationLock();
-  try{const out=await api('/api/task/integrate',{project:d.project,task:d.task,token:d.token,...(d.assignmentPolicy?{assignments:d.assignmentPolicy.slots}:{}),auto:true,thenMain:!d.mainPending,confirm:true,mode,selected:items.map(i=>({project:i.project,task:i.task,keep:i.keep}))});if(out?.partial!==true&&out?.complete!==true)throw Error(UI.text('通信結果を確認できません。再送せず、最新の記録を確認してください'));await load();render();$('#integrate-sheet').hidden=true;toast(UI.text('統合を自動で続けています'));}
+  try{const out=await api('/api/task/integrate',{project:d.project,task:d.task,token:d.token,...(d.assignmentPolicy?{assignments:d.assignmentPolicy.slots}:{}),auto:true,thenMain:!d.sibling&&!d.mainPending,confirm:true,mode,selected:items.map(i=>({project:i.project,task:i.task,keep:i.keep}))});if(out?.partial!==true&&out?.complete!==true)throw Error(UI.text('通信結果を確認できません。再送せず、最新の記録を確認してください'));await load();render();$('#integrate-sheet').hidden=true;toast(UI.text('統合を自動で続けています'));}
   catch(e){if(e.status===409&&e.code==='INTEGRATION_BUSY'&&e.stage==='waiting'&&e.waiting?.length)integrationWaitState(e.waiting);else {if(e.status!==409)integrateStartUncertain.add(integrationStartKey(d));integrationRequireRefresh(transferError(e));}}
   finally{integrateBusy=false;unlock();}
 }
@@ -319,7 +327,7 @@ function integrationRecordsPanel(d){
 async function saveIntegrationRecords(){
  const d=integratePreview,r=d?.recordSave,epoch=integrateEpoch;if(integrateBusy||!d?.token||d.requiresRefresh||!r?.allowed||integrateRecordUncertain.has(r.fingerprint)||!$('#integration-record-confirm')?.checked)return;
  integrateBusy=true;const unlock=integrationLock(),attempt={};integrateRecordUncertain.set(r.fingerprint,attempt);
- try{const out=await api('/api/task/integrate/records/save',{project:d.project,task:d.task,token:d.token,confirm:true});if(!out?.saved||!out?.commit)throw Error(UI.text('Hub記録の保存結果が不明です。再送せず保存記録を確認してください'));if(epoch!==integrateEpoch||integratePreview!==d)return;integrateBusy=false;await showTaskIntegration(d.project,d.task,d.only);}
+ try{const out=await api('/api/task/integrate/records/save',{project:d.project,task:d.task,token:d.token,confirm:true});if(!out?.saved||!out?.commit)throw Error(UI.text('Hub記録の保存結果が不明です。再送せず保存記録を確認してください'));if(epoch!==integrateEpoch||integratePreview!==d)return;integrateBusy=false;await showTaskIntegration(d.project,d.task,d.only,false,d.sibling===true);}
  catch(e){if(e.delivery?.state==='not-sent'&&integrateRecordUncertain.get(r.fingerprint)===attempt)integrateRecordUncertain.delete(r.fingerprint);delete d.token;if(epoch===integrateEpoch&&integratePreview===d)integrationRequireRefresh(transferError(e));}
  finally{if(epoch===integrateEpoch){integrateBusy=false;unlock();}}
 }
@@ -341,7 +349,7 @@ async function abandonTaskIntegration(action){
     if(epoch!==integrateEpoch||integratePreview!==d)return;
     integrateBusy=false;
     if(action==='abandon-preview'){d.abandonConfirmation=out;drawSimpleIntegration();}
-    else await showTaskIntegration(d.project,d.task,d.only);
+    else await showTaskIntegration(d.project,d.task,d.only,false,d.sibling===true);
   }catch(e){if(action==='abandon-confirm'&&e.delivery?.state!=='not-sent')integrateAbandonUncertain.add(integrationAbandonKey(d));if(epoch===integrateEpoch&&integratePreview===d)integrationRequireRefresh(transferError(e));}
   finally{if(epoch===integrateEpoch&&integratePreview===d){integrateBusy=false;unlock();}}
 }

@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const pub=name=>fs.readFileSync(path.join(__dirname,'../public',name),'utf8');
+const pub=name=>name==='app.js'?require('./fixtures/app-source.cjs').readApp():fs.readFileSync(path.join(__dirname,'../public',name),'utf8');
 test('会話上部の1クリック入口の隣に進行・停止理由を表示し同じ行に過去の会話をまとめる',()=>{
   const app=pub('app.js'),toolbar=app.match(/<div class="task-history-toolbar">[\s\S]*?<\/div>/)[0];
   assert.equal((toolbar.match(/<button/g)||[]).length,2);assert.match(toolbar,/data-task-history="continue"[^>]*>要約して続ける</);

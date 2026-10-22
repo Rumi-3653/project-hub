@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // 成果の保存→短い受領通知→専用管理記録の退避。各段階を保存して再実行する。
-const fs = require('node:fs'), path = require('node:path');
+const fs = require('./platform/file-io'), path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const chat = require('./chat'), git = require('./git');
 const { readResults, verifyResults } = require('./task-results');
@@ -18,7 +18,20 @@ class TaskTransfer {
   file(project, task) { return path.join(this.dir, hash(project + '\0' + task) + '.json'); }
   read(project, task) { const f = this.file(project, task); noLinks(f); return exists(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null; }
   #readChecked(project, task) { const f = this.file(project, task); noLink(f); return exists(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null; }
-  save(r) { const f = this.file(r.project, r.task); noLinks(f); fs.mkdirSync(this.dir, { recursive: true }); fs.writeFileSync(f + '.tmp', JSON.stringify(r, null, 2)); fs.renameSync(f + '.tmp', f); }
+  withSaveLock(project, task, operation) {
+    const lock = this.file(project, task) + '.save.lock'; noLinks(lock); fs.mkdirSync(this.dir, { recursive: true });
+    // Shared by ordinary publication and consultation closure, across processes.
+    // Never steal an interrupted publisher's reservation.
+    fs.writeFileSync(lock, randomUUID(), { flag: 'wx', mode: 0o600 });
+    try { return operation(); } finally { fs.unlinkSync(lock); }
+  }
+  save(r) {
+    return this.withSaveLock(r.project, r.task, () => {
+      require('./integration-consultation-close').assertOfferWritable(this,r);
+      const f = this.file(r.project, r.task); noLinks(f); noLinks(f + '.tmp');
+      fs.writeFileSync(f + '.tmp', JSON.stringify(r, null, 2)); fs.renameSync(f + '.tmp', f);
+    });
+  }
   pending() {
     if (!exists(this.dir)) return []; noLinks(this.dir);
     return fs.readdirSync(this.dir).filter(n => /^[a-f0-9]{64}\.json$/.test(n)).flatMap(n => {
@@ -55,7 +68,9 @@ class TaskTransfer {
       if(i.blockers?.length||i.source?.status||gitw.merging(targetDir)||require('./integration-writes').inspect(gitw,targetDir)?.status)return {received:false};
       if(last.target.dir&&path.resolve(last.target.dir)!==path.resolve(targetDir))return {received:false};
       if((i.source?.head||null)!==(last.head||null))return {received:false};
-      if(last.head&&(!i.copy||!gitw.isAncestor(i.copy,last.head)||!gitw.isAncestor(targetDir,last.head)))return {received:false};
+      if(last.head&&(!i.copy||!gitw.isAncestor(i.copy,last.head)))return {received:false};
+      if(last.integrated?.reportProjection){const p=last.integrated.reportProjection;if(p.sourceHead!==last.head||!gitw.isAncestor(targetDir,last.integrated.commit))return {received:false};require('./integration-report-projection').verify(targetDir,p,last.integrated.commit);}
+      else if(last.head&&!gitw.isAncestor(targetDir,last.head))return {received:false};
       const results=last.results??(r?.id===last.id?r.results:undefined);
       if(JSON.stringify(i.results)!==JSON.stringify(results))return {received:false};
       const taskHash=last.taskHash??(r?.id===last.id?r.taskHash:undefined);
@@ -64,7 +79,7 @@ class TaskTransfer {
       // persisted transition starts at the previously verified hash; all other
       // code, result, file and permission checks still run below.
       for(const change of r?.keepChanges||[])if(change.receipt===last.id&&change.before===currentHash)currentHash=change.after;
-      if(currentHash!==i.taskHash)return {received:false};
+      if(currentHash!==i.taskHash&&!this.receivedCompletion(i,r,last,currentHash))return {received:false};
       // Compare the whole declared file set, including removals, not just additions.
       const saved=new Map((last.manifest||history.flatMap(x=>x.files||[])).map(f=>[f.id,f]));
       const current=i.files.map(f=>({id:f.id,digest:hash(fs.readFileSync(f.path)),mode:fs.statSync(f.path).mode&0o777}));
@@ -72,19 +87,54 @@ class TaskTransfer {
       return {received:true,receipt:last.id};
     }catch(e){return {received:false,reason:e.message};}
   }
+  receivedCompletion(i,r,last,expectedHash) {
+    // Retention owns the exact post-receipt document. Replay only the formal
+    // completion operation against that hash-pinned text; never ignore arbitrary
+    // task edits or infer receipt from a completed label. This also reads legacy
+    // retained receipts without rewriting their history/signatures.
+    if(!r?.complete||!r.retained||r.id!==last.id||!r.received?.some(x=>x.id===last.id&&x.taskHash===last.taskHash))return false;
+    const {hash:taskHash}=require('./completion'),{parseDoc,setScalar}=require('./frontmatter');
+    // The existing keepChanges hash chain may have advanced the document before
+    // completion. New radio saves retain its exact text at that verified hash.
+    let basis=r.retention?.after===expectedHash?r.retention.text:(r.keepChanges||[]).findLast(x=>x.receipt===last.id&&x.after===expectedHash)?.text;
+    if(typeof basis!=='string'||taskHash(basis)!==expectedHash)return false;
+    const file=this.store.taskFile(i.project,i.task);
+    if(!file||file!==r.retention.file)return false;
+    noLinks(file);
+    const text=fs.readFileSync(file,'utf8'),t=this.store.readTask(file);
+    if(!require('../public/project-order').approved(t)||t.completionHash!==i.taskHash||taskHash(text)!==i.taskHash)return false;
+    const updated=parseDoc(text).data.updated;
+    if(typeof updated!=='string')return false;
+    const approved=(source,date)=>setScalar(setScalar(setScalar(source,'continuation',false),'state','完了'),'updated',date);
+    // A completed descendant may need an explicit keep change for its ancestor's
+    // cleanup. Bridge completion to that radio save only with both exact texts;
+    // then replay solely integrateKeep/updated, never arbitrary document edits.
+    for(const change of r.keepChanges||[]){
+      if(change.receipt!==last.id||typeof change.beforeText!=='string')continue;
+      const prior=parseDoc(change.beforeText).data;
+      if(typeof prior.updated!=='string'||taskHash(approved(basis,prior.updated))!==change.before)continue;
+      if(taskHash(change.beforeText)!==change.before||typeof change.text!=='string'||taskHash(change.text)!==change.after)return false;
+      const next=parseDoc(change.text).data;
+      if(typeof next.integrateKeep!=='boolean'||typeof next.updated!=='string'||taskHash(setScalar(setScalar(change.beforeText,'integrateKeep',next.integrateKeep),'updated',next.updated))!==change.after)return false;
+      basis=change.text;
+    }
+    return taskHash(approved(basis,updated))===i.taskHash;
+  }
   context(project, task, options = {}) {
     const all = this.store.listProjects(), p = all.find(x => x.id === project), t = p?.tasks.find(x => x.id === task);
     if (!t) throw Error(this.read(project,task)?.complete
       ? lt('この子作業はもう受け取って片付けてあります。受け取った成果は本作業の会話と［ファイルを見る］で確認できます。')
       : lt('この子作業は今はありません（片付けたか、名前を変えた可能性があります）'));
+    require('./task-future-hold').assertAllowed(p,t,all);
     const target = options.targetTask ? { project: all.find(x=>x.id===options.targetProject) } : options.offer ? integrators(p,t,all)[0] || taskTarget(p,t,all) : taskTarget(p, t, all);
     if (options.targetTask && target.project) target.task = target.project.tasks.find(x=>x.id===options.targetTask);
     if (!target?.task) throw Error(lt('この作業には本作業・派生元がありません'));
-    const policy=this.integrationPolicy?.(project,task,options);
+    const policy=this.integrationPolicy?.(project,task,{...options,targetProject:target.project.id,targetTask:target.task.id});
     if (options.integrating&&!policy?.related) { const reason = integrateBlock(target,p,t,all,options.partial?'partial':options.disposition); if (reason) throw Error(reason); }
     if (t.kind === 'derived' && !require('./work-context').sourceOf(p,t.derivedFrom,all)) throw Error(lt('派生元が同じ大きなプロジェクト内にありません'));
     if (!options.integrating && !options.offer && target.task.state === '完了') throw Error(lt`本作業「${target.task.title}」を再開してから渡してください`);
     const retaining=options.partial||options.disposition==='continue';
+    if(!retaining&&!options.offer)require('./task-future-hold').assertCleanup(p,t,all);
     const d = this.removal.describe(project, task);
     if (options.integrating || options.offer) d.blockers = d.blockers.filter(x=>!x.startsWith(lt('作業用コピー')) && !((options.offer || retaining) && x.startsWith(lt('下の作業や'))));
     if (this.removal.busy(target.project.id, target.task.id) || this.removal.locked(target.project.id)) d.blockers.push(lt('本作業でAI・整理・確認が動いています。終わってから渡してください'));
@@ -426,6 +476,7 @@ class TaskTransfer {
     this.continue(r); return this.result(r);
   }
   finishRetention(r) {
+    require('./integration-consultation-close').assertOfferWritable(this,r);
     const owner=this.store.taskFile(r.project,r.task),target=this.store.taskFile(r.targetProject,r.targetTask);
     if(!owner||!target||owner!==r.retention.file||this.removal.busy(r.project,r.task)||this.removal.busy(r.targetProject,r.targetTask)||this.removal.locked(r.project)||this.removal.locked(r.targetProject))throw Error(lt('作業・本作業が稼働中、完了済み、または見つかりません。成果は保持しています'));
     this.checkBundles(r);
@@ -437,6 +488,9 @@ class TaskTransfer {
     this.checkBundles(r);r.taskHash=this.store.readTask(file).completionHash;this.rememberReceipt(r);r.retained=true;r.complete=true;this.save(r);
   }
   continue(r) {
+    require('./integration-consultation-close').assertOfferWritable(this,r);
+    const all=this.store.listProjects(),p=all.find(p=>p.id===r.project),t=p?.tasks.find(t=>t.id===r.task);
+    if(t){const hold=require('./task-future-hold');hold.assertAllowed(p,t,all);if(!r.retention&&!r.partial&&r.disposition!=='continue')hold.assertCleanup(p,t,all);}
     this.integrationTargetGuard?.(r);
     if(r.retention){this.finishRetention(r);return;}
     if(r.files.length>1&&!r.files.every(f=>f.to===f.path)){
@@ -479,7 +533,7 @@ class TaskTransfer {
     this.checkBundles(r);
     // 通知・本文は識別子で照合し、通知後の保存失敗でも二重にしない。
     const recovered = r.integrated?.recovered ? lt('（古い取り込み記録を本体の履歴と照合）') : '';
-    const text = [...(r.disposition==='continue'?[lt('成果を受け取り、作業・会話・コピーを残して続けます。'),lt('残件：')+r.review.residual,lt('判断待ち：')+r.review.undecided]:[]),lt`「${r.title}」から本作業「${r.targetName}」へ成果を受け取りました。`, ...(r.retainedFolders||[]).map(f=>lt`- 残す：${f}（未受領の内容または正本があるため自動で片付けません）`), ...r.files.map(f => `- ${f.to}${f.existing ? lt('（同じ内容を保存済み。重複コピーなし）') : ''}`), ...(r.results || []).filter(x=>x.kind!=='ファイル').map(x=>`- ${x.kind}：${x.value}${x.description ? '（'+x.description+'）' : ''}`), ...(r.integrated ? [`${r.integrating ? lt('統合先') : lt('本体への取り込み済み')}：${r.integrated.dir}（${r.integrated.commit}）${recovered}`, ...(r.integrated.github ? [lt`更新候補：${r.integrated.github.url}（ブランチ：${r.integrated.github.branch || lt('未指定')}）`] : []), ...r.integrated.files.map(f => `- ${f}`)] : []), FINAL_CHECK].join('\n');
+    const text = [...(r.disposition==='continue'?[lt('成果を受け取り、作業・会話・コピーを残して続けます。'),lt('残件：')+r.review.residual,lt('判断待ち：')+r.review.undecided]:[]),lt`「${r.title}」から本作業「${r.targetName}」へ成果を受け取りました。`, ...(r.retainedFolders||[]).map(f=>lt`- 残す：${f}（未受領の内容または正本があるため自動で片付けません）`), ...r.files.map(f => `- ${f.to}${f.existing ? lt('（同じ内容を保存済み。重複コピーなし）') : ''}`), ...(r.integrated?.reportProjection?[lt('受領範囲は下の報告ファイルだけです。子の保存HEADは出典であり、引継ぎメモと元履歴全体は受領していません。')]:[]), ...(r.results || []).filter(x=>x.kind!=='ファイル').map(x=>`- ${x.kind}：${x.value}${x.description ? '（'+x.description+'）' : ''}`), ...(r.integrated ? [`${r.integrating ? lt('統合先') : lt('本体への取り込み済み')}：${r.integrated.dir}（${r.integrated.commit}）${recovered}`, ...(r.integrated.github ? [lt`更新候補：${r.integrated.github.url}（ブランチ：${r.integrated.github.branch || lt('未指定')}）`] : []), ...r.integrated.files.map(f => `- ${f}`)] : []), FINAL_CHECK].join('\n');
     if (!chat.read(target.dir, r.targetTask).some(x => x.handoff === r.id)) chat.append(target.dir, r.targetTask, {role:'user',text,from:'subtask',child:r.task,childTitle:r.title,childProject:r.project,handoff:r.id,disposition:r.disposition,...(r.integrating?{integrating:r.integrating}:{})});
     const targetFile = this.store.taskFile(r.targetProject, r.targetTask); noLinks(targetFile);
     if (!fs.readFileSync(targetFile, 'utf8').includes(lt`受領記録：${r.id}`)) this.store.appendSection(r.targetProject, r.targetTask, 'やったこと', lt`- 「${r.title}」の成果${r.files.length}ファイルを受領：${r.destination}${r.integrated ? (r.integrating ? lt('／統合先への取り込み済み') : lt('／本体への取り込み済み')) + recovered : ''}。受領記録：${r.id}。${FINAL_CHECK}`);

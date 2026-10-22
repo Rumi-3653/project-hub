@@ -9,7 +9,7 @@ function fixture() {
  const ctx=vm.createContext({document,window:{},navigator:{userAgent:''},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>new Promise(()=>{}),setInterval(){},setTimeout(){},clearInterval(){},clearTimeout(){},requestAnimationFrame(){},console,URLSearchParams,ModelOrder:require('../public/model-order'),ProjectOrder:require('../public/project-order')});
  const run=s=>vm.runInContext(s,ctx);
  ctx.window.HubChatHistory = require('../public/chat-history');
- run(fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'));
+ require('./fixtures/app-source.cjs').loadApp(ctx);
  run(fs.readFileSync(path.join(__dirname,'../public/task-transfer.js'),'utf8'));
  ctx.stubApi=async(route,body)=>{calls.push({route,body});if(ctx.failure){const e=Error(ctx.failure);e.status=ctx.status;throw e;}if(route.endsWith('/preview'))return{token:'fixture',title:'小作業',target:'本作業',files:[{id:'report',bytes:1}],blockers:[],guidance:''};return{parentProject:'p',parent:'parent'};};
  run(`api=stubApi;save=()=>{};load=async()=>{};render=()=>{};toast=()=>{};state={version:'4.63.2',latest:'4.63.3',projects:[{id:'p',name:'見本',tasks:[{id:'parent',title:'本作業',steps:[]},{id:'kid',title:'小作業',parent:'parent',state:'完了',steps:[]}]}],sessions:[],chatting:[]};view={kind:'work',project:'p',task:'parent'};`);

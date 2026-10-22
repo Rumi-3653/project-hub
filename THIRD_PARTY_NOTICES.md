@@ -77,3 +77,10 @@ SOFTWARE.
 - [walkpod1007 / PR #6](https://github.com/kieiken/project-hub/pull/6)（7191e559e796d487805d3843c1dff26b9d15626c）：中継接続の判定・接続元取得を現行版へ適応しました。
 - [arumwu / PR #2](https://github.com/kieiken/project-hub/pull/2)（af9c4d824d772a5be7a4f299d01a14ecdde6179b）：一覧の幅調整（sidebar-resize.js、対応する画面・試験）だけを現行版へ適応しました。
 - いずれも Project Hub の MIT ライセンスで提供された変更です。各投稿者の由来をここに残します。
+
+## Microsoft WebView2（Windows専用窓に同梱）
+
+- Microsoft.Web.WebView2 1.0.4258.31、net462 の Core / WinForms と x64 WebView2Loader の3 DLL
+- 公式 NuGet 由来。取得URLとSHA256は `hub/app/windows/vendor/webview2/1.0.4258.31/manifest.json`
+- 許諾・著作権・免責の原文：`hub/app/windows/vendor/webview2/1.0.4258.31/LICENSE.txt`（Microsoft Corporation）。バイナリと一緒に配布します。
+- WebView2 Evergreen Runtime は同梱・自動導入しません。

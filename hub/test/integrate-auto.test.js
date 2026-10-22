@@ -2,11 +2,15 @@
 process.env.HUB_LANG='ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {IntegrateAuto}=require('../lib/integrate-auto'),contract=require('../lib/task-continuation');
+const integrationRoot=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'auto-storage-contract-'));
+test.after(()=>fs.rmSync(integrationRoot,{recursive:true,force:true}));
+function storageContract(integrate){integrate.store.listProjects=()=>[];integrate.dir=integrationRoot;integrate.file=(p,t)=>path.join(integrationRoot,p+'-'+t+'.json');integrate.records=(p,t)=>[integrate.read(p,t)].filter(Boolean);return integrate;}
 function setup(){
  let r={project:'p',task:'t',target:'copy',complete:false,items:[{project:'p',task:'child',title:'子',source:{head:'source'},taskHash:'hash',files:[],results:[],review:{confirmed:true},disposition:'continue',state:'衝突',conflictPaths:['file']}],auto:{attempts:{},targetHead:'before',mainHead:'main',thenMain:true}};
  r.auto.scope=structuredClone(r.items.map(({project,task,source,taskHash,files,results,review,disposition})=>({project,task,source,taskHash,files,results,review,disposition})));
  let head='before',busy=false,runs=0,mains=0,issues=[],notes=[];
  const integrate={read:()=>structuredClone(r),save:x=>{r=structuredClone(x);},pending:()=>r.auto.main?.state==='done'?[]:[{project:'p',task:'t'}],store:{readProject:()=>({id:"p",dir:"copy"})},ancestor:()=>({t:{},target:"copy",p:{id:"p",dir:"copy"}}),resumePreview:()=>({blockers:[],recover:null}),gitw:{inspect:()=>({head,status:''}),merging:()=>false,isAncestor:(d,h)=>h===head||head==='resolved'&&['source','before'].includes(h)},run:x=>{runs++;x.items[0].state='保持受領済み';x.complete=true;integrate.save(x);}};
+ storageContract(integrate);
  const auto=new IntegrateAuto({integrate,busy:()=>busy,dispatch:async x=>issues.push(x),mergeMain:async(r,{begin})=>{begin();mains++;return {ok:true,retained:true,main:'body'};},notify:x=>notes.push(x)});
  auto.pendingRequest=()=>true;
  return {auto,integrate,get r(){return r;},get runs(){return runs;},get mains(){return mains;},issues,notes,setHead:x=>{head=x;},setBusy:x=>{busy=x;}};
@@ -67,6 +71,7 @@ test('自動統合のtickは対象ごとに待ち、先頭の別プロジェク�
  const records=new Map(['blocked','ready'].map(project=>[project,{project,task:'t',target:project,items:[],complete:false,auto:{scope:[],attempts:{},targetHead:'head',thenMain:true}}]));
  const ran=[],merged=[],contexts=[];
  const integrate={pending:()=>[...records.values()],read:p=>records.get(p),save:r=>records.set(r.project,r),store:{readProject:p=>({id:p,dir:p})},ancestor:p=>{contexts.push(p);return {t:{},target:p,p:{id:p,dir:p}};},resumePreview:()=>({blockers:[]}),gitw:{inspect:()=>({head:'head',status:''}),merging:()=>false},run:r=>{ran.push(r.project);r.complete=true;}};
+ storageContract(integrate);
  const auto=new IntegrateAuto({integrate,busy:r=>r?.project==='blocked',mergeMain:async(r,{begin})=>{begin();merged.push(r.project);return {ok:true,retained:true,main:'body'};}});
  await auto.tick();assert.deepEqual(contexts,['ready']);assert.deepEqual(ran,['ready']);assert.deepEqual(merged,['ready']);assert.equal(records.get('blocked').complete,false);
 });

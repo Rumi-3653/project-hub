@@ -33,7 +33,9 @@ class StateOffers {
     const sources=new Set(rows.filter(r=>r.received).map(r=>r.project+'\0'+r.task));
     const activity=all.filter(p=>p.tasks.some(t=>sources.has(p.id+'\0'+t.id))).map(p=>({project:p.id,locked:this.removal.locked(p.id),review:this.removal.reviewBusy(p.id),tasks:p.tasks.filter(t=>sources.has(p.id+'\0'+t.id)&&this.removal.busy(p.id,t.id)).map(t=>t.id)}));
     const bases=Object.fromEntries(all.map(p=>[p.id,this.baseOf(p)]));
-    const taskStamp=new Map(all.flatMap(p=>p.tasks.map(t=>[p.id+'\0'+t.id,[t.completionHash,t.parent,t.derivedFrom,gitStamp(expandHome(t.workdir)||bases[p.id]),p.folders]])));
+    // Shared task bases need one Git stamp per display build, never across views.
+    const repositories=new Map(),repositoryStamp=dir=>{if(!repositories.has(dir))repositories.set(dir,gitStamp(dir));return repositories.get(dir);};
+    const taskStamp=new Map(all.flatMap(p=>p.tasks.map(t=>[p.id+'\0'+t.id,[t.completionHash,t.parent,t.derivedFrom,repositoryStamp(expandHome(t.workdir)||bases[p.id]),p.folders]])));
     const rowKey=r=>[r.project,r.task,r.targetProject,r.targetTask].join('\0');
     const rowSignatures=Object.fromEntries(rows.map(r=>{const a=activity.find(p=>p.project===r.project);return [rowKey(r),JSON.stringify([taskStamp.get(r.project+'\0'+r.task),taskStamp.get(r.targetProject+'\0'+r.targetTask),stamp(this.transfer.file(r.project,r.task)),a?.locked,a?.review,a?.tasks.includes(r.task)])];}));
     const signature=createHash('sha256').update(JSON.stringify([rowSignatures,eligible.map(([p,t])=>[p,t,taskStamp.get(p+'\0'+t)])])).digest('hex');

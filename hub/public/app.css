@@ -900,7 +900,9 @@ input.cm{width:100%;border:1px solid var(--line);background:var(--panel);border-
 .work-compact .work-alerts[open]>:not(summary){white-space:normal}
 .work-compact .task-history-toolbar{flex-direction:row;flex-wrap:nowrap;align-items:center;gap:6px;padding:4px 0;min-width:0}
 .work-compact .task-history-toolbar .btn{min-height:28px;padding:3px 8px;font-size:12px;white-space:nowrap}
-.work-compact .task-history-toolbar .history-progress{min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.work-compact .task-history-toolbar .history-progress{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;font-size:12px}
+.work-compact .task-history-toolbar .history-progress>span{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.work-compact .task-history-toolbar .history-progress>[data-history-action="auto-cancel"]{flex:none}
 .work-compact .composer{gap:5px;padding:6px 12px}
 .work-compact .composer-controls{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;position:relative}
 .work-compact .composer-controls select{min-width:0;max-width:100%;height:30px;padding:3px 5px;font-size:12px}

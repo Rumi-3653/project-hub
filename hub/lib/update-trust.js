@@ -3,6 +3,7 @@
 // The owner may explicitly reuse an existing Ed25519 identity. Unconfigured fails closed.
 module.exports = Object.freeze({
   feedUrl: 'https://github.com/kieiken/project-hub/releases/latest/download/project-hub-update.json',
+  windowsFeedUrl: 'https://github.com/kieiken/project-hub/releases/latest/download/project-hub-update-windows.json',
   assetPrefix: 'https://github.com/kieiken/project-hub/releases/download/',
   // Measured on GitHub's official cli/cli release. Verify our first asset before activation.
   redirectHosts: Object.freeze(['release-assets.githubusercontent.com']),

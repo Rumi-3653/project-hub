@@ -1,7 +1,7 @@
 'use strict';
 const { lt } = require('./locale');
 // 祖先側の確認→子孫ごとの取り込み→受領→片付け。段階を保存し再開する。
-const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const fs = require('./platform/file-io'), path = require('node:path'), os = require('node:os');
 const { randomUUID, createHash } = require('node:crypto');
 const graph = require('../public/project-order'), git = require('./git');
 const { noLinks, noLink, exists, snapshot } = require('./remove');
@@ -16,15 +16,26 @@ class TaskIntegrate {
     this.simple=new (require('./integration-simple').SimpleIntegration)(this);
     transfer.integrationPolicy=(p,t,o)=>this.simple.policy(p,t,o);
     transfer.beforeCleanup=r=>this.cleanupCopy(r);
-    transfer.integrationTargetGuard=r=>{if(r.integrating){const record=this.read(r.targetProject,r.targetTask);if(!record||record.id!==r.integrating)throw Error(lt('統合予約が変わりました'));require('./integration-safety').assertTarget(this,{target:record.target,p:this.store.readProject(r.targetProject)});}};
+    transfer.integrationTargetGuard=r=>{if(r.integrating){const record=this.read(r.targetProject,r.targetTask,r.integrating);if(!record)throw Error(lt('統合予約が変わりました'));require('./integration-sibling').assert(this,record);require('./integration-safety').assertTarget(this,{target:record.target,p:this.store.readProject(r.targetProject)});}};
     transfer.offerState=(p,t,target,all)=>{
       const a={all,p:target.project,t:target.task,target:expand(target.task.workdir)||this.baseOf(target.project)};
       return this.details(a,p,t).receiptState;
     };
   }
   file(project,task){return path.join(this.dir,hash(project+'\0'+task)+'.json');}
-  read(project,task){const f=this.file(project,task);noLinks(f);return exists(f)?JSON.parse(fs.readFileSync(f,'utf8')):null;}
-  save(r){const f=this.file(r.project,r.task);noLinks(f);fs.mkdirSync(this.dir,{recursive:true});fs.writeFileSync(f+'.tmp',JSON.stringify(r,null,2));fs.renameSync(f+'.tmp',f);}
+  read(project,task,id){
+    const close=require('./integration-consultation-close'),closure=close.read(this,project,task);
+    const old=closure?close.retired(this).filter(r=>r.project===project&&r.task===task):[];
+    if(id&&old.some(r=>r.id===id))return old.find(r=>r.id===id);
+    // Until the explicit transaction finishes, keep the parent blocked even
+    // when a crash has already retired one of the canonical lane files.
+    if(closure&&closure.stage!=='complete')return old[0];
+    const f=this.file(project,task);noLinks(f);const r=exists(f)?JSON.parse(fs.readFileSync(f,'utf8')):null;
+    if(!id||r?.id===id)return r;const side=require('./integration-sibling').read(this,project,task);return side?.id===id?side:null;
+  }
+  readLane(project,task,sibling){return sibling?require('./integration-sibling').read(this,project,task):this.read(project,task);}
+  records(project,task){return [this.read(project,task),require('./integration-sibling').read(this,project,task)].filter(Boolean);}
+  save(r){require('./integration-consultation-close').assertWritable(this,r);const sibling=require('./integration-sibling');if(r.stoppedSibling)return sibling.save(this,r);sibling.blocked(this,r);return sibling.primarySave(this,r,()=>{const f=this.file(r.project,r.task);noLinks(f);fs.mkdirSync(this.dir,{recursive:true});fs.writeFileSync(f+'.tmp',JSON.stringify(r,null,2));fs.renameSync(f+'.tmp',f);});}
   // Display evidence only. Never settle the old intent or change replay guards.
   // Called by explicit previews, not the polling state path (no Git in pending()).
   mainDisplay(project,task,r){
@@ -46,9 +57,10 @@ class TaskIntegrate {
   }
   pending(){
     if(!exists(this.dir))return [];noLinks(this.dir);
-    return fs.readdirSync(this.dir).filter(n=>/^[a-f0-9]{64}\.json$/.test(n)).flatMap(n=>{
-      try{const f=path.join(this.dir,n);noLink(f);const r=JSON.parse(fs.readFileSync(f,'utf8')),complete=continuation.childrenComplete(r),mainPending=continuation.pendingMain(r);return complete&&!mainPending&&(!r.auto||r.auto.main?.state==='done')?[]:[{auto:r.auto,project:r.project,task:r.task,id:r.id,stage:r.abandoned?'abandoned':complete?'main':'children',...(r.abandoned?{abandoned:{at:r.abandoned.at,reason:r.abandoned.reason}}:{}),mainPending,items:complete?[]:r.items.map(x=>({project:x.project,task:x.task,title:x.title,state:x.state}))}];}catch{return [];}
-    });
+    const directories=[this.dir,path.join(this.dir,'siblings')].filter(exists);
+    return directories.flatMap(dir=>{noLinks(dir);return fs.readdirSync(dir).filter(n=>/^[a-f0-9]{64}\.json$/.test(n)).flatMap(n=>{
+      try{const f=path.join(dir,n);noLink(f);const r=JSON.parse(fs.readFileSync(f,'utf8')),complete=continuation.childrenComplete(r),mainPending=continuation.pendingMain(r);return complete&&!mainPending&&(!r.auto||r.auto.main?.state==='done')?[]:[{auto:r.auto,project:r.project,task:r.task,id:r.id,stage:r.abandoned?'abandoned':complete?'main':'children',...(r.abandoned?{abandoned:{at:r.abandoned.at,reason:r.abandoned.reason}}:{}),mainPending,items:complete?[]:r.items.map(x=>({project:x.project,task:x.task,title:x.title,state:x.state}))}];}catch{return [];}
+    });}).concat(require('./integration-consultation-close').pending(this));
   }
   // Conversation eligibility only: leave pending(), replay guards and old intents intact.
   // Git is read only for a completed receipt with a separate historical main intent;
@@ -86,7 +98,9 @@ class TaskIntegrate {
     const partial=disposition==='partial';
     const r=this.transfer.read(p.id,t.id),d=this.removal.describe(p.id,t.id);
     const blockers=d.blockers.filter(x=>!x.startsWith(lt('作業用コピー'))&&!x.startsWith(lt('下の作業や')));
-    const simpleRecord=ownId&&this.read(a.p.id,a.t.id),simpleItem=simpleRecord?.auto?.mode&&simpleRecord.id===ownId&&simpleRecord.items.find(i=>i.project===p.id&&i.task===t.id);
+    const futureReason=require('./task-future-hold').reason(p,t,a.all);if(futureReason)blockers.push(futureReason);
+    if(disposition==='cleanup'&&a.all.some(q=>q.tasks.some(x=>(x.futureHold||x.futureHoldError)&&graph.ancestorsOf(q,x,a.all).some(y=>y.project.id===p.id&&y.task.id===t.id))))blockers.push(lt('将来検討として残す子孫があるため、この子作業を片付けられません'));
+    const simpleRecord=ownId&&this.read(a.p.id,a.t.id,ownId),simpleItem=simpleRecord?.auto?.mode&&simpleRecord.id===ownId&&simpleRecord.items.find(i=>i.project===p.id&&i.task===t.id);
     if(disposition==='cleanup'&&(!graph.finished(t)||t.question)&&(!simpleItem||t.question))blockers.push(lt('子作業の手順・質問が残っています'));
     if(t.mergeExcluded)blockers.push(lt('取り込み対象から外されています'));
     if(t.kind==='derived'&&!require('./work-context').sourceOf(p,t.derivedFrom,a.all))blockers.push(lt('派生元が同じ大きなプロジェクト内にありません'));
@@ -110,7 +124,7 @@ class TaskIntegrate {
     const liveSource=copy&&exists(wd)?this.gitw.inspect(wd):null,source=frozen?frozen.source:liveSource;
     if(copy&&!source)blockers.push(lt('子の作業用コピーのGitを確認できません'));
     if(copy&&source?.status)blockers.push(lt('子の変更を保存してから確認してください'));
-    if(previousHead&&(!copy||!this.gitw.isAncestor(wd,previousHead)||!this.gitw.isAncestor(a.target,previousHead)))blockers.push(lt('前回の受領HEADが子または統合先にありません。履歴を確認してください'));
+    if(previousHead&&!previousReceipt?.integrated?.reportProjection&&(!copy||!this.gitw.isAncestor(wd,previousHead)||!this.gitw.isAncestor(a.target,previousHead)))blockers.push(lt('前回の受領HEADが子または統合先にありません。履歴を確認してください'));
     if(copy&&source&&this.gitw.merging(wd))blockers.push(lt('子の作業用コピーで取り込みが途中です。解消して保存してください'));
     if(partial)try{if(frozen)this.transfer.partialSnapshot(p,t,r,frozen,ownId,{project:a.p.id,task:a.t.id});else {this.transfer.partialSource(p,t,r);this.transfer.assertPartialOffer(p,t,r,files,source);}if(require('./integration-safety').target(this,a)?.status)blockers.push(lt('途中受領の前に、親の変更を保存してください'));}catch(e){blockers.push(e.message);}
     const {integrated,results,resultReady}=issue;
@@ -138,15 +152,17 @@ class TaskIntegrate {
   }
   resumePreview(a,r){
     const changed=path.resolve(r.target)!==path.resolve(a.target),reasons=[],blockers=[];
+    try{require('./task-future-hold').assertRecord(this,r);}catch(e){blockers.push(e.message);}
     try{continuation.assertNoArchive(this.dir,r);}catch(e){blockers.push(e.message);}
     if(changed)reasons.push(lt('統合先が変わっています'));
     if(this.gitw.merging(a.target))blockers.push(lt('統合先で取り込みが途中です。解消して保存してください'));
     const items=r.items.map(i=>{
-      if(['片付け済み','受領済み','保持受領済み'].includes(i.state))return {...i,retained:true};
-      const h=this.transfer.read(i.project,i.task),out={...i,blockers:[]};
+      if(['片付け済み','受領済み','保持受領済み'].includes(i.state)){const p=a.all.find(p=>p.id===i.project),t=p?.tasks.find(t=>t.id===i.task);return {...i,retained:true,futureHold:Boolean(t&&require('./task-future-hold').held(p,t,a.all))};}
+      const p0=a.all.find(p=>p.id===i.project),t0=p0?.tasks.find(t=>t.id===i.task);
+      const h=this.transfer.read(i.project,i.task),out={...i,futureHold:Boolean(t0&&require('./task-future-hold').held(p0,t0,a.all)),blockers:[]};
       // 受領の開始以降は保存した受領段階から再開し、再選択しない。
       if(!h?.integrating&&!h?.complete&&!h?.destination)out.reservationMissing=true;
-      if(i.partial&&h?.received?.some(x=>x.integration===r.id))return {...i,state:'受領済み',retained:true};
+      if(i.partial&&h?.received?.some(x=>x.integration===r.id))return {...out,state:'受領済み',retained:true};
       if(!h || h.integrating!==r.id)out.blockers.push(lt('子の統合予約が変わりました'));
       if(changed && h?.complete)out.blockers.push(lt('子の受領記録が完了しています。保存された統合先で続きを確認してください'));
       if(h?.receiving||h?.complete){out.receiving=true;return out;}
@@ -177,17 +193,18 @@ class TaskIntegrate {
     for(const i of items)blockers.push(...(i.blockers||[]));
     return {project:r.project,task:r.task,target:a.target,resume:true,id:r.id,items,auto:r.auto,ancestorHash:a.t.completionHash,targetSnapshot,recordHash:hash(JSON.stringify(r)),handoffHash:hash(JSON.stringify(r.items.map(i=>this.transfer.read(i.project,i.task)))),legacy:r.schemaVersion!==2,blockers:[...new Set(blockers)],recover:recover?{savedTarget:r.target,currentTarget:a.target,reasons}:null};
   }
-  preview(project,task,only,{allowBusy=false,issueToken=true,simple=false,assignments}={}){
+  preview(project,task,only,{allowBusy=false,issueToken=true,simple=false,sibling=false,assignments}={}){
     const assignment=require('./integration-assignment'),policy=assignment.normalize(assignments,this.validateAssignment);
     if(policy&&!simple)throw Error('担当指定は新しい簡単統合で確認してください');
-    const finish=value=>{if(policy){if(value.resume)throw Error('開始済み統合の担当は変更できません');value.assignmentPolicy=policy;value.assignmentPolicyHash=assignment.hash(policy);}if(simple)value.confirmationHash=require('./integration-safety').hash([value.ancestorHash,value.targetSnapshot,value.previousRecordHash||value.recordHash,value.items.map(i=>[i.project,i.task,i.safetyHash||i.taskHash,i.keep,i.startable,i.noop]),value.assignmentPolicyHash||null]);return issueToken?this.token(value):value;};
-    const a=this.ancestor(project,task,{allowBusy}),old=this.read(project,task);
-    if(simple)return finish(this.simple.preview(a,old));
+    const finish=value=>{if(policy){if(value.resume)throw Error('開始済み統合の担当は変更できません');value.assignmentPolicy=policy;value.assignmentPolicyHash=assignment.hash(policy);}if(simple)value.confirmationHash=require('./integration-safety').hash([value.ancestorHash,value.targetSnapshot,value.previousRecordHash||value.recordHash,value.items.map(i=>[i.project,i.task,i.safetyHash||i.taskHash,i.keep,i.startable,i.noop]),value.assignmentPolicyHash||null,value.sibling===true,value.stoppedSibling||null]);return issueToken?this.token(value):value;};
+    const a=this.ancestor(project,task,{allowBusy}),old=this.readLane(project,task,sibling);
+    if(sibling&&!simple)throw Error('別の子の報告は簡単統合で確認してください');
+    if(simple){if(sibling){const original=this.read(project,task);require('./integration-sibling').binding(this,project,task);if(old&&require('./task-continuation').closed(old))throw Error('別の子の報告は受領済みです。停止記録は残っています');const d=this.simple.preview(a,old);return finish(old?{...d,sibling:true,stoppedWarning:{id:original.id,reason:original.auto.stopped.reason,items:original.items.map(i=>({title:i.title,state:i.state}))}}:require('./integration-sibling').decorate(this,a,d,original));}return finish(this.simple.preview(a,old));}
     if(old&&(!old.complete||old.auto&&old.auto.main?.state!=='done')){
       return finish(this.resumePreview(a,old));
     }
     if(this.gitw.merging(a.target))throw Error(lt('統合先で取り込みが途中です。解消して保存してください'));
-    let items=a.all.flatMap(p=>p.tasks.filter(t=>graph.canIntegrate({project:a.p,task:a.t},p,t,a.all)).map(t=>this.details(a,p,t,undefined,this.transfer.read(p.id,t.id)?.partial&&this.transfer.read(p.id,t.id)?.handedUp?'partial':'continue')));
+    let items=a.all.flatMap(p=>p.tasks.filter(t=>graph.canIntegrate({project:a.p,task:a.t},p,t,a.all)&&!require('./task-future-hold').held(p,t,a.all)).map(t=>this.details(a,p,t,undefined,this.transfer.read(p.id,t.id)?.partial&&this.transfer.read(p.id,t.id)?.handedUp?'partial':'continue')));
     if(only){
       if(!Array.isArray(only))throw Error(lt('統合対象を確認してください'));
       const keys=new Set(only.map(key));
@@ -215,7 +232,8 @@ class TaskIntegrate {
   }
   token(value){for(const [id,x]of this.tokens)if(Date.now()-x.at>600000)this.tokens.delete(id);const token=randomUUID();this.tokens.set(token,{at:Date.now(),value});return {...value,token};}
   resumeRecord({project,task,token}){
-    const x=this.tokens.get(token),d=x?.value,r=this.read(project,task);
+    const x=this.tokens.get(token),d=x?.value,r=this.read(project,task,d?.id);
+    require('./integration-sibling').assert(this,r);
     continuation.assertNoArchive(this.dir,r);
     if(r?.auto?.mode)return this.simple.resume({project,task,token});
     if(!x||Date.now()-x.at>600000||!d.resume||d.project!==project||d.task!==task||!r?.auto?.stopped||r.id!==d.id||r.schemaVersion!==2)throw Error(lt('停止した統合の最新の記録を確認してください'));
@@ -248,6 +266,7 @@ class TaskIntegrate {
     if(x?.value?.simple)throw Error(lt('もう一度統合内容を確認してください'));
     if(!x||Date.now()-x.at>600000||confirm!==true||x.value.project!==project||x.value.task!==task)throw Error(lt('もう一度統合内容を確認してください'));
     const d=x.value,a=this.ancestor(project,task);let r=this.read(project,task);
+    require('./integration-sibling').blocked(this,r);
     if(r?.complete&&r.id===d.id)return {ok:true,complete:true,duplicate:true};
     if(!d.resume){
       if(r&&!r.complete)throw Error(lt('別の統合が始まりました。続きを確認してください'));
@@ -326,6 +345,8 @@ class TaskIntegrate {
     try { const out=this.run(r);if(r.auto){r.auto.targetHead=this.gitw.inspect(r.target)?.head;this.save(r);}return out; }catch(e){r.error=e.message;if(r.auto)r.auto.stopped={reason:e.message,at:new Date().toISOString()};this.save(r);throw e;}finally{this.active=null;}
   }
   run(r){
+    require('./integration-sibling').assert(this,r);
+    require('./task-future-hold').assertRecord(this,r);
     const a=this.ancestor(r.project,r.task);
     // 初回の予約保存が途中で止まった場合も、残りを予約してから処理する。
     for(const i of r.items){
@@ -355,16 +376,19 @@ class TaskIntegrate {
         if(i.allResults && JSON.stringify(details.files)!==JSON.stringify(i.files))throw Error(lt('途中で成果ファイルが変わりました。続きを確認してください'));
         if(!i.partial)for(const f of i.files)if((snapshot(f.path)!==f.fingerprint || f.mode!==undefined&&(fs.statSync(f.path).mode & 0o777)!==f.mode))throw Error(lt('成果ファイルが変わりました'));
         if(['待ち','衝突','解消中','検証中','取り込み済み（受領待ち）'].includes(i.state)){
-          if(i.copy){
+          if(r.stoppedSibling&&i.reportProjection&&i.integrated){
+            require('./integration-report-projection').verify(r.target,i.reportProjection,i.integrated.commit);
+            if(!this.gitw.isAncestor(r.target,i.integrated.commit))throw Error('保存済みの報告履歴が統合先にありません');
+          }else if(i.copy){
             const previousTargetHead=this.gitw.inspect(r.target)?.head;
-            const merged=this.gitw.isAncestor(r.target,i.source.head)?{ok:true,already:true,commit:this.gitw.inspect(r.target).head,files:i.preview?.paths||[]}:this.gitw.merge({targetGuard:dir=>require('./integration-safety').assertTarget(this,{target:dir,p:this.store.readProject(r.project)}),dir:i.copy,workRoot:this.removal.workRoot(p),title:`${i.task} ${i.title}`,target:r.target,cleanup:false,...(i.partial?{sourceHead:i.source?.head}:{})});
+            const merged=r.stoppedSibling&&i.reportProjection?require('./integration-report-projection').apply(this,r,i):this.gitw.isAncestor(r.target,i.source.head)?{ok:true,already:true,commit:this.gitw.inspect(r.target).head,files:i.preview?.paths||[]}:this.gitw.merge({targetGuard:dir=>require('./integration-safety').assertTarget(this,{target:dir,p:this.store.readProject(r.project)}),dir:i.copy,workRoot:this.removal.workRoot(p),title:`${i.task} ${i.title}`,target:r.target,cleanup:false,...(i.partial?{sourceHead:i.source?.head}:{})});
             if(merged.conflict){
               i.state='衝突';i.conflictPaths=merged.conflictPaths||[];i.conflictKind='content';this.save(r);
               continue;
             }
             if(!merged.ok)throw Error(merged.error);
             delete i.conflictPaths;delete i.conflictKind;i.autoResolved=merged.autoResolved||i.autoResolved;
-            i.integrated={dir:r.target,previousTargetHead,commit:merged.commit,files:merged.files,already:merged.already};i.sourceSnapshot=this.gitw.inspect(i.copy);i.sourceHead=i.partial?i.source?.head:i.sourceSnapshot.head;if(!i.partial)i.source=i.sourceSnapshot;
+            i.integrated={dir:r.target,previousTargetHead,commit:merged.commit,files:merged.files,already:merged.already,...(merged.reportProjection?{reportProjection:merged.reportProjection}:{})};i.sourceSnapshot=this.gitw.inspect(i.copy);i.sourceHead=i.partial?i.source?.head:i.sourceSnapshot.head;if(!i.partial)i.source=i.sourceSnapshot;
           }
           i.state='取り込み済み';this.save(r);
         }
@@ -388,6 +412,8 @@ class TaskIntegrate {
   }
   resultsRequest({project,task,childProject,childTask,token}) {
     const x=this.tokens.get(token),d=x?.value;
+    if(d?.sibling)throw Error('別の子の報告は保存済みの成果だけを受け取ります');
+    require('./integration-sibling').blocked(this,this.read(project,task));
     if(!d||Date.now()-x.at>600000||d.project!==project||d.task!==task||d.resume)throw Error(lt('もう一度統合内容を確認してください'));
     const a=this.ancestor(project,task),i=[...d.items,...(d.retainedItems||[])].find(i=>i.project===childProject&&i.task===childTask);
     if(!i?.needsResults&&!i?.needsRemaining)throw Error(lt('成果の整理が必要な子を確認してください'));
@@ -399,6 +425,7 @@ class TaskIntegrate {
   }
   conflictRequest({project,task,childProject,childTask,token}){
     const x=this.tokens.get(token),a=this.ancestor(project,task),r=this.read(project,task);
+    require('./integration-sibling').blocked(this,r);
     if(!x||Date.now()-x.at>600000||!x.value.resume||x.value.project!==project||x.value.task!==task||!r||r.complete||r.id!==x.value.id)throw Error(lt('もう一度統合の続きを確認してください'));
     const now=this.resumePreview(a,r);
     if(JSON.stringify(now)!==JSON.stringify(x.value))throw Error(lt('確認中に親・子・統合先・予約が変わりました'));
@@ -415,8 +442,11 @@ class TaskIntegrate {
 次：保存してこの番を終える。Hubが検証と正式受領の続きを行う。統合を再委任しない。`};
   }
   cleanupCopy(receipt){
-    const r=this.active?.id===receipt.integrating?this.active:this.read(receipt.targetProject,receipt.targetTask),i=r?.items.find(x=>x.project===receipt.project&&x.task===receipt.task);
+    const r=this.active?.id===receipt.integrating?this.active:this.read(receipt.targetProject,receipt.targetTask,receipt.integrating),i=r?.items.find(x=>x.project===receipt.project&&x.task===receipt.task);
+    require('./integration-sibling').assert(this,r);
+    if(r?.stoppedSibling)throw Error('別の子の報告を受け取る経路では片付けません');
     if(!r||r.id!==receipt.integrating||!i)throw Error(lt('統合の片付け記録が見つかりません'));
+    require('./task-future-hold').assertRecord(this,r);
     require('./integration-safety').assertTarget(this,{target:r.target,p:this.store.readProject(r.project)});
     if(!i.copy||i.copyTrashed)return;
     if(!exists(i.copy)){

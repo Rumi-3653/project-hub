@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const app=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8'),history=fs.readFileSync(path.join(__dirname,'../public/task-history.js'),'utf8');
+const app=require('./fixtures/app-source.cjs').readApp(),history=fs.readFileSync(path.join(__dirname,'../public/task-history.js'),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const turn=()=>new Promise(setImmediate);
 function browser(){

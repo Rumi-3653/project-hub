@@ -74,7 +74,7 @@ function spoolFixture({ captureFails = false } = {}) {
   const owned = { assertLaunchOwnership() {}, capture(pid) { assert.equal(pid, 92); if (captureFails) throw Error('identity unavailable'); return { pid }; },
     OwnedProcesses: class { collect() {} signal(value) { signals.push(value); throw Error('identity changed or process exited'); } } };
   const api = load('cli-spool.js', { extra: 'module.exports.testWorker = worker;', mocks: {
-    'node:fs': fakeFs,
+    './platform/file-io': fakeFs,
     './platform': { supervisorFiles: [], persistence: { syncDirectory: dir => { assert.equal(dir, '/fixture'); } } },
     [path.resolve(__dirname, '../lib/owned-processes.cjs')]: owned,
     'node:child_process': { spawn(file) { spawned.push(file); assert.equal(file, 'fixture-cli'); return cli; } }
@@ -105,7 +105,7 @@ test('Windows durable writes retain file sync and strict platform directory sync
     fsyncSync() { synced++; if (fail) throw error; }, renameSync() { renamed++; } };
   const persistence = { syncDirectory(dir) { assert.equal(dir, '/fixture'); directories++; if (failDirectory) throw Error('native directory sync failed'); } };
   const originalSync = fakeFs.fsyncSync;
-  const api = load('cli-spool.js', { mocks: { 'node:fs': fakeFs, './platform': { supervisorFiles: [], persistence } } });
+  const api = load('cli-spool.js', { mocks: { './platform/file-io': fakeFs, './platform': { supervisorFiles: [], persistence } } });
   assert.equal(fakeFs.fsyncSync, originalSync);
   api.atomic('/fixture', 'saved.json', { ok: true });
   assert.deepEqual(handles, ['wx']); assert.equal(synced, 1); assert.equal(renamed, 1); assert.equal(directories, 1);

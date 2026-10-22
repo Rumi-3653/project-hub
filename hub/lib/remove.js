@@ -2,7 +2,7 @@
 const platform = require('./platform');
 const { lt } = require('./locale');
 // 人が確認した対象だけをゴミ箱へ退避する。外の場所は明示選択と照合が必要。
-const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+const fs=require('./platform/file-io'),path=require('node:path'),os=require('node:os');
 const {randomUUID,createHash,createHmac,randomBytes}=require('node:crypto'),{execFileSync}=require('node:child_process');
 const {expandHome}=require('./store');
 const gitw=require('./git');

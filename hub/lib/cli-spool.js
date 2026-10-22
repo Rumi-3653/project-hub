@@ -2,7 +2,7 @@
 const persistence = require('./platform').persistence;
 // One detached supervisor per turn. It owns only that CLI, never Hub tasks or
 // model selection. Persisted requests contain no environment or credentials.
-const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process'),{EventEmitter}=require('node:events'),{StringDecoder}=require('node:string_decoder');
+const fs=require('./platform/file-io'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process'),{EventEmitter}=require('node:events'),{StringDecoder}=require('node:string_decoder');
 const WORKER_SOURCE=fs.readFileSync(__filename),OWNED_SOURCE=fs.readFileSync(path.join(__dirname,process.argv[2]==='--worker'?'owned-processes.cjs':'owned-processes.js'));
 const PLATFORM_SOURCE=new Map(require('./platform').supervisorFiles.map(name=>{
  if(!/^[a-z][a-z0-9-]*\.js$/.test(name))throw Error('監督のOS部品の同梱先を確認できません');

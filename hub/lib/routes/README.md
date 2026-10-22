@@ -30,7 +30,7 @@
 | taskhistorywrite | auto / cancel / rotate / summary | 既存の整理開始・取消・履歴切替・要約準備、実行権と現在の整理状況、文章担当と無料の内部依頼、応答、翻訳 |
 | taskcontinuation | recover / continue | 既存の継続復旧・開始・本文予算、現在の自動整理の呼出し、監査、応答 |
 | taskbodywrite | write | 既存の本文反映・復旧・要約、監査、応答 |
-| taskintegration | wait / mergeStatus / mergePreview / merge / handupPreview / handup / records / abandon / keep / preview / resume / apply / organize / results / resolve | 既存の取り込み・引渡し・結果整理、現在の本体取り込み進行の取得、保存先確認・送信記録・監査・無料の内部依頼 |
+| taskintegration | wait / mergeStatus / mergePreview / merge / handupPreview / handup / records / abandon / futureHold / keep / preview / resume / apply / organize / results / resolve | 既存の取り込み・引渡し・結果整理、子を残す将来保留、現在の本体取り込み進行の取得、保存先確認・送信記録・監査・無料の内部依頼 |
 | taskattachments | upload / attach | 既存の生データ読取・世代・添付実行権・保存/取消・端末入力、監査、応答 |
 | taskmanagement | acceleration / empty / tidy / create | 既存の作業加速設定・空作業整理・作業整理・作成、稼働確認、監査、応答 |
 | rolesettings | history / write / defaults / restore | 既存の無料の役割履歴・保存・既定設定・復元と版確認、応答 |

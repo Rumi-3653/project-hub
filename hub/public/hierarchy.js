@@ -7,6 +7,7 @@ function showTreeMenu(pId, tId, x, y) {
   // 表示した操作の意図を保持し、定期取得後も同じ before で競合を照合する。
   const pinBefore = !t && isProjectPinned(p.id);
   menu.innerHTML = UI.template`<button type="button" data-tree-action="rename" role="menuitem">名前の変更</button><button type="button" data-tree-action="branch" role="menuitem">同じ階層に分岐</button><button type="button" data-tree-action="child" role="menuitem">さらに子${t ? '作業' : UI.text('プロジェクト')}を作る</button><button class="danger" type="button" data-tree-action="remove" role="menuitem">削除…</button>`;
+  if(t&&ProjectOrder.ancestorsOf(p,t,state.projects).length)menu.innerHTML+=UI.template`<button type="button" data-tree-action="futurehold" ${futureHoldAttrs(t)} role="menuitem">${t.futureHold?UI.text('将来検討の保留を解除'):UI.text('将来検討として保留')}</button>`;
   if (!t && canReorderProjects()) {
     const siblings = projectSiblings(displayParent(p, state.projects)), index = siblings.findIndex(q => q.id === p.id);
     const pinned = pinBefore;
@@ -29,6 +30,7 @@ function showTreeMenu(pId, tId, x, y) {
         if (target && isProjectPinned(target) === isProjectPinned(p.id)) await saveProjectOrder(parent, before, ProjectOrder.moved(before, p.id, target, action === 'down'));
         return;
       }
+      if(action==='futurehold'){await saveFutureHold(p.id,t.id,b);return;}
       if(action==='remove') {await showRemoval(p.id,t?.id);return;}
       if (action === 'rename') {
         const name = prompt(UI.text('新しい名前（場所・作業IDは変わりません）'), t ? t.title : p.name);

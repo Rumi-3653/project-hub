@@ -2,7 +2,7 @@
 // Existing behavior and message assertions use the Japanese default contract.
 process.env.HUB_LANG = 'ja';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
-const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
+const source=require('./fixtures/app-source.cjs').readApp();
 const tools={claude:{installed:true,version:'1',models:[]},codex:{installed:true,version:'1',models:[]},agy:{installed:false,models:[]}};
 function fixture(){
  const elements=new Map(),listeners={};let scroller=null,settings=null,mainHtml='';
@@ -20,7 +20,7 @@ function fixture(){
   setInterval(){},clearInterval(){},setTimeout(){},clearTimeout(){},requestAnimationFrame:fn=>fn(),console,
   ModelOrder:require('../public/model-order'),ProjectOrder:require('../public/project-order')});
  context.window.HubChatHistory = require('../public/chat-history');
- vm.runInContext(source,context);
+ require('./fixtures/app-source.cjs').loadApp(context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/role-settings.js'),'utf8'),context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../public/app-update.js'),'utf8'),context);
  const snapshot={projects:[{id:'p',name:'Project',status:'進行中',parent:'',description:'',phases:[],tasks:[],folders:[],related:[],issues:[],chats:[]}],root:'/fixture',

@@ -1,6 +1,6 @@
 'use strict';
 const persistence = require('./platform').persistence;
-const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const fs=require('./platform/file-io'),path=require('node:path'),crypto=require('node:crypto');
 const key=(o={})=>JSON.stringify([o.project,o.task]);
 const blocked=()=>Object.assign(Error('AIは停止・保留中です。設定の［復旧］で再開を選んでください'),{code:'ai-paused'});
 function validState(d){return d?.version===1&&Number.isSafeInteger(d.epoch)&&d.epoch>=0&&typeof d.all==='boolean'&&d.tasks&&typeof d.tasks==='object'&&!Array.isArray(d.tasks)&&Object.entries(d.tasks).every(([k,t])=>t&&typeof t.project==='string'&&typeof t.task==='string'&&k===key(t)&&Number.isSafeInteger(t.epoch)&&t.epoch>=0&&typeof t.held==='boolean'&&(t.autoHeld===undefined||typeof t.autoHeld==='boolean'))&&(!d.results||Array.isArray(d.results))&&(d.restartIds===undefined||Array.isArray(d.restartIds)&&d.restartIds.every(id=>typeof id==='string'&&id.length>0&&id.length<=80));}

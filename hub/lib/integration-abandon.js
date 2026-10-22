@@ -27,6 +27,7 @@ class IntegrationAbandon {
   }
   inspect(project,task,allowArchive=false){
     const h=this.integrate,r=h.read(project,task);
+    require('./integration-sibling').blocked(h,r);
     if(!r||r.complete||r.abandoned||!r.auto?.stopped||!r.items?.length||r.auto.main||r.auto.prepared||Object.keys(r.auto.migrations||{}).length)fail();
     if(r.items.some(i=>i.receipt||i.integrated||i.merge||!['待ち','整理中'].includes(i.state)))fail();
     const attempts=Object.entries(r.auto.attempts||{});if(!attempts.length)fail();
